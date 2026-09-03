@@ -89,6 +89,17 @@ async function autoLoadLastConfig() {
 let bootstrapOk = false;
 
 async function bootstrap() {
+  // ドロワー開閉はThree.js等の初期化に依存しないため、最優先で確実にセットアップする。
+  // これより後の処理（3Dシーン初期化など）が万一失敗しても、パーツ/設定パネルの開閉だけは機能させる。
+  try {
+    setupMobileDrawers();
+  } catch (err) {
+    console.error('setupMobileDrawers()でエラー:', err);
+    if (typeof _markFailed === 'function') {
+      _markFailed('ドロワー初期化エラー: ' + (err && err.message ? err.message : String(err)));
+    }
+  }
+
   try {
     initScene();
     initCgSystem();
@@ -98,7 +109,6 @@ async function bootstrap() {
     setupViewportPicking();
     setupSaveLoadUI();
     setupAxisViewButtons();
-    setupMobileDrawers();
     await autoLoadLastConfig();
     bootstrapOk = true;
   } catch (err) {

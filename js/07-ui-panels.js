@@ -334,9 +334,19 @@ function isMobileLayout() {
 }
 
 function openDrawer(side) {
-  if (!isMobileLayout()) return;
+  if (!isMobileLayout()) {
+    console.warn('openDrawer: モバイルレイアウト判定がfalseのため何もしません（幅=' + window.innerWidth + '）');
+    if (typeof showToast === 'function') {
+      showToast('画面幅の判定によりパネルを開けませんでした（幅=' + window.innerWidth + 'px）', true);
+    }
+    return;
+  }
   const el = document.getElementById(side === 'left' ? 'left' : 'right');
   const other = document.getElementById(side === 'left' ? 'right' : 'left');
+  if (!el || !other) {
+    console.error('openDrawer: 対象要素が見つかりません', side);
+    return;
+  }
   other.classList.remove('drawer-open');
   el.classList.add('drawer-open');
   document.getElementById('drawerOverlay').classList.add('show');
@@ -349,19 +359,30 @@ function closeDrawers() {
 }
 
 function setupMobileDrawers() {
-  document.getElementById('btnTogglePartsDrawer').addEventListener('click', () => {
+  const btnParts = document.getElementById('btnTogglePartsDrawer');
+  const btnInspector = document.getElementById('btnToggleInspectorDrawer');
+  const btnCloseLeft = document.getElementById('btnCloseLeft');
+  const btnCloseRight = document.getElementById('btnCloseRight');
+  const overlay = document.getElementById('drawerOverlay');
+
+  if (!btnParts || !btnInspector || !btnCloseLeft || !btnCloseRight || !overlay) {
+    console.error('ドロワー要素が見つかりません', { btnParts, btnInspector, btnCloseLeft, btnCloseRight, overlay });
+    return;
+  }
+
+  btnParts.addEventListener('click', () => {
     const left = document.getElementById('left');
     if (left.classList.contains('drawer-open')) closeDrawers();
     else openDrawer('left');
   });
-  document.getElementById('btnToggleInspectorDrawer').addEventListener('click', () => {
+  btnInspector.addEventListener('click', () => {
     const right = document.getElementById('right');
     if (right.classList.contains('drawer-open')) closeDrawers();
     else openDrawer('right');
   });
-  document.getElementById('btnCloseLeft').addEventListener('click', closeDrawers);
-  document.getElementById('btnCloseRight').addEventListener('click', closeDrawers);
-  document.getElementById('drawerOverlay').addEventListener('click', closeDrawers);
+  btnCloseLeft.addEventListener('click', closeDrawers);
+  btnCloseRight.addEventListener('click', closeDrawers);
+  overlay.addEventListener('click', closeDrawers);
 
   // 画面回転・リサイズでデスクトップ幅に戻ったらドロワー状態をリセット
   window.addEventListener('resize', () => {
