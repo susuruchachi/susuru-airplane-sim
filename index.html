@@ -105,6 +105,14 @@
     font-size:11.5px;cursor:pointer;font-family:var(--sans);min-width:34px;
   }
   #axisViewBar button:hover{background:var(--accent-dim);color:var(--text);}
+  #btnToggleProjection{
+    position:absolute;top:76px;right:14px;
+    background:rgba(14,21,29,.9);border:1px solid var(--line);color:var(--text-dim);
+    padding:7px 11px;border-radius:8px;font-size:11.5px;cursor:pointer;font-family:var(--sans);
+    backdrop-filter:blur(6px);white-space:nowrap;
+  }
+  #btnToggleProjection:hover{border-color:var(--accent-dim);}
+  #btnToggleProjection.active{background:var(--accent-dim);color:var(--text);border-color:var(--accent);}
   #axisReadout{
     position:absolute;top:14px;left:14px;font-family:var(--mono);font-size:11px;color:var(--text-dim);
     background:rgba(14,21,29,.75);padding:8px 10px;border-radius:6px;border:1px solid var(--line);
@@ -214,6 +222,7 @@
     #axisReadout{top:8px;left:8px;font-size:10px;padding:6px 8px;}
     #axisViewBar{top:8px;right:8px;padding:3px;gap:3px;}
     #axisViewBar button{padding:5px 8px;font-size:10.5px;min-width:28px;}
+    #btnToggleProjection{top:66px;right:8px;padding:5px 9px;font-size:10.5px;}
     #gizmoModeBar{bottom:64px;padding:3px;}
     #gizmoModeBar button{padding:6px 10px;font-size:11px;}
     #versionTag{bottom:8px;left:8px;font-size:9.5px;max-width:60vw;}
@@ -226,6 +235,7 @@
     #gizmoModeBar{bottom:12px;left:auto;right:8px;transform:none;flex-direction:column;}
     #axisViewBar{grid-template-columns:repeat(2, 1fr);}
     #axisReadout{max-width:40vw;}
+    #btnToggleProjection{top:108px;} /* axisViewBarが2列×3行になり縦に伸びるため、その分下げる */
     #topbar .brand{display:none;} /* 縦画面の狭い横幅ではブランド名を省略しボタン領域を確保 */
     #topbar .sep{display:none;}
   }
@@ -298,6 +308,7 @@
       <button data-axis="top">上</button>
       <button data-axis="bottom">下</button>
     </div>
+    <button id="btnToggleProjection" title="遠近法（クリックで平行投影に切替）">⬚ 平行投影</button>
     <div id="gizmoModeBar" style="display:none;">
       <button data-mode="translate" class="active">移動</button>
       <button data-mode="rotate">回転</button>
