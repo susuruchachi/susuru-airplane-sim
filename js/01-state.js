@@ -1,7 +1,7 @@
 // 01-state.js — アプリ全体のグローバル状態
 // 番号プレフィックス方式：全モジュールはグローバルスコープを共有する
 
-const APP_VERSION = 'v2';
+const APP_VERSION = 'v3';
 
 const State = {
   // Three.js 中枢
@@ -26,6 +26,8 @@ const State = {
   parts: [],
   selectedPartId: null,
   partIdCounter: 1,
+  jointIdCounter: 1,
+  strutIdCounter: 1,
 
   // 重心（CG / 原点）— パーツとは別枠で機体に1つだけ持つ
   cg: {
@@ -46,6 +48,7 @@ const PART_TYPE_LABELS = {
   wing: '主翼／尾翼',
   control_surface: '可動翼面',
   light: '航行灯',
+  landing_gear: '着陸脚',
 };
 
 const PART_TYPE_COLORS = {
@@ -53,6 +56,7 @@ const PART_TYPE_COLORS = {
   wing: '#3fa9ff',
   control_surface: '#4fd18b',
   light: '#e0e0ff',
+  landing_gear: '#c792ea',
 };
 
 // 翼パーツの役割（主翼／水平尾翼／垂直尾翼）
@@ -80,6 +84,17 @@ const LIGHT_KINDS = [
   { value: 'strobe', label: 'ストロボ（白）', color: '#ffffff', blink: 'strobe' },
   { value: 'landing', label: '着陸灯（白）', color: '#fff6dd', blink: 'steady' },
 ];
+
+// 着陸脚の取付位置（機体の前脚／主脚 左右）
+const LANDING_GEAR_POSITIONS = [
+  { value: 'nose', label: '前脚（ノーズギア）' },
+  { value: 'main_left', label: '主脚（左）' },
+  { value: 'main_right', label: '主脚（右）' },
+  { value: 'other', label: 'その他' },
+];
+
+function genJointId() { return 'joint_' + (State.jointIdCounter++); }
+function genStrutId() { return 'strut_' + (State.strutIdCounter++); }
 
 function genPartId() {
   return 'part_' + (State.partIdCounter++);

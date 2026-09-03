@@ -27,6 +27,15 @@ function defaultPropsForType(type) {
         color: LIGHT_KINDS[0].color,
         blink: LIGHT_KINDS[0].blink,
       };
+    case 'landing_gear':
+      return {
+        gearPosition: 'nose',   // nose | main_left | main_right | other
+        deployState: 1,         // 0=格納 〜 1=展開（プレビュー用の現在値）
+        retractedAtZero: true,  // true: deployState=0が「関節角度・伸縮ともに最小」＝格納 / false: 逆
+        // 初期状態で1関節+1伸縮節を持たせ、追加直後から「折りたたみ脚」らしい見た目にする
+        joints: [{ id: genJointId(), axis: 'x', minDeg: -90, maxDeg: 0, label: '主関節' }],
+        struts: [{ id: genStrutId(), axis: 'y', minLength: 0.3, maxLength: 0.7, label: '伸縮支柱' }],
+      };
     default:
       return {};
   }
@@ -69,6 +78,164 @@ function updateWingGizmoShape(part) {
   part.gizmo.geometry = geometryForPart('wing', part.props.role);
 }
 
+// ---- 着陸脚（landing_gear）専用のギズモ構築 ----
+// 構造：基点(Group) → [関節(Group,回転) → 伸縮節(Group,軸方向移動) → 関節 → ...] → 先端の車輪的マーカー
+// joints/strutsの配列順が、そのまま基点から先端に向かうチェーンの順序になる
+const GEAR_COLOR = 0xc792ea;
+
+function disposeObject3D(obj) {
+  if (!obj) return;
+  obj.traverse(child => {
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) child.material.dispose();
+  });
+}
+
+function createJointVisual() {
+  // 回転軸を示す短い円柱＋周囲リング
+  const group = new THREE.Group();
+  const axisMesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.035, 0.035, 0.22, 10),
+    new THREE.MeshStandardMaterial({ color: GEAR_COLOR, emissive: GEAR_COLOR, emissiveIntensity: 0.35, roughness: 0.4, transparent: true, opacity: 0.92 })
+  );
+  group.add(axisMesh);
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.09, 0.012, 8, 24),
+    new THREE.MeshBasicMaterial({ color: GEAR_COLOR, transparent: true, opacity: 0.6 })
+  );
+  group.add(ring);
+  return group;
+}
+
+function createStrutVisual(length) {
+  // テレスコピック（入れ子シリンダー）風の二重円柱で伸縮節を表現
+  const group = new THREE.Group();
+  const outer = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.05, 0.05, length, 10),
+    new THREE.MeshStandardMaterial({ color: 0x8899aa, roughness: 0.3, metalness: 0.5, transparent: true, opacity: 0.85 })
+  );
+  outer.position.y = length / 2; // 基点(付け根)から+方向に伸びる形にする
+  group.add(outer);
+  const inner = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.028, 0.028, length * 0.6, 10),
+    new THREE.MeshStandardMaterial({ color: GEAR_COLOR, emissive: GEAR_COLOR, emissiveIntensity: 0.3, roughness: 0.3, metalness: 0.4, transparent: true, opacity: 0.92 })
+  );
+  inner.position.y = length * 0.8;
+  group.add(inner);
+  group.userData.isStrutVisual = true;
+  group.userData.baseLength = length;
+  return group;
+}
+
+// jointsとstrutsの定義から、実際の3D階層（基点→関節→伸縮節→関節→...→先端）を組み立てる
+// 戻り値のrootに対し、part.gizmo = root とする。各関節/伸縮節のGroupはuserDataにidと種別を持つので、
+// 展開状態プレビュー（applyDeployStateToGear）でid照合して角度・長さを反映できる
+function buildLandingGearHierarchy(props) {
+  const root = new THREE.Group();
+  root.userData.isPartGizmo = true;
+  root.userData.isLandingGearRoot = true;
+
+  // 基点マーカー（付け根の位置を示す小さな球）
+  const baseMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(0.06, 10, 10),
+    new THREE.MeshStandardMaterial({ color: GEAR_COLOR, emissive: GEAR_COLOR, emissiveIntensity: 0.4, roughness: 0.4, transparent: true, opacity: 0.9 })
+  );
+  root.add(baseMarker);
+
+  let current = root; // チェーンの末端（次のセグメントをここにぶら下げる）
+
+  // joints[i] と struts[i] を交互に、定義順（関節→伸縮節→関節→伸縮節...）でチェーンする。
+  // 数が揃っていなくても対応できるよう、長い方の配列に合わせてループする
+  const n = Math.max(props.joints.length, props.struts.length);
+  for (let i = 0; i < n; i++) {
+    const jointDef = props.joints[i];
+    if (jointDef) {
+      const jointVisual = createJointVisual();
+      jointVisual.userData.isJointVisual = true;
+      jointVisual.userData.jointId = jointDef.id;
+      current.add(jointVisual);
+      current = jointVisual;
+    }
+    const strutDef = props.struts[i];
+    if (strutDef) {
+      const len = strutDef.minLength;
+      const strutVisual = createStrutVisual(Math.max(len, 0.05));
+      strutVisual.userData.strutId = strutDef.id;
+      current.add(strutVisual);
+      current = strutVisual;
+    }
+  }
+
+  // 先端マーカー（車輪の位置目安）
+  const tip = new THREE.Mesh(
+    new THREE.SphereGeometry(0.07, 10, 10),
+    new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.7, transparent: true, opacity: 0.9 })
+  );
+  current.add(tip);
+
+  return root;
+}
+
+// 関節/伸縮節の追加・削除・軸変更のたびに呼び、gizmo階層を作り直す
+// （既存のgizmoは破棄して新規に作り直す。シーンへの追加・位置/回転/スケールの再適用は呼び出し側で行う）
+function rebuildLandingGearGizmo(part) {
+  if (part.type !== 'landing_gear') return;
+  const oldGizmo = part.gizmo;
+  const newGizmo = buildLandingGearHierarchy(part.props);
+  newGizmo.position.copy(oldGizmo.position);
+  newGizmo.rotation.copy(oldGizmo.rotation);
+  newGizmo.scale.copy(oldGizmo.scale);
+  newGizmo.userData.partId = part.id;
+
+  State.scene.add(newGizmo);
+  State.scene.remove(oldGizmo);
+  disposeObject3D(oldGizmo);
+
+  if (State.transformControls.object === oldGizmo) {
+    State.transformControls.detach();
+    State.transformControls.attach(newGizmo);
+  }
+
+  part.gizmo = newGizmo;
+  applyDeployStateToGear(part); // 現在のdeployStateを新しい階層にも反映
+}
+
+// deployState(0〜1)に応じて、各関節の角度・各伸縮節の長さを線形補間してプレビューに反映する
+function applyDeployStateToGear(part) {
+  if (part.type !== 'landing_gear' || !part.gizmo) return;
+  const t = part.props.retractedAtZero ? part.props.deployState : (1 - part.props.deployState);
+
+  part.gizmo.traverse(obj => {
+    if (obj.userData.isJointVisual) {
+      const jointDef = part.props.joints.find(j => j.id === obj.userData.jointId);
+      if (!jointDef) return;
+      const deg = THREE.MathUtils.lerp(jointDef.minDeg, jointDef.maxDeg, t);
+      const rad = THREE.MathUtils.degToRad(deg);
+      obj.rotation.set(0, 0, 0);
+      if (jointDef.axis === 'x') obj.rotation.x = rad;
+      else if (jointDef.axis === 'y') obj.rotation.y = rad;
+      else obj.rotation.z = rad;
+    }
+    if (obj.userData.isStrutVisual && obj.userData.strutId) {
+      const strutDef = part.props.struts.find(s => s.id === obj.userData.strutId);
+      if (!strutDef) return;
+      const len = Math.max(THREE.MathUtils.lerp(strutDef.minLength, strutDef.maxLength, t), 0.05);
+      // outer/inner の2子メッシュを長さに応じて再配置（createStrutVisualと対になるジオメトリ再生成）
+      const outer = obj.children[0], inner = obj.children[1];
+      if (outer) {
+        outer.geometry.dispose();
+        outer.geometry = new THREE.CylinderGeometry(0.05, 0.05, len, 10);
+        outer.position.y = len / 2;
+      }
+      if (inner) {
+        inner.geometry.dispose();
+        inner.geometry = new THREE.CylinderGeometry(0.028, 0.028, len * 0.6, 10);
+        inner.position.y = len * 0.8;
+      }
+    }
+  });
+}
+
 function addPart(type, position) {
   if (!State.model.root) {
     showToast('先に機体モデルを読み込んでください', true);
@@ -80,7 +247,9 @@ function addPart(type, position) {
     ? `${WING_ROLES.find(r => r.value === props.role)?.label || '主翼'} ${State.parts.filter(p => p.type === 'wing' && p.props.role === props.role).length + 1}`
     : `${PART_TYPE_LABELS[type]} ${State.parts.filter(p => p.type === type).length + 1}`;
 
-  const gizmoMesh = createPartGizmoMesh(type, props.role);
+  const gizmoMesh = type === 'landing_gear'
+    ? buildLandingGearHierarchy(props)
+    : createPartGizmoMesh(type, props.role);
   const pos = position || defaultSpawnPosition();
   gizmoMesh.position.copy(pos);
   State.scene.add(gizmoMesh);
@@ -116,6 +285,7 @@ function removePart(id) {
       State.transformControls.detach();
     }
     State.scene.remove(part.gizmo);
+    disposeObject3D(part.gizmo);
   }
   State.parts.splice(idx, 1);
   if (State.selectedPartId === id) {
@@ -128,7 +298,10 @@ function removePart(id) {
 function clearAllParts() {
   State.transformControls.detach();
   for (const p of State.parts) {
-    if (p.gizmo) State.scene.remove(p.gizmo);
+    if (p.gizmo) {
+      State.scene.remove(p.gizmo);
+      disposeObject3D(p.gizmo);
+    }
   }
   State.parts = [];
   State.selectedPartId = null;
@@ -181,11 +354,11 @@ function applyPartToGizmo(part) {
 }
 
 // パーツをX軸反転（機体中心線=X0を挟んで鏡像）した複製を作る
-// 対象: engine / wing（主翼・水平尾翼・垂直尾翼） / control_surface / light
+// 対象: engine / wing（主翼・水平尾翼・垂直尾翼） / control_surface / light / landing_gear
 // 中心線付近（X≈0）のパーツはmirrorPart内でその旨を警告する（複製自体は行う。双垂直尾翼など中心以外に置くケースもあるため一律には除外しない）
 function canMirrorPart(part) {
   if (!part) return false;
-  if (!['engine', 'wing', 'control_surface', 'light'].includes(part.type)) return false;
+  if (!['engine', 'wing', 'control_surface', 'light', 'landing_gear'].includes(part.type)) return false;
   return true;
 }
 
@@ -201,11 +374,21 @@ function mirrorPart(id) {
   const mirroredProps = JSON.parse(JSON.stringify(src.props));
   if (mirroredProps.side === 'left') mirroredProps.side = 'right';
   else if (mirroredProps.side === 'right') mirroredProps.side = 'left';
+  if (mirroredProps.gearPosition === 'main_left') mirroredProps.gearPosition = 'main_right';
+  else if (mirroredProps.gearPosition === 'main_right') mirroredProps.gearPosition = 'main_left';
+
+  // 着陸脚は関節/伸縮節のidを複製先で振り直す（gizmo階層のuserData参照とprops配列の対応がずれないように）
+  if (src.type === 'landing_gear') {
+    mirroredProps.joints = mirroredProps.joints.map(j => ({ ...j, id: genJointId() }));
+    mirroredProps.struts = mirroredProps.struts.map(s => ({ ...s, id: genStrutId() }));
+  }
 
   const baseName = src.name.replace(/（ミラー）$/, '');
   const name = `${baseName}（ミラー）`;
 
-  const gizmoMesh = createPartGizmoMesh(src.type, mirroredProps.role);
+  const gizmoMesh = src.type === 'landing_gear'
+    ? buildLandingGearHierarchy(mirroredProps)
+    : createPartGizmoMesh(src.type, mirroredProps.role);
   gizmoMesh.position.set(-src.position.x, src.position.y, src.position.z);
   // 鏡像変換：X軸まわりの回転はそのまま、Y・Z軸まわりの回転は符号反転
   gizmoMesh.rotation.set(
@@ -237,11 +420,22 @@ function mirrorPart(id) {
 function rebuildPartsFromSaved(savedParts) {
   clearAllParts();
   let maxIdNum = 0;
+  let maxJointNum = 0;
+  let maxStrutNum = 0;
   for (const sp of savedParts) {
     const props = { ...sp.props };
     if (sp.type === 'wing' && !props.role) props.role = 'main'; // 旧データ互換（role未設定→主翼扱い）
+    if (sp.type === 'landing_gear') {
+      // 旧データ互換（着陸脚の概念が無かった頃のデータには存在しないため、無ければ空配列で補う）
+      if (!props.joints) props.joints = [];
+      if (!props.struts) props.struts = [];
+      if (props.deployState === undefined) props.deployState = 1;
+      if (props.retractedAtZero === undefined) props.retractedAtZero = true;
+    }
 
-    const gizmoMesh = createPartGizmoMesh(sp.type, props.role);
+    const gizmoMesh = sp.type === 'landing_gear'
+      ? buildLandingGearHierarchy(props)
+      : createPartGizmoMesh(sp.type, props.role);
     gizmoMesh.position.set(sp.position.x, sp.position.y, sp.position.z);
     gizmoMesh.rotation.set(
       THREE.MathUtils.degToRad(sp.rotation.x),
@@ -259,10 +453,23 @@ function rebuildPartsFromSaved(savedParts) {
       gizmo: gizmoMesh,
     };
     State.parts.push(part);
+    if (sp.type === 'landing_gear') applyDeployStateToGear(part);
 
     const numPart = parseInt(sp.id.replace('part_', ''), 10);
     if (!isNaN(numPart) && numPart > maxIdNum) maxIdNum = numPart;
+    if (sp.type === 'landing_gear') {
+      for (const j of props.joints) {
+        const n = parseInt(String(j.id).replace('joint_', ''), 10);
+        if (!isNaN(n) && n > maxJointNum) maxJointNum = n;
+      }
+      for (const s of props.struts) {
+        const n = parseInt(String(s.id).replace('strut_', ''), 10);
+        if (!isNaN(n) && n > maxStrutNum) maxStrutNum = n;
+      }
+    }
   }
   State.partIdCounter = maxIdNum + 1;
+  State.jointIdCounter = maxJointNum + 1;
+  State.strutIdCounter = maxStrutNum + 1;
   renderPartList();
 }

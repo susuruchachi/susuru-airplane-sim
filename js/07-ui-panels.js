@@ -338,7 +338,192 @@ function renderTypeSpecificFields(part) {
     });
     document.getElementById('fBlink').addEventListener('change', (e) => { part.props.blink = e.target.value; });
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
+
+  } else if (part.type === 'landing_gear') {
+    renderLandingGearFields(container, part);
   }
+}
+
+// 着陸脚：取付位置・関節（折りたたみ角度）・伸縮節（シリンダー式伸縮）・展開/格納テストスライダー
+function renderLandingGearFields(container, part) {
+  const jointsHtml = part.props.joints.map((j, i) => `
+    <div class="joint-strut-row" data-kind="joint" data-id="${j.id}">
+      <div class="joint-strut-head">
+        <span>関節 ${i + 1}</span>
+        <span class="del" data-action="removeJoint" data-id="${j.id}" title="削除">✕</span>
+      </div>
+      <div class="field">
+        <label>名前</label>
+        <input type="text" data-field="label" data-id="${j.id}" value="${escapeHtml(j.label)}">
+      </div>
+      <div class="field">
+        <label>回転軸（ローカル座標）</label>
+        <select data-field="axis" data-id="${j.id}">
+          <option value="x" ${j.axis === 'x' ? 'selected' : ''}>X軸</option>
+          <option value="y" ${j.axis === 'y' ? 'selected' : ''}>Y軸</option>
+          <option value="z" ${j.axis === 'z' ? 'selected' : ''}>Z軸</option>
+        </select>
+      </div>
+      <div class="row3" style="grid-template-columns:1fr 1fr;">
+        <div class="num-field">
+          <span class="axis-label">格納側角度(°)</span>
+          <input type="number" step="1" data-field="minDeg" data-id="${j.id}" value="${j.minDeg}">
+        </div>
+        <div class="num-field">
+          <span class="axis-label">展開側角度(°)</span>
+          <input type="number" step="1" data-field="maxDeg" data-id="${j.id}" value="${j.maxDeg}">
+        </div>
+      </div>
+    </div>
+  `).join('');
+
+  const strutsHtml = part.props.struts.map((s, i) => `
+    <div class="joint-strut-row" data-kind="strut" data-id="${s.id}">
+      <div class="joint-strut-head">
+        <span>伸縮節 ${i + 1}</span>
+        <span class="del" data-action="removeStrut" data-id="${s.id}" title="削除">✕</span>
+      </div>
+      <div class="field">
+        <label>名前</label>
+        <input type="text" data-field="label" data-id="${s.id}" value="${escapeHtml(s.label)}">
+      </div>
+      <div class="row3" style="grid-template-columns:1fr 1fr;">
+        <div class="num-field">
+          <span class="axis-label">格納側長さ(m)</span>
+          <input type="number" step="0.05" data-field="minLength" data-id="${s.id}" value="${s.minLength}">
+        </div>
+        <div class="num-field">
+          <span class="axis-label">展開側長さ(m)</span>
+          <input type="number" step="0.05" data-field="maxLength" data-id="${s.id}" value="${s.maxLength}">
+        </div>
+      </div>
+    </div>
+  `).join('');
+
+  container.innerHTML = `
+    <div class="subgroup-title">着陸脚の設定</div>
+    <div class="field">
+      <label>取付位置</label>
+      <select id="fGearPosition">
+        ${LANDING_GEAR_POSITIONS.map(p => `<option value="${p.value}" ${part.props.gearPosition === p.value ? 'selected' : ''}>${p.label}</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="divider"></div>
+    <div class="subgroup-title">展開／格納テスト</div>
+    <div class="field">
+      <label>格納 ← → 展開（プレビュー）</label>
+      <input type="range" id="fDeployState" min="0" max="1" step="0.01" value="${part.props.deployState}" style="width:100%;">
+    </div>
+    <div class="hint" id="deployStateReadout" style="margin-top:-4px;">${(part.props.deployState * 100).toFixed(0)}% 展開</div>
+    <div style="display:flex;gap:6px;margin-top:8px;">
+      <button class="btn-danger-outline" id="btnDeployFull" style="color:var(--ok);border-color:#1f4a35;flex:1;">全展開</button>
+      <button class="btn-danger-outline" id="btnDeployZero" style="color:var(--text-dim);flex:1;">全格納</button>
+    </div>
+    <div class="hint" style="margin-top:8px;">「格納側」「展開側」の角度・長さは、上のスライダーが0（格納側）〜1（展開側）で線形に補間されます。実際の格納方向がスライダーと逆に感じる場合は、下の反転スイッチをオンにしてください。</div>
+    <div class="toggle-row" style="margin-top:6px;">
+      <label>スライダー0＝格納として扱う</label>
+      <label class="switch">
+        <input type="checkbox" id="fRetractedAtZero" ${part.props.retractedAtZero ? 'checked' : ''}>
+        <span class="slider-toggle"></span>
+      </label>
+    </div>
+
+    <div class="divider"></div>
+    <div class="subgroup-title">関節（折りたたみ軸）</div>
+    <div id="jointsList">${jointsHtml || '<div class="hint">まだ関節がありません。</div>'}</div>
+    <button class="btn-danger-outline" id="btnAddJoint" style="color:var(--accent);border-color:var(--accent-dim);margin-top:6px;">＋ 関節を追加</button>
+
+    <div class="divider"></div>
+    <div class="subgroup-title">伸縮節（シリンダー式）</div>
+    <div id="strutsList">${strutsHtml || '<div class="hint">まだ伸縮節がありません。</div>'}</div>
+    <button class="btn-danger-outline" id="btnAddStrut" style="color:var(--accent);border-color:var(--accent-dim);margin-top:6px;">＋ 伸縮節を追加</button>
+
+    <div class="hint" style="margin-top:10px;">関節と伸縮節は、追加した順に基点から先端へ交互につながります（関節→伸縮節→関節…）。並び順を変えたい場合は一度削除して追加し直してください。</div>
+
+    <div class="divider"></div>
+    <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
+  `;
+
+  document.getElementById('fGearPosition').addEventListener('change', (e) => {
+    part.props.gearPosition = e.target.value;
+  });
+
+  const deploySlider = document.getElementById('fDeployState');
+  deploySlider.addEventListener('input', (e) => {
+    part.props.deployState = parseFloat(e.target.value);
+    document.getElementById('deployStateReadout').textContent = `${(part.props.deployState * 100).toFixed(0)}% 展開`;
+    applyDeployStateToGear(part);
+  });
+  document.getElementById('btnDeployFull').addEventListener('click', () => {
+    part.props.deployState = 1;
+    deploySlider.value = 1;
+    document.getElementById('deployStateReadout').textContent = '100% 展開';
+    applyDeployStateToGear(part);
+  });
+  document.getElementById('btnDeployZero').addEventListener('click', () => {
+    part.props.deployState = 0;
+    deploySlider.value = 0;
+    document.getElementById('deployStateReadout').textContent = '0% 展開';
+    applyDeployStateToGear(part);
+  });
+  document.getElementById('fRetractedAtZero').addEventListener('change', (e) => {
+    part.props.retractedAtZero = e.target.checked;
+    applyDeployStateToGear(part);
+  });
+
+  container.querySelectorAll('[data-kind="joint"] [data-field]').forEach(input => {
+    input.addEventListener('change', (e) => {
+      const jointId = e.target.dataset.id;
+      const field = e.target.dataset.field;
+      const joint = part.props.joints.find(j => j.id === jointId);
+      if (!joint) return;
+      if (field === 'label') joint.label = e.target.value;
+      else if (field === 'axis') joint.axis = e.target.value;
+      else joint[field] = parseFloat(e.target.value) || 0;
+      applyDeployStateToGear(part);
+    });
+  });
+  container.querySelectorAll('[data-kind="strut"] [data-field]').forEach(input => {
+    input.addEventListener('change', (e) => {
+      const strutId = e.target.dataset.id;
+      const field = e.target.dataset.field;
+      const strut = part.props.struts.find(s => s.id === strutId);
+      if (!strut) return;
+      if (field === 'label') strut.label = e.target.value;
+      else strut[field] = parseFloat(e.target.value) || 0;
+      applyDeployStateToGear(part);
+    });
+  });
+  container.querySelectorAll('[data-action="removeJoint"]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      part.props.joints = part.props.joints.filter(j => j.id !== e.target.dataset.id);
+      rebuildLandingGearGizmo(part);
+      renderInspector();
+    });
+  });
+  container.querySelectorAll('[data-action="removeStrut"]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      part.props.struts = part.props.struts.filter(s => s.id !== e.target.dataset.id);
+      rebuildLandingGearGizmo(part);
+      renderInspector();
+    });
+  });
+
+  document.getElementById('btnAddJoint').addEventListener('click', () => {
+    part.props.joints.push({ id: genJointId(), axis: 'x', minDeg: -90, maxDeg: 0, label: `関節 ${part.props.joints.length + 1}` });
+    rebuildLandingGearGizmo(part);
+    renderInspector();
+  });
+  document.getElementById('btnAddStrut').addEventListener('click', () => {
+    part.props.struts.push({ id: genStrutId(), axis: 'y', minLength: 0.3, maxLength: 0.7, label: `伸縮節 ${part.props.struts.length + 1}` });
+    rebuildLandingGearGizmo(part);
+    renderInspector();
+  });
+
+  document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
 }
 
 function updatePartGizmoColor(part) {
