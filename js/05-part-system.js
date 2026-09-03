@@ -181,13 +181,11 @@ function applyPartToGizmo(part) {
 }
 
 // パーツをX軸反転（機体中心線=X0を挟んで鏡像）した複製を作る
-// 対象: engine / wing（主翼・水平尾翼） / control_surface / light
-// vtail（垂直尾翼）や side=center のパーツは中心配置が前提のため対象外とする
+// 対象: engine / wing（主翼・水平尾翼・垂直尾翼） / control_surface / light
+// 中心線付近（X≈0）のパーツはmirrorPart内でその旨を警告する（複製自体は行う。双垂直尾翼など中心以外に置くケースもあるため一律には除外しない）
 function canMirrorPart(part) {
   if (!part) return false;
   if (!['engine', 'wing', 'control_surface', 'light'].includes(part.type)) return false;
-  if (part.type === 'wing' && part.props.role === 'vtail') return false;
-  if (part.type === 'wing' && part.props.side === 'center') return false;
   return true;
 }
 

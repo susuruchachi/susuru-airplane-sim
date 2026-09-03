@@ -111,9 +111,10 @@ function updateAxisReadout() {
 
 // ---- 軸方向ビュー（前後/左右/上下からの正投影的な見た目のパースビュー） ----
 // 機体モデルの中心を基準に、各軸の遠方からtargetを見る形でカメラを配置する
+// 機体のローカル座標系は機首が-Z方向という一般的な3D慣習に合わせている（front=-Z側から見る＝機首を正面に見る）
 const AXIS_VIEW_DIRS = {
-  front: { vec: [0, 0, 1], label: '前' },
-  back:  { vec: [0, 0, -1], label: '後' },
+  front: { vec: [0, 0, -1], label: '前' },
+  back:  { vec: [0, 0, 1], label: '後' },
   left:  { vec: [-1, 0, 0], label: '左' },
   right: { vec: [1, 0, 0], label: '右' },
   top:   { vec: [0, 1, 0], label: '上' },
