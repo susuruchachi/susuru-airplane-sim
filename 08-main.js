@@ -82,13 +82,18 @@ async function autoLoadLastConfig() {
 }
 
 async function bootstrap() {
-  initScene();
-  setupModelLoaderUI();
-  setupPartTypeButtons();
-  setupGizmoUI();
-  setupViewportPicking();
-  setupSaveLoadUI();
-  await autoLoadLastConfig();
+  try {
+    initScene();
+    setupModelLoaderUI();
+    setupPartTypeButtons();
+    setupGizmoUI();
+    setupViewportPicking();
+    setupSaveLoadUI();
+    await autoLoadLastConfig();
+  } catch (err) {
+    console.error('初期化中にエラーが発生しました:', err);
+    showToast('初期化に失敗しました。コンソールを確認してください', true);
+  }
 }
 
 bootstrap();
