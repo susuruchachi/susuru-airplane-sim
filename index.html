@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flight Sim Builder — 機体設定 v1</title>
+<style>
+  :root{
+    --bg:#0b1016;
+    --panel:#121a24;
+    --panel-2:#0e151d;
+    --line:#233042;
+    --text:#dbe6f0;
+    --text-dim:#7f93a8;
+    --accent:#3fa9ff;
+    --accent-dim:#1c4a6e;
+    --warn:#ff9f40;
+    --ok:#4fd18b;
+    --danger:#ff5d5d;
+    --mono: 'SF Mono', 'Consolas', 'Menlo', monospace;
+    --sans: -apple-system, 'Hiragino Sans', 'Yu Gothic', 'Segoe UI', sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);overflow:hidden;}
+  #app{display:grid;grid-template-columns:340px 1fr 320px;grid-template-rows:48px 1fr;height:100%;}
+
+  /* Top bar */
+  #topbar{grid-column:1/4;grid-row:1;display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel-2);border-bottom:1px solid var(--line);}
+  #topbar .brand{font-weight:600;letter-spacing:.02em;font-size:14px;color:var(--text);white-space:nowrap;}
+  #topbar .brand span{color:var(--accent);}
+  #topbar .sep{width:1px;height:22px;background:var(--line);}
+  #topbar button{
+    background:transparent;border:1px solid var(--line);color:var(--text);
+    padding:6px 12px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:var(--sans);
+    display:flex;align-items:center;gap:6px;transition:border-color .15s, background .15s;
+  }
+  #topbar button:hover{border-color:var(--accent-dim);background:#0f1822;}
+  #topbar button.primary{background:var(--accent);border-color:var(--accent);color:#04121e;font-weight:600;}
+  #topbar button.primary:hover{background:#5cb8ff;}
+  #topbar .spacer{flex:1;}
+  #saveStatus{font-size:11.5px;color:var(--text-dim);font-family:var(--mono);white-space:nowrap;}
+  input[type=file]{display:none;}
+
+  /* Left: hierarchy / part list */
+  #left{grid-column:1;grid-row:2;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden;}
+  #left .section-title{padding:12px 14px 8px;font-size:11px;letter-spacing:.04em;color:var(--text-dim);text-transform:uppercase;}
+  #modelInfo{padding:0 14px 12px;font-size:12px;color:var(--text-dim);border-bottom:1px solid var(--line);padding-bottom:14px;}
+  #modelInfo .name{color:var(--text);font-size:13px;margin-bottom:2px;}
+  #partTypeButtons{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:10px 14px;border-bottom:1px solid var(--line);}
+  #partTypeButtons button{
+    background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+    padding:8px 6px;border-radius:6px;font-size:11.5px;cursor:pointer;font-family:var(--sans);
+    display:flex;flex-direction:column;align-items:center;gap:3px;line-height:1.3;
+  }
+  #partTypeButtons button:hover{border-color:var(--accent-dim);}
+  #partTypeButtons button .ico{font-size:15px;}
+  #partList{flex:1;overflow-y:auto;padding:6px 8px;}
+  .part-row{
+    display:flex;align-items:center;gap:8px;padding:8px 8px;border-radius:6px;cursor:pointer;
+    font-size:12.5px;margin-bottom:2px;border:1px solid transparent;
+  }
+  .part-row:hover{background:var(--panel-2);}
+  .part-row.selected{background:#132335;border-color:var(--accent-dim);}
+  .part-row .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+  .part-row .label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .part-row .type{color:var(--text-dim);font-size:10.5px;font-family:var(--mono);}
+  .part-row .del{color:var(--text-dim);font-size:14px;padding:0 4px;opacity:0;}
+  .part-row:hover .del{opacity:1;}
+  .part-row .del:hover{color:var(--danger);}
+  #partList .empty{color:var(--text-dim);font-size:12px;padding:20px 12px;text-align:center;line-height:1.6;}
+
+  /* Center: viewport */
+  #center{grid-column:2;grid-row:2;position:relative;background:#000;overflow:hidden;}
+  #viewport{width:100%;height:100%;display:block;}
+  #dropHint{
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    flex-direction:column;gap:10px;pointer-events:none;color:var(--text-dim);
+    background:radial-gradient(ellipse at center, rgba(20,30,42,.4), rgba(0,0,0,.7));
+  }
+  #dropHint .big{font-size:15px;color:var(--text);}
+  #dropHint .small{font-size:12px;}
+  #dropHint.hidden{display:none;}
+  #gizmoModeBar{
+    position:absolute;bottom:16px;left:50%;transform:translateX(-50%);
+    display:flex;gap:4px;background:rgba(14,21,29,.9);border:1px solid var(--line);
+    border-radius:8px;padding:4px;backdrop-filter:blur(6px);
+  }
+  #gizmoModeBar button{
+    background:transparent;border:none;color:var(--text-dim);padding:7px 12px;border-radius:6px;
+    font-size:12px;cursor:pointer;font-family:var(--sans);
+  }
+  #gizmoModeBar button.active{background:var(--accent-dim);color:var(--text);}
+  #axisReadout{
+    position:absolute;top:14px;left:14px;font-family:var(--mono);font-size:11px;color:var(--text-dim);
+    background:rgba(14,21,29,.75);padding:8px 10px;border-radius:6px;border:1px solid var(--line);
+    line-height:1.6;pointer-events:none;
+  }
+  #axisReadout .row{display:flex;gap:8px;}
+  #axisReadout .axis-x{color:#ff6b6b;} #axisReadout .axis-y{color:#5cd65c;} #axisReadout .axis-z{color:#5c9cff;}
+
+  /* Right: inspector */
+  #right{grid-column:3;grid-row:2;background:var(--panel);border-left:1px solid var(--line);overflow-y:auto;}
+  #inspector{padding:14px;}
+  #inspector .section-title{font-size:11px;letter-spacing:.04em;color:var(--text-dim);text-transform:uppercase;margin:0 0 10px;}
+  #inspector .empty{color:var(--text-dim);font-size:12.5px;line-height:1.7;padding-top:8px;}
+  .field{margin-bottom:12px;}
+  .field label{display:block;font-size:11.5px;color:var(--text-dim);margin-bottom:5px;}
+  .field input[type=text], .field select{
+    width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+    padding:7px 9px;border-radius:6px;font-size:12.5px;font-family:var(--sans);
+  }
+  .field input[type=text]:focus, .field select:focus{outline:none;border-color:var(--accent-dim);}
+  .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;}
+  .num-field{display:flex;flex-direction:column;gap:3px;}
+  .num-field .axis-label{font-size:10px;font-family:var(--mono);text-align:center;}
+  .num-field .axis-label.x{color:#ff6b6b;} .num-field .axis-label.y{color:#5cd65c;} .num-field .axis-label.z{color:#5c9cff;}
+  .num-field input{
+    width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+    padding:6px 4px;border-radius:5px;font-size:12px;text-align:center;font-family:var(--mono);
+  }
+  .num-field input:focus{outline:none;border-color:var(--accent-dim);}
+  .divider{height:1px;background:var(--line);margin:16px 0;}
+  .subgroup-title{font-size:12px;color:var(--text);margin:0 0 10px;font-weight:600;}
+  .hint{font-size:11px;color:var(--text-dim);line-height:1.6;margin-top:4px;}
+  .toggle-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+  .toggle-row label{font-size:12px;color:var(--text);}
+  .switch{position:relative;width:36px;height:20px;flex-shrink:0;}
+  .switch input{opacity:0;width:0;height:0;}
+  .slider-toggle{position:absolute;inset:0;background:var(--panel-2);border:1px solid var(--line);border-radius:20px;cursor:pointer;transition:.15s;}
+  .slider-toggle:before{content:"";position:absolute;width:14px;height:14px;left:2px;top:2px;background:var(--text-dim);border-radius:50%;transition:.15s;}
+  input:checked + .slider-toggle{background:var(--accent-dim);border-color:var(--accent);}
+  input:checked + .slider-toggle:before{transform:translateX(16px);background:var(--accent);}
+  .color-swatch-row{display:flex;gap:6px;}
+  .color-swatch{width:26px;height:26px;border-radius:6px;border:2px solid transparent;cursor:pointer;flex-shrink:0;}
+  .color-swatch.active{border-color:#fff;}
+  .btn-danger-outline{
+    width:100%;background:transparent;border:1px solid #4a2a2a;color:var(--danger);
+    padding:8px;border-radius:6px;font-size:12px;cursor:pointer;font-family:var(--sans);margin-top:6px;
+  }
+  .btn-danger-outline:hover{background:#231414;}
+  ::-webkit-scrollbar{width:9px;height:9px;}
+  ::-webkit-scrollbar-track{background:transparent;}
+  ::-webkit-scrollbar-thumb{background:#233042;border-radius:5px;}
+  ::-webkit-scrollbar-thumb:hover{background:#2d3f56;}
+
+  #toast{
+    position:fixed;bottom:70px;left:50%;transform:translateX(-50%) translateY(10px);
+    background:#152030;border:1px solid var(--line);color:var(--text);padding:9px 16px;border-radius:7px;
+    font-size:12.5px;opacity:0;pointer-events:none;transition:opacity .2s, transform .2s;z-index:999;
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="topbar">
+    <div class="brand">FLIGHT SIM <span>BUILDER</span></div>
+    <div class="sep"></div>
+    <button id="btnLoadModel">機体モデルを読込</button>
+    <button id="btnSaveConfig" class="primary">保存</button>
+    <button id="btnLoadSaved">保存済みを開く</button>
+    <div class="spacer"></div>
+    <span id="saveStatus"></span>
+  </div>
+
+  <div id="left">
+    <div class="section-title">機体</div>
+    <div id="modelInfo">
+      <div class="name">モデル未読込</div>
+      <div id="modelMeta">GLB / GLTFファイルを読み込んでください</div>
+    </div>
+
+    <div class="section-title" style="padding-bottom:0;">パーツを追加</div>
+    <div id="partTypeButtons">
+      <button data-type="engine"><span class="ico">◎</span>エンジン</button>
+      <button data-type="wing"><span class="ico">▱</span>主翼</button>
+      <button data-type="control_surface"><span class="ico">◧</span>可動翼面</button>
+      <button data-type="light"><span class="ico">✦</span>航行灯</button>
+    </div>
+
+    <div class="section-title">パーツ一覧</div>
+    <div id="partList"><div class="empty">まだパーツがありません。<br>上のボタンでモデル上に配置してください。</div></div>
+  </div>
+
+  <div id="center">
+    <canvas id="viewport"></canvas>
+    <div id="dropHint">
+      <div class="big">機体モデル（.glb / .gltf）をドラッグ＆ドロップ</div>
+      <div class="small">またはツールバーの「機体モデルを読込」から選択</div>
+    </div>
+    <div id="axisReadout" style="display:none;"></div>
+    <div id="gizmoModeBar" style="display:none;">
+      <button data-mode="translate" class="active">移動</button>
+      <button data-mode="rotate">回転</button>
+      <button data-mode="scale">拡縮</button>
+    </div>
+  </div>
+
+  <div id="right">
+    <div id="inspector">
+      <div class="section-title">プロパティ</div>
+      <div class="empty">左のパーツ一覧、またはビューポート内のパーツをクリックして選択してください。</div>
+    </div>
+  </div>
+
+</div>
+
+<input type="file" id="fileInput" accept=".glb,.gltf">
+<div id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/examples/js/controls/TransformControls.js"></script>
+
+<script src="js/01-state.js"></script>
+<script src="js/02-storage.js"></script>
+<script src="js/03-scene-setup.js"></script>
+<script src="js/04-model-loader.js"></script>
+<script src="js/05-part-system.js"></script>
+<script src="js/06-gizmo.js"></script>
+<script src="js/07-ui-panels.js"></script>
+<script src="js/08-main.js"></script>
+</body>
+</html>
