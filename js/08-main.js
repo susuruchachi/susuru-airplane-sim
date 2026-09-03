@@ -109,6 +109,7 @@ async function bootstrap() {
     setupViewportPicking();
     setupSaveLoadUI();
     setupAxisViewButtons();
+    setupCameraProjectionToggle();
     await autoLoadLastConfig();
     bootstrapOk = true;
   } catch (err) {

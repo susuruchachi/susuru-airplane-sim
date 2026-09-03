@@ -15,10 +15,14 @@ function initScene() {
   State.scene.background = new THREE.Color(0x0b1016);
   State.scene.fog = new THREE.Fog(0x0b1016, 40, 220);
 
-  State.camera = new THREE.PerspectiveCamera(
+  State.cameraMode = 'perspective'; // perspective | orthographic
+  State.perspectiveCamera = new THREE.PerspectiveCamera(
     50, centerEl.clientWidth / centerEl.clientHeight, 0.05, 2000
   );
-  State.camera.position.set(6, 4, 8);
+  State.perspectiveCamera.position.set(6, 4, 8);
+  State.orthoCamera = createOrthoCamera(centerEl.clientWidth / centerEl.clientHeight);
+  State.orthoCamera.position.set(6, 4, 8);
+  State.camera = State.perspectiveCamera;
 
   // ライティング
   const hemi = new THREE.HemisphereLight(0x8fb3d9, 0x1a1410, 0.9);
@@ -78,11 +82,86 @@ function initScene() {
   animate();
 }
 
+// 直交投影カメラを、現在の透視投影カメラの画角相当の表示範囲になるよう生成する
+function createOrthoCamera(aspect) {
+  const frustumHalfHeight = 5; // 初期の表示半高（切替時にsyncOrthoFrustumToDistanceで実距離に合わせ直す）
+  const cam = new THREE.OrthographicCamera(
+    -frustumHalfHeight * aspect, frustumHalfHeight * aspect,
+    frustumHalfHeight, -frustumHalfHeight,
+    0.05, 2000
+  );
+  return cam;
+}
+
+// 直交投影カメラのフラスタム半高を、現在のカメラ〜target距離とパースの画角から逆算して合わせる
+// （切替時に「同じくらいの大きさで見える」ようにするための調整）
+function syncOrthoFrustumToDistance() {
+  const dist = State.perspectiveCamera.position.distanceTo(State.orbitControls.target);
+  const vFovRad = THREE.MathUtils.degToRad(State.perspectiveCamera.fov);
+  const halfHeight = Math.tan(vFovRad / 2) * dist;
+  const aspect = State.orthoCamera.right !== State.orthoCamera.left
+    ? (State.orthoCamera.right - State.orthoCamera.left) / (State.orthoCamera.top - State.orthoCamera.bottom)
+    : 1;
+  State.orthoCamera.top = halfHeight;
+  State.orthoCamera.bottom = -halfHeight;
+  State.orthoCamera.left = -halfHeight * aspect;
+  State.orthoCamera.right = halfHeight * aspect;
+  State.orthoCamera.updateProjectionMatrix();
+}
+
+// 遠近法（パース）⇔ 平行投影（オルソ）の切替
+// 位置・向き・OrbitControlsのtargetは引き継ぎ、見た目の大きさもできるだけ揃える
+function toggleCameraProjection() {
+  const fromCam = State.camera;
+  const toCam = State.cameraMode === 'perspective' ? State.orthoCamera : State.perspectiveCamera;
+
+  toCam.position.copy(fromCam.position);
+  toCam.quaternion.copy(fromCam.quaternion);
+  toCam.up.copy(fromCam.up);
+
+  if (toCam.isOrthographicCamera) {
+    syncOrthoFrustumToDistance();
+  }
+
+  State.camera = toCam;
+  State.cameraMode = State.cameraMode === 'perspective' ? 'orthographic' : 'perspective';
+
+  // OrbitControls / TransformControls の対象カメラを差し替える
+  State.orbitControls.object = State.camera;
+  State.transformControls.camera = State.camera;
+
+  onWindowResize(); // アスペクト比・投影行列を現在のcanvasサイズで再計算
+  updateCameraModeButton();
+}
+
+function updateCameraModeButton() {
+  const btn = document.getElementById('btnToggleProjection');
+  if (!btn) return;
+  const isOrtho = State.cameraMode === 'orthographic';
+  btn.classList.toggle('active', isOrtho);
+  btn.title = isOrtho ? '平行投影（クリックで遠近法に戻す）' : '遠近法（クリックで平行投影に切替）';
+}
+
+function setupCameraProjectionToggle() {
+  const btn = document.getElementById('btnToggleProjection');
+  if (!btn) return;
+  btn.addEventListener('click', toggleCameraProjection);
+  updateCameraModeButton();
+}
+
 function onWindowResize() {
   const centerEl = document.getElementById('center');
   const w = centerEl.clientWidth, h = centerEl.clientHeight;
-  State.camera.aspect = w / h;
-  State.camera.updateProjectionMatrix();
+  const aspect = w / h;
+
+  State.perspectiveCamera.aspect = aspect;
+  State.perspectiveCamera.updateProjectionMatrix();
+
+  const halfHeight = (State.orthoCamera.top - State.orthoCamera.bottom) / 2;
+  State.orthoCamera.left = -halfHeight * aspect;
+  State.orthoCamera.right = halfHeight * aspect;
+  State.orthoCamera.updateProjectionMatrix();
+
   State.renderer.setSize(w, h);
 }
 
@@ -103,10 +182,19 @@ function frameCameraToObject(object3d) {
   State.model.boundingRadius = radius;
   State.orbitControls.target.copy(center);
   const dir = new THREE.Vector3(1, 0.6, 1).normalize();
-  State.camera.position.copy(center.clone().add(dir.multiplyScalar(radius * 2.4)));
-  State.camera.near = Math.max(radius / 500, 0.01);
-  State.camera.far = Math.max(radius * 200, 500);
-  State.camera.updateProjectionMatrix();
+  const camPos = center.clone().add(dir.multiplyScalar(radius * 2.4));
+
+  State.perspectiveCamera.position.copy(camPos);
+  State.perspectiveCamera.near = Math.max(radius / 500, 0.01);
+  State.perspectiveCamera.far = Math.max(radius * 200, 500);
+  State.perspectiveCamera.updateProjectionMatrix();
+
+  State.orthoCamera.position.copy(camPos);
+  State.orthoCamera.near = Math.max(radius / 500, 0.01);
+  State.orthoCamera.far = Math.max(radius * 200, 500);
+  if (State.cameraMode === 'orthographic') syncOrthoFrustumToDistance();
+  else State.orthoCamera.updateProjectionMatrix();
+
   State.orbitControls.minDistance = radius * 0.05;
   State.orbitControls.maxDistance = radius * 20;
   State.orbitControls.update();
