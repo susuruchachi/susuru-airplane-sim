@@ -143,6 +143,15 @@
   ::-webkit-scrollbar-thumb{background:#233042;border-radius:5px;}
   ::-webkit-scrollbar-thumb:hover{background:#2d3f56;}
 
+  #versionTag{
+    position:absolute;bottom:14px;left:14px;font-family:var(--mono);font-size:11px;
+    color:var(--text-dim);background:rgba(14,21,29,.75);padding:5px 9px;border-radius:5px;
+    border:1px solid var(--line);pointer-events:none;white-space:pre-line;line-height:1.5;
+    max-width:70vw;
+  }
+  #versionTag.err{color:#ff9a9a;border-color:#5a2a2a;background:rgba(35,20,20,.9);}
+  #versionTag.ok{color:var(--ok);}
+
   #toast{
     position:fixed;bottom:70px;left:50%;transform:translateX(-50%) translateY(10px);
     background:#152030;border:1px solid var(--line);color:var(--text);padding:9px 16px;border-radius:7px;
@@ -195,6 +204,7 @@
       <button data-mode="rotate">回転</button>
       <button data-mode="scale">拡縮</button>
     </div>
+    <div id="versionTag">起動中…</div>
   </div>
 
   <div id="right">
@@ -209,18 +219,57 @@
 <input type="file" id="fileInput" accept=".glb,.gltf">
 <div id="toast"></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/examples/js/loaders/GLTFLoader.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/examples/js/controls/OrbitControls.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/examples/js/controls/TransformControls.js"></script>
+<script>
+  // 診断ログ：各<script>の読込成否をここに積み、画面左下(#versionTag)にまとめて表示する。
+  // 外部ファイルに一切依存しない自己完結ブロックなので、他のJSが全滅していてもここだけは動く。
+  window._loadLog = { failedScripts: [], cdnOk: false };
+  function _markFailed(label) {
+    window._loadLog.failedScripts.push(label);
+    _renderVersionTag();
+  }
+  function _renderVersionTag() {
+    const el = document.getElementById('versionTag');
+    if (!el) return;
+    const log = window._loadLog;
+    if (log.failedScripts.length > 0) {
+      el.className = 'err';
+      el.textContent = '読込失敗: ' + log.failedScripts.join(', ') + '\n(パス／ネットワークをご確認ください)';
+      return;
+    }
+    if (typeof bootstrapOk !== 'undefined' && bootstrapOk) {
+      el.className = 'ok';
+      el.textContent = 'Flight Sim Builder ' + (typeof APP_VERSION !== 'undefined' ? APP_VERSION : '?');
+    }
+  }
+</script>
 
-<script src="js/01-state.js"></script>
-<script src="js/02-storage.js"></script>
-<script src="js/03-scene-setup.js"></script>
-<script src="js/04-model-loader.js"></script>
-<script src="js/05-part-system.js"></script>
-<script src="js/06-gizmo.js"></script>
-<script src="js/07-ui-panels.js"></script>
-<script src="js/08-main.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js" onerror="_markFailed('three.min.js (CDN)')"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js" onerror="_markFailed('GLTFLoader.js (CDN)')"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js" onerror="_markFailed('OrbitControls.js (CDN)')"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/TransformControls.js" onerror="_markFailed('TransformControls.js (CDN)')"></script>
+<script>
+  // CDNタグ自体は読めても中身がGLTFLoader等を定義していないケースの検知
+  window.addEventListener('DOMContentLoaded', () => {
+    if (typeof THREE === 'undefined') { _markFailed('THREE本体が未定義'); return; }
+    if (typeof THREE.GLTFLoader === 'undefined') _markFailed('THREE.GLTFLoaderが未定義');
+    if (typeof THREE.OrbitControls === 'undefined') _markFailed('THREE.OrbitControlsが未定義');
+    if (typeof THREE.TransformControls === 'undefined') _markFailed('THREE.TransformControlsが未定義');
+    window._loadLog.cdnOk = window._loadLog.failedScripts.length === 0;
+  });
+</script>
+
+<script src="js/01-state.js" onerror="_markFailed('js/01-state.js')"></script>
+<script src="js/02-storage.js" onerror="_markFailed('js/02-storage.js')"></script>
+<script src="js/03-scene-setup.js" onerror="_markFailed('js/03-scene-setup.js')"></script>
+<script src="js/04-model-loader.js" onerror="_markFailed('js/04-model-loader.js')"></script>
+<script src="js/05-part-system.js" onerror="_markFailed('js/05-part-system.js')"></script>
+<script src="js/06-gizmo.js" onerror="_markFailed('js/06-gizmo.js')"></script>
+<script src="js/07-ui-panels.js" onerror="_markFailed('js/07-ui-panels.js')"></script>
+<script src="js/08-main.js" onerror="_markFailed('js/08-main.js')"></script>
+<script>
+  window.addEventListener('DOMContentLoaded', () => {
+    setTimeout(_renderVersionTag, 300); // bootstrap()完了を少し待つ
+  });
+</script>
 </body>
 </html>
