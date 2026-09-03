@@ -1,7 +1,7 @@
 // 01-state.js — アプリ全体のグローバル状態
 // 番号プレフィックス方式：全モジュールはグローバルスコープを共有する
 
-const APP_VERSION = 'v3';
+const APP_VERSION = 'v4';
 
 const State = {
   // Three.js 中枢
@@ -56,7 +56,7 @@ const PART_TYPE_COLORS = {
   wing: '#3fa9ff',
   control_surface: '#4fd18b',
   light: '#e0e0ff',
-  landing_gear: '#c792ea',
+  landing_gear: '#c8ccd2',
 };
 
 // 翼パーツの役割（主翼／水平尾翼／垂直尾翼）

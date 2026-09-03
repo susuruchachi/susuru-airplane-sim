@@ -428,6 +428,8 @@ function renderLandingGearFields(container, part) {
         <span class="slider-toggle"></span>
       </label>
     </div>
+    <button class="btn-danger-outline" id="btnFitToGround" style="color:var(--accent);border-color:var(--accent-dim);margin-top:2px;">全展開時に地面へ届く長さへ自動調整</button>
+    <div class="hint">現在の取付位置・関節の角度をもとに、地面に一番近い伸縮節の「展開側の長さ」を逆算して合わせます。</div>
 
     <div class="divider"></div>
     <div class="subgroup-title">関節（折りたたみ軸）</div>
@@ -470,6 +472,10 @@ function renderLandingGearFields(container, part) {
   document.getElementById('fRetractedAtZero').addEventListener('change', (e) => {
     part.props.retractedAtZero = e.target.checked;
     applyDeployStateToGear(part);
+  });
+  document.getElementById('btnFitToGround').addEventListener('click', () => {
+    fitGearToGround(part);
+    renderInspector();
   });
 
   container.querySelectorAll('[data-kind="joint"] [data-field]').forEach(input => {

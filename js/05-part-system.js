@@ -81,7 +81,10 @@ function updateWingGizmoShape(part) {
 // ---- 着陸脚（landing_gear）専用のギズモ構築 ----
 // 構造：基点(Group) → [関節(Group,回転) → 伸縮節(Group,軸方向移動) → 関節 → ...] → 先端の車輪的マーカー
 // joints/strutsの配列順が、そのまま基点から先端に向かうチェーンの順序になる
-const GEAR_COLOR = 0xc792ea;
+// 見た目は「軸を示す記号」ではなく、脚そのものを表す銀色の円柱にする（実機の脚を模した仮モデル）
+const GEAR_METAL_COLOR = 0xc8ccd2;   // 銀色（脚の支柱本体）
+const GEAR_ACCENT_COLOR = 0x8a8f99;  // 関節部分のアクセント（やや暗い銀）
+const GEAR_TIRE_COLOR = 0x1a1a1a;    // タイヤ（先端マーカー）
 
 function disposeObject3D(obj) {
   if (!obj) return;
@@ -91,39 +94,58 @@ function disposeObject3D(obj) {
   });
 }
 
+function gearMetalMaterial(color, opts) {
+  return new THREE.MeshStandardMaterial({
+    color, roughness: 0.28, metalness: 0.75,
+    emissive: color, emissiveIntensity: 0.06,
+    ...opts,
+  });
+}
+
 function createJointVisual() {
-  // 回転軸を示す短い円柱＋周囲リング
+  // 関節部分：脚の支柱と同じ太さの短い円柱（回転軸そのものが脚の一部に見えるようにする）
   const group = new THREE.Group();
   const axisMesh = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.035, 0.035, 0.22, 10),
-    new THREE.MeshStandardMaterial({ color: GEAR_COLOR, emissive: GEAR_COLOR, emissiveIntensity: 0.35, roughness: 0.4, transparent: true, opacity: 0.92 })
+    new THREE.CylinderGeometry(0.045, 0.045, 0.16, 14),
+    gearMetalMaterial(GEAR_ACCENT_COLOR)
   );
   group.add(axisMesh);
+  // 関節の可動を示す薄いリング（円柱よりわずかに太い径で、繋ぎ目の存在がわかるように）
   const ring = new THREE.Mesh(
-    new THREE.TorusGeometry(0.09, 0.012, 8, 24),
-    new THREE.MeshBasicMaterial({ color: GEAR_COLOR, transparent: true, opacity: 0.6 })
+    new THREE.TorusGeometry(0.052, 0.008, 8, 24),
+    gearMetalMaterial(0xdddddd, { metalness: 0.9, roughness: 0.15 })
   );
+  ring.rotation.x = Math.PI / 2;
   group.add(ring);
   return group;
 }
 
 function createStrutVisual(length) {
-  // テレスコピック（入れ子シリンダー）風の二重円柱で伸縮節を表現
+  // テレスコピック（入れ子シリンダー）の脚支柱。銀色の太い円柱（外筒）＋少し細い円柱（内筒）
+  // 着陸脚は機体の下（-Y方向）へ伸びて地面に届く想定なので、-Y方向に伸ばす
   const group = new THREE.Group();
   const outer = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.05, 0.05, length, 10),
-    new THREE.MeshStandardMaterial({ color: 0x8899aa, roughness: 0.3, metalness: 0.5, transparent: true, opacity: 0.85 })
+    new THREE.CylinderGeometry(0.06, 0.05, length, 14),
+    gearMetalMaterial(GEAR_METAL_COLOR)
   );
-  outer.position.y = length / 2; // 基点(付け根)から+方向に伸びる形にする
+  outer.position.y = -length / 2; // 基点(付け根)から-Y方向（下方向）に伸びる形にする
   group.add(outer);
   const inner = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.028, 0.028, length * 0.6, 10),
-    new THREE.MeshStandardMaterial({ color: GEAR_COLOR, emissive: GEAR_COLOR, emissiveIntensity: 0.3, roughness: 0.3, metalness: 0.4, transparent: true, opacity: 0.92 })
+    new THREE.CylinderGeometry(0.032, 0.032, length * 0.55, 14),
+    gearMetalMaterial(0xe8eaed, { metalness: 0.85, roughness: 0.2 })
   );
-  inner.position.y = length * 0.8;
+  inner.position.y = -length * 0.78;
   group.add(inner);
   group.userData.isStrutVisual = true;
   group.userData.baseLength = length;
+
+  // 次のセグメント（関節や先端）をぶら下げるためのアンカー。伸縮節の先端位置（-Y方向）に置く。
+  // 長さが変わるたびに applyDeployStateToGear 側でこのアンカーのposition.yも更新すること。
+  const endAnchor = new THREE.Group();
+  endAnchor.position.y = -length;
+  endAnchor.userData.isStrutEndAnchor = true;
+  group.add(endAnchor);
+
   return group;
 }
 
@@ -135,10 +157,10 @@ function buildLandingGearHierarchy(props) {
   root.userData.isPartGizmo = true;
   root.userData.isLandingGearRoot = true;
 
-  // 基点マーカー（付け根の位置を示す小さな球）
+  // 基点マーカー（付け根の位置を示す小さな球、脚の取付部分）
   const baseMarker = new THREE.Mesh(
-    new THREE.SphereGeometry(0.06, 10, 10),
-    new THREE.MeshStandardMaterial({ color: GEAR_COLOR, emissive: GEAR_COLOR, emissiveIntensity: 0.4, roughness: 0.4, transparent: true, opacity: 0.9 })
+    new THREE.SphereGeometry(0.07, 12, 12),
+    gearMetalMaterial(GEAR_ACCENT_COLOR)
   );
   root.add(baseMarker);
 
@@ -162,15 +184,17 @@ function buildLandingGearHierarchy(props) {
       const strutVisual = createStrutVisual(Math.max(len, 0.05));
       strutVisual.userData.strutId = strutDef.id;
       current.add(strutVisual);
-      current = strutVisual;
+      // 次のセグメントは伸縮節の「先端アンカー」にぶら下げる（伸縮節自体ではなく、その子）
+      current = strutVisual.children.find(c => c.userData.isStrutEndAnchor);
     }
   }
 
-  // 先端マーカー（車輪の位置目安）
+  // 先端マーカー（車輪＝タイヤ相当。黒めのトーラスでそれらしく）
   const tip = new THREE.Mesh(
-    new THREE.SphereGeometry(0.07, 10, 10),
-    new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.7, transparent: true, opacity: 0.9 })
+    new THREE.TorusGeometry(0.09, 0.045, 10, 20),
+    new THREE.MeshStandardMaterial({ color: GEAR_TIRE_COLOR, roughness: 0.8, metalness: 0.1 })
   );
+  tip.userData.isGearTip = true;
   current.add(tip);
 
   return root;
@@ -220,20 +244,106 @@ function applyDeployStateToGear(part) {
       const strutDef = part.props.struts.find(s => s.id === obj.userData.strutId);
       if (!strutDef) return;
       const len = Math.max(THREE.MathUtils.lerp(strutDef.minLength, strutDef.maxLength, t), 0.05);
-      // outer/inner の2子メッシュを長さに応じて再配置（createStrutVisualと対になるジオメトリ再生成）
-      const outer = obj.children[0], inner = obj.children[1];
+      // outer/inner の2子メッシュを長さに応じて再配置（createStrutVisualと同じ径・比率で再生成する）。
+      // endAnchor（次のセグメントの接続点）もこの長さぶん先端（-Y方向）へ押し出す＝これが無いと伸縮しても
+      // 先のパーツ（関節や車輪）の見た目の位置が動かない
+      const outer = obj.children[0], inner = obj.children[1], endAnchor = obj.children[2];
       if (outer) {
         outer.geometry.dispose();
-        outer.geometry = new THREE.CylinderGeometry(0.05, 0.05, len, 10);
-        outer.position.y = len / 2;
+        outer.geometry = new THREE.CylinderGeometry(0.06, 0.05, len, 14);
+        outer.position.y = -len / 2;
       }
       if (inner) {
         inner.geometry.dispose();
-        inner.geometry = new THREE.CylinderGeometry(0.028, 0.028, len * 0.6, 10);
-        inner.position.y = len * 0.8;
+        inner.geometry = new THREE.CylinderGeometry(0.032, 0.032, len * 0.55, 14);
+        inner.position.y = -len * 0.78;
+      }
+      if (endAnchor && endAnchor.userData.isStrutEndAnchor) {
+        endAnchor.position.y = -len;
       }
     }
   });
+}
+
+// 全展開(deployState=1)時に、脚の先端（タイヤ）が地面(Y=0)にちょうど届くよう、
+// 地面に一番近い伸縮節のmaxLengthを自動調整する。関節の角度（斜めの向き）も含めて
+// 実際のワールド座標で計算するため、脚がどんな折れ方をしていても正確に合わせられる。
+// 伸縮節が1つも無い場合は調整できないため、その旨を知らせる。
+function fitGearToGround(part) {
+  if (part.type !== 'landing_gear' || !part.gizmo) return false;
+  if (part.props.struts.length === 0) {
+    showToast('伸縮節がありません。地面合わせには伸縮節を1つ以上追加してください', true);
+    return false;
+  }
+
+  const savedDeployState = part.props.deployState;
+  part.props.deployState = 1;
+  applyDeployStateToGear(part);
+  part.gizmo.updateMatrixWorld(true);
+
+  let tipWorldY = null;
+  part.gizmo.traverse(obj => {
+    if (obj.userData.isGearTip) {
+      const worldPos = new THREE.Vector3();
+      obj.getWorldPosition(worldPos);
+      tipWorldY = worldPos.y;
+    }
+  });
+
+  if (tipWorldY === null) {
+    part.props.deployState = savedDeployState;
+    applyDeployStateToGear(part);
+    showToast('脚の先端が見つかりませんでした', true);
+    return false;
+  }
+
+  const shortfall = tipWorldY - 0; // 地面(Y=0)との差。正なら地面に届いていない（脚が短い）
+  if (Math.abs(shortfall) < 0.005) {
+    showToast('すでに地面の高さに合っています');
+    part.props.deployState = savedDeployState;
+    applyDeployStateToGear(part);
+    return true;
+  }
+
+  // 地面に一番近い（＝先端に一番近い）伸縮節を延長/短縮する。
+  // 関節の角度によって伸縮節の向きが斜めになっている場合、その伸縮節を1m伸ばしたときの
+  // 実際のワールドY方向の変化量（現在の傾き分）を先に測り、必要な伸び量に換算する
+  const lastStrutDef = part.props.struts[part.props.struts.length - 1];
+  let strutWorldObj = null;
+  part.gizmo.traverse(obj => {
+    if (obj.userData.isStrutVisual && obj.userData.strutId === lastStrutDef.id) strutWorldObj = obj;
+  });
+  if (!strutWorldObj) {
+    part.props.deployState = savedDeployState;
+    applyDeployStateToGear(part);
+    showToast('伸縮節の位置を特定できませんでした', true);
+    return false;
+  }
+
+  // その伸縮節のワールド空間での「伸びる方向(-Y、ローカル)」がどれだけYに寄与するかを、
+  // ワールド行列から取り出す（quaternionでローカル-Y軸をワールドに変換し、Y成分を見る）
+  const worldQuat = new THREE.Quaternion();
+  strutWorldObj.getWorldQuaternion(worldQuat);
+  const localDown = new THREE.Vector3(0, -1, 0).applyQuaternion(worldQuat);
+  const yContributionPerUnit = localDown.y; // この伸縮節を1m伸ばすとワールドYがどれだけ変化するか（脚が下を向いていれば負の値になる）
+
+  if (Math.abs(yContributionPerUnit) < 0.05) {
+    part.props.deployState = savedDeployState;
+    applyDeployStateToGear(part);
+    showToast('この脚は伸縮節がほぼ水平を向いており、地面合わせができません（関節の角度を調整してください）', true);
+    return false;
+  }
+
+  // 必要な伸び量：先端をワールドY方向に -shortfall だけ動かしたい（地面に近づける）ので、
+  // ΔY = neededDelta × yContributionPerUnit の関係から neededDelta = (-shortfall) / yContributionPerUnit
+  const neededDelta = -shortfall / yContributionPerUnit;
+  const newMaxLength = Math.max(lastStrutDef.maxLength + neededDelta, lastStrutDef.minLength + 0.05, 0.1);
+  lastStrutDef.maxLength = Math.round(newMaxLength * 1000) / 1000;
+
+  part.props.deployState = savedDeployState;
+  applyDeployStateToGear(part);
+  showToast(`「${lastStrutDef.label}」の展開側の長さを ${lastStrutDef.maxLength.toFixed(3)}m に調整しました`);
+  return true;
 }
 
 function addPart(type, position) {
