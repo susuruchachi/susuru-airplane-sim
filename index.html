@@ -38,8 +38,12 @@
   #topbar button.primary{background:var(--accent);border-color:var(--accent);color:#04121e;font-weight:600;}
   #topbar button.primary:hover{background:#5cb8ff;}
   #topbar .spacer{flex:1;}
+  #topbarScroll{display:flex;align-items:center;gap:12px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;}
+  #topbarScroll::-webkit-scrollbar{display:none;}
   #saveStatus{font-size:11.5px;color:var(--text-dim);font-family:var(--mono);white-space:nowrap;}
   input[type=file]{display:none;}
+  .mobile-only{display:none;}
+  #drawerOverlay{display:none;}
 
   /* Left: hierarchy / part list */
   #left{grid-column:1;grid-row:2;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden;}
@@ -169,22 +173,97 @@
     font-size:12.5px;opacity:0;pointer-events:none;transition:opacity .2s, transform .2s;z-index:999;
   }
   #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+  /* ============ モバイル / 縦画面 対応 ============ */
+  .drawer-close{
+    display:none;width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text-dim);
+    padding:10px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:var(--sans);margin:10px 10px 4px;
+    width:calc(100% - 20px);
+  }
+  .drawer-toggle{
+    background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+    padding:7px 11px;border-radius:6px;font-size:12px;cursor:pointer;font-family:var(--sans);white-space:nowrap;
+  }
+
+  @media (max-width: 860px){
+    /* 3カラム→1カラム。左右パネルはオーバーレイ式ドロワーに切替 */
+    #app{grid-template-columns:1fr;grid-template-rows:48px 1fr;}
+    #topbar{grid-column:1;padding:0 8px;gap:8px;}
+    #topbar .brand{font-size:12px;}
+    #topbar button{padding:6px 9px;font-size:11.5px;}
+    .mobile-only{display:flex;}
+
+    #left, #right{
+      position:fixed;top:48px;bottom:0;width:min(86vw, 340px);z-index:200;
+      transition:transform .22s ease;box-shadow:0 0 24px rgba(0,0,0,.5);
+    }
+    #left{left:0;transform:translateX(-100%);grid-column:unset;grid-row:unset;border-right:1px solid var(--line);}
+    #right{right:0;transform:translateX(100%);grid-column:unset;grid-row:unset;border-left:1px solid var(--line);}
+    #left.drawer-open, #right.drawer-open{transform:translateX(0);}
+
+    #drawerOverlay.show{
+      display:block;position:fixed;inset:48px 0 0 0;background:rgba(0,0,0,.5);z-index:150;
+    }
+
+    #center{grid-column:1;grid-row:2;}
+
+    .drawer-close{display:block;}
+
+    /* ビューポート上のフローティングUIを画面幅に合わせて縮小・再配置 */
+    #axisReadout{top:8px;left:8px;font-size:10px;padding:6px 8px;}
+    #axisViewBar{top:8px;right:8px;padding:3px;gap:3px;}
+    #axisViewBar button{padding:5px 8px;font-size:10.5px;min-width:28px;}
+    #gizmoModeBar{bottom:64px;padding:3px;}
+    #gizmoModeBar button{padding:6px 10px;font-size:11px;}
+    #versionTag{bottom:8px;left:8px;font-size:9.5px;max-width:60vw;}
+    #dropHint .big{font-size:13px;text-align:center;padding:0 20px;}
+    #dropHint .small{font-size:11px;text-align:center;padding:0 20px;}
+  }
+
+  /* 縦画面のスマホ：ビューポートの縦幅がさらに厳しいので、フローティングUIをもう一段圧縮 */
+  @media (max-width: 860px) and (orientation: portrait){
+    #gizmoModeBar{bottom:12px;left:auto;right:8px;transform:none;flex-direction:column;}
+    #axisViewBar{grid-template-columns:repeat(2, 1fr);}
+    #axisReadout{max-width:40vw;}
+    #topbar .brand{display:none;} /* 縦画面の狭い横幅ではブランド名を省略しボタン領域を確保 */
+    #topbar .sep{display:none;}
+  }
+
+  /* 非常に狭い画面（幅400px未満）：トップバーのボタンラベルをアイコンのみに */
+  @media (max-width: 400px){
+    #btnLoadModel::before{content:"📂 読込";}
+    #btnLoadModel{font-size:0;}
+    #btnLoadModel::before{font-size:11.5px;}
+    #btnSaveConfig::before{content:"💾 保存";}
+    #btnSaveConfig{font-size:0;}
+    #btnSaveConfig::before{font-size:11.5px;}
+    #btnLoadSaved::before{content:"📁 開く";}
+    #btnLoadSaved{font-size:0;}
+    #btnLoadSaved::before{font-size:11.5px;}
+  }
 </style>
 </head>
 <body>
 <div id="app">
 
   <div id="topbar">
+    <button id="btnTogglePartsDrawer" class="drawer-toggle mobile-only" title="パーツ一覧">☰ パーツ</button>
     <div class="brand">FLIGHT SIM <span>BUILDER</span></div>
     <div class="sep"></div>
-    <button id="btnLoadModel">機体モデルを読込</button>
-    <button id="btnSaveConfig" class="primary">保存</button>
-    <button id="btnLoadSaved">保存済みを開く</button>
+    <div id="topbarScroll">
+      <button id="btnLoadModel">機体モデルを読込</button>
+      <button id="btnSaveConfig" class="primary">保存</button>
+      <button id="btnLoadSaved">保存済みを開く</button>
+    </div>
     <div class="spacer"></div>
     <span id="saveStatus"></span>
+    <button id="btnToggleInspectorDrawer" class="drawer-toggle mobile-only" title="プロパティ">設定 ⚙</button>
   </div>
 
+  <div id="drawerOverlay"></div>
+
   <div id="left">
+    <button class="drawer-close mobile-only" id="btnCloseLeft">✕ 閉じる</button>
     <div class="section-title">機体</div>
     <div id="modelInfo">
       <div class="name">モデル未読込</div>
@@ -227,6 +306,7 @@
   </div>
 
   <div id="right">
+    <button class="drawer-close mobile-only" id="btnCloseRight">✕ 閉じる</button>
     <div id="inspector">
       <div class="section-title">プロパティ</div>
       <div class="empty">左のパーツ一覧、またはビューポート内のパーツをクリックして選択してください。</div>
