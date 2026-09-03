@@ -71,6 +71,10 @@ function initScene() {
   State.scene.add(State.transformControls);
 
   window.addEventListener('resize', onWindowResize);
+  window.addEventListener('orientationchange', () => {
+    // 一部ブラウザはorientationchange直後にまだ新しいビューポート寸法を反映していないため、少し遅らせて再計算する
+    setTimeout(onWindowResize, 250);
+  });
   animate();
 }
 

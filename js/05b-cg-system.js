@@ -73,6 +73,7 @@ function selectCg() {
   State.transformControls.setMode('translate'); // 重心は移動のみ（回転/拡縮の概念がない）
   document.getElementById('gizmoModeBar').style.display = 'none';
   document.getElementById('axisReadout').style.display = 'block';
+  if (isMobileLayout()) openDrawer('right');
   renderPartList();
   renderInspector();
 }

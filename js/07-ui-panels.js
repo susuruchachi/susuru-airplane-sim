@@ -319,7 +319,53 @@ function updatePartGizmoColor(part) {
 
 function setupPartTypeButtons() {
   document.querySelectorAll('#partTypeButtons button').forEach(btn => {
-    btn.addEventListener('click', () => addPart(btn.dataset.type));
+    btn.addEventListener('click', () => {
+      addPart(btn.dataset.type);
+      if (isMobileLayout()) closeDrawers(); // 配置後は3Dビューでギズモ操作させる
+    });
+  });
+}
+
+// ---- モバイル用ドロワー（左：パーツ一覧／右：インスペクター） ----
+const MOBILE_BREAKPOINT = 860;
+
+function isMobileLayout() {
+  return window.innerWidth <= MOBILE_BREAKPOINT;
+}
+
+function openDrawer(side) {
+  if (!isMobileLayout()) return;
+  const el = document.getElementById(side === 'left' ? 'left' : 'right');
+  const other = document.getElementById(side === 'left' ? 'right' : 'left');
+  other.classList.remove('drawer-open');
+  el.classList.add('drawer-open');
+  document.getElementById('drawerOverlay').classList.add('show');
+}
+
+function closeDrawers() {
+  document.getElementById('left').classList.remove('drawer-open');
+  document.getElementById('right').classList.remove('drawer-open');
+  document.getElementById('drawerOverlay').classList.remove('show');
+}
+
+function setupMobileDrawers() {
+  document.getElementById('btnTogglePartsDrawer').addEventListener('click', () => {
+    const left = document.getElementById('left');
+    if (left.classList.contains('drawer-open')) closeDrawers();
+    else openDrawer('left');
+  });
+  document.getElementById('btnToggleInspectorDrawer').addEventListener('click', () => {
+    const right = document.getElementById('right');
+    if (right.classList.contains('drawer-open')) closeDrawers();
+    else openDrawer('right');
+  });
+  document.getElementById('btnCloseLeft').addEventListener('click', closeDrawers);
+  document.getElementById('btnCloseRight').addEventListener('click', closeDrawers);
+  document.getElementById('drawerOverlay').addEventListener('click', closeDrawers);
+
+  // 画面回転・リサイズでデスクトップ幅に戻ったらドロワー状態をリセット
+  window.addEventListener('resize', () => {
+    if (!isMobileLayout()) closeDrawers();
   });
 }
 

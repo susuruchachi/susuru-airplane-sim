@@ -98,6 +98,7 @@ async function bootstrap() {
     setupViewportPicking();
     setupSaveLoadUI();
     setupAxisViewButtons();
+    setupMobileDrawers();
     await autoLoadLastConfig();
     bootstrapOk = true;
   } catch (err) {

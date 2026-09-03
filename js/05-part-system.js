@@ -134,6 +134,7 @@ function selectPart(id) {
     State.transformControls.attach(part.gizmo);
     document.getElementById('gizmoModeBar').style.display = 'flex';
     document.getElementById('axisReadout').style.display = 'block';
+    if (isMobileLayout()) openDrawer('right');
   } else if (!State.cg.selected) {
     State.transformControls.detach();
     document.getElementById('gizmoModeBar').style.display = 'none';
