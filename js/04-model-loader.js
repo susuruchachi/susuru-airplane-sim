@@ -11,6 +11,8 @@ function clearCurrentModel() {
   clearAllParts();
   State.model.name = null;
   State.model.fileBuffer = null;
+  State.cg.position = { x: 0, y: 0, z: 0 };
+  if (State.cg.gizmo) hideCgGizmo();
 }
 
 function loadModelFromArrayBuffer(arrayBuffer, fileName, fileType) {
@@ -41,6 +43,11 @@ function loadModelFromArrayBuffer(arrayBuffer, fileName, fileType) {
       State.model.fileType = fileType;
 
       frameCameraToObject(root);
+
+      // 重心の初期位置：モデル中心の高さ30%あたり（デフォルト値、後で調整可能）
+      State.cg.position = { x: 0, y: State.model.boundingRadius * 0.15, z: 0 };
+      showCgGizmo();
+
       updateModelInfoPanel();
       document.getElementById('dropHint').classList.add('hidden');
       resolve(root);

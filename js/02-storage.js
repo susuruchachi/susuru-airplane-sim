@@ -93,6 +93,7 @@ async function saveCurrentConfig(configName) {
     modelFileType: State.model.fileType,
     modelBuffer: State.model.fileBuffer,
     parts: serializeParts(),
+    cg: { ...State.cg.position },
   };
   await dbPut(STORE_CONFIGS, record);
   await dbPut(STORE_META, { key: 'lastConfigName', value: configName });

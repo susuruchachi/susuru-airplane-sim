@@ -54,6 +54,11 @@ async function applyLoadedConfig(record) {
   try {
     await loadModelFromArrayBuffer(record.modelBuffer, record.modelName, record.modelFileType);
     rebuildPartsFromSaved(record.parts || []);
+    if (record.cg) {
+      State.cg.position = { ...record.cg };
+      applyCgToGizmo();
+      if (State.cg.selected) updateInspectorNumbersOnly(null, true);
+    }
     State.configName = record.name;
     document.getElementById('saveStatus').textContent = `「${record.name}」を読み込みました`;
     showToast(`「${record.name}」を読み込みました`);
@@ -81,19 +86,28 @@ async function autoLoadLastConfig() {
   }
 }
 
+let bootstrapOk = false;
+
 async function bootstrap() {
   try {
     initScene();
+    initCgSystem();
     setupModelLoaderUI();
     setupPartTypeButtons();
     setupGizmoUI();
     setupViewportPicking();
     setupSaveLoadUI();
+    setupAxisViewButtons();
     await autoLoadLastConfig();
+    bootstrapOk = true;
   } catch (err) {
     console.error('初期化中にエラーが発生しました:', err);
     showToast('初期化に失敗しました。コンソールを確認してください', true);
+    if (typeof _markFailed === 'function') {
+      _markFailed('bootstrap()例外: ' + (err && err.message ? err.message : String(err)));
+    }
   }
+  if (typeof _renderVersionTag === 'function') _renderVersionTag();
 }
 
 bootstrap();

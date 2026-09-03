@@ -121,18 +121,20 @@ function clearAllParts() {
   }
   State.parts = [];
   State.selectedPartId = null;
+  State.cg.selected = false;
   renderPartList();
   renderInspector();
 }
 
 function selectPart(id) {
   State.selectedPartId = id;
+  if (id !== null) deselectCg();
   const part = getSelectedPart();
   if (part && part.gizmo) {
     State.transformControls.attach(part.gizmo);
     document.getElementById('gizmoModeBar').style.display = 'flex';
     document.getElementById('axisReadout').style.display = 'block';
-  } else {
+  } else if (!State.cg.selected) {
     State.transformControls.detach();
     document.getElementById('gizmoModeBar').style.display = 'none';
     document.getElementById('axisReadout').style.display = 'none';

@@ -1,6 +1,8 @@
 // 01-state.js — アプリ全体のグローバル状態
 // 番号プレフィックス方式：全モジュールはグローバルスコープを共有する
 
+const APP_VERSION = 'v1';
+
 const State = {
   // Three.js 中枢
   scene: null,
@@ -24,6 +26,13 @@ const State = {
   parts: [],
   selectedPartId: null,
   partIdCounter: 1,
+
+  // 重心（CG / 原点）— パーツとは別枠で機体に1つだけ持つ
+  cg: {
+    position: { x: 0, y: 0, z: 0 },
+    gizmo: null,      // 専用ギズモ（THREE.Group）
+    selected: false,  // ギズモで選択中かどうか
+  },
 
   // UI
   gizmoMode: 'translate', // translate | rotate | scale

@@ -2,11 +2,31 @@
 
 function renderPartList() {
   const listEl = document.getElementById('partList');
+  listEl.innerHTML = '';
+
+  // 重心（CG）行 — モデル読込後は常時表示、削除不可
+  if (State.model.root) {
+    const cgRow = document.createElement('div');
+    cgRow.className = 'part-row' + (State.cg.selected ? ' selected' : '');
+    cgRow.style.borderBottom = '1px solid var(--line)';
+    cgRow.style.marginBottom = '6px';
+    cgRow.style.paddingBottom = '10px';
+    cgRow.innerHTML = `
+      <span class="dot" style="background:#ffd23f"></span>
+      <span class="label">重心（原点）</span>
+      <span class="type">CG</span>
+    `;
+    cgRow.addEventListener('click', () => { selectPart(null); selectCg(); });
+    listEl.appendChild(cgRow);
+  }
+
   if (State.parts.length === 0) {
-    listEl.innerHTML = '<div class="empty">まだパーツがありません。<br>上のボタンでモデル上に配置してください。</div>';
+    const emptyDiv = document.createElement('div');
+    emptyDiv.className = 'empty';
+    emptyDiv.innerHTML = 'まだパーツがありません。<br>上のボタンでモデル上に配置してください。';
+    listEl.appendChild(emptyDiv);
     return;
   }
-  listEl.innerHTML = '';
   for (const part of State.parts) {
     const row = document.createElement('div');
     row.className = 'part-row' + (part.id === State.selectedPartId ? ' selected' : '');
@@ -34,8 +54,41 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+function renderCgInspector(el) {
+  const wings = State.parts.filter(p => p.type === 'wing');
+  const hasLeftRight = wings.some(w => w.props.side === 'left') && wings.some(w => w.props.side === 'right');
+
+  el.innerHTML = `
+    <div class="section-title">プロパティ — 重心（原点）</div>
+    <div class="hint" style="margin-bottom:14px;">機体の重心位置です。飛行モデルの基準点として使われます。ギズモは移動のみ操作できます。</div>
+
+    <div class="subgroup-title">位置（m）</div>
+    <div class="row3">
+      ${xyzFieldsHtml('cg', State.cg.position)}
+    </div>
+
+    <div class="divider"></div>
+    <div class="subgroup-title">主翼から決定</div>
+    <div class="hint" style="margin-bottom:8px;">左翼・右翼として登録された主翼のX位置から、左右対称の中心をXに反映します（Y・Zは変更しません）。</div>
+    <button class="btn-danger-outline" id="btnCgFromWings" style="color:var(--accent);border-color:var(--accent-dim);">
+      主翼から決定
+    </button>
+    ${!hasLeftRight ? '<div class="hint" style="color:var(--warn);margin-top:8px;">左翼・右翼それぞれ1つ以上必要です</div>' : ''}
+  `;
+
+  bindXyzFields('cg', State.cg.position, () => applyCgToGizmo());
+
+  document.getElementById('btnCgFromWings').addEventListener('click', () => setCgFromWings());
+}
+
 function renderInspector() {
   const el = document.getElementById('inspector');
+
+  if (State.cg.selected) {
+    renderCgInspector(el);
+    return;
+  }
+
   const part = getSelectedPart();
   if (!part) {
     el.innerHTML = `
@@ -110,7 +163,17 @@ function bindXyzFields(prefix, vec, onChange) {
 }
 
 // ギズモドラッグ中に数値だけ即時反映（フォーム全体は再描画しない＝入力フォーカスを奪わない）
-function updateInspectorNumbersOnly(part) {
+// isCg=true の場合、part引数は無視してState.cg.positionのcg_x/y/z欄を更新する
+function updateInspectorNumbersOnly(part, isCg) {
+  if (isCg) {
+    ['x', 'y', 'z'].forEach(axis => {
+      const input = document.getElementById(`f_cg_${axis}`);
+      if (input && document.activeElement !== input) {
+        input.value = State.cg.position[axis].toFixed(3);
+      }
+    });
+    return;
+  }
   ['pos', 'rot', 'scl'].forEach(prefix => {
     const vec = prefix === 'pos' ? part.position : prefix === 'rot' ? part.rotation : part.scale;
     ['x', 'y', 'z'].forEach(axis => {
