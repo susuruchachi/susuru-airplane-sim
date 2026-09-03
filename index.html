@@ -90,6 +90,17 @@
     font-size:12px;cursor:pointer;font-family:var(--sans);
   }
   #gizmoModeBar button.active{background:var(--accent-dim);color:var(--text);}
+  #axisViewBar{
+    position:absolute;top:14px;right:14px;
+    display:grid;grid-template-columns:repeat(3, 1fr);gap:4px;
+    background:rgba(14,21,29,.9);border:1px solid var(--line);
+    border-radius:8px;padding:4px;backdrop-filter:blur(6px);
+  }
+  #axisViewBar button{
+    background:transparent;border:none;color:var(--text-dim);padding:6px 10px;border-radius:6px;
+    font-size:11.5px;cursor:pointer;font-family:var(--sans);min-width:34px;
+  }
+  #axisViewBar button:hover{background:var(--accent-dim);color:var(--text);}
   #axisReadout{
     position:absolute;top:14px;left:14px;font-family:var(--mono);font-size:11px;color:var(--text-dim);
     background:rgba(14,21,29,.75);padding:8px 10px;border-radius:6px;border:1px solid var(--line);
@@ -199,6 +210,14 @@
       <div class="small">またはツールバーの「機体モデルを読込」から選択</div>
     </div>
     <div id="axisReadout" style="display:none;"></div>
+    <div id="axisViewBar">
+      <button data-axis="front">前</button>
+      <button data-axis="back">後</button>
+      <button data-axis="left">左</button>
+      <button data-axis="right">右</button>
+      <button data-axis="top">上</button>
+      <button data-axis="bottom">下</button>
+    </div>
     <div id="gizmoModeBar" style="display:none;">
       <button data-mode="translate" class="active">移動</button>
       <button data-mode="rotate">回転</button>
@@ -263,6 +282,7 @@
 <script src="js/03-scene-setup.js" onerror="_markFailed('js/03-scene-setup.js')"></script>
 <script src="js/04-model-loader.js" onerror="_markFailed('js/04-model-loader.js')"></script>
 <script src="js/05-part-system.js" onerror="_markFailed('js/05-part-system.js')"></script>
+<script src="js/05b-cg-system.js" onerror="_markFailed('js/05b-cg-system.js')"></script>
 <script src="js/06-gizmo.js" onerror="_markFailed('js/06-gizmo.js')"></script>
 <script src="js/07-ui-panels.js" onerror="_markFailed('js/07-ui-panels.js')"></script>
 <script src="js/08-main.js" onerror="_markFailed('js/08-main.js')"></script>
