@@ -86,9 +86,9 @@ function deselectCg() {
 }
 
 // 「主翼から決定」— 左右主翼のX位置の中間点を重心のXに反映する
-// （Y/Zは変更しない。左右対称の中心線を出すのが目的のため）
+// （Y/Zは変更しない。左右対称の中心線を出すのが目的のため。尾翼は対象外とし主翼のみで判定する）
 function setCgFromWings() {
-  const wings = State.parts.filter(p => p.type === 'wing');
+  const wings = State.parts.filter(p => p.type === 'wing' && p.props.role === 'main');
   const leftWings = wings.filter(w => w.props.side === 'left');
   const rightWings = wings.filter(w => w.props.side === 'right');
 

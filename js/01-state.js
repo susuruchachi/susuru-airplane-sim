@@ -43,7 +43,7 @@ const State = {
 
 const PART_TYPE_LABELS = {
   engine: 'エンジン',
-  wing: '主翼',
+  wing: '主翼／尾翼',
   control_surface: '可動翼面',
   light: '航行灯',
 };
@@ -54,6 +54,13 @@ const PART_TYPE_COLORS = {
   control_surface: '#4fd18b',
   light: '#e0e0ff',
 };
+
+// 翼パーツの役割（主翼／水平尾翼／垂直尾翼）
+const WING_ROLES = [
+  { value: 'main', label: '主翼' },
+  { value: 'htail', label: '水平尾翼' },
+  { value: 'vtail', label: '垂直尾翼' },
+];
 
 // 可動翼面のサブ種別（エルロン／エレベーター／ラダー／フラップ／スポイラー等）
 const CONTROL_SURFACE_KINDS = [

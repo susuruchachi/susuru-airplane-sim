@@ -30,10 +30,13 @@ function renderPartList() {
   for (const part of State.parts) {
     const row = document.createElement('div');
     row.className = 'part-row' + (part.id === State.selectedPartId ? ' selected' : '');
+    const typeLabel = part.type === 'wing'
+      ? (WING_ROLES.find(r => r.value === part.props.role)?.label || PART_TYPE_LABELS.wing)
+      : PART_TYPE_LABELS[part.type];
     row.innerHTML = `
       <span class="dot" style="background:${PART_TYPE_COLORS[part.type]}"></span>
       <span class="label">${escapeHtml(part.name)}</span>
-      <span class="type">${PART_TYPE_LABELS[part.type]}</span>
+      <span class="type">${typeLabel}</span>
       <span class="del" title="削除">✕</span>
     `;
     row.addEventListener('click', (e) => {
@@ -55,8 +58,8 @@ function escapeHtml(s) {
 }
 
 function renderCgInspector(el) {
-  const wings = State.parts.filter(p => p.type === 'wing');
-  const hasLeftRight = wings.some(w => w.props.side === 'left') && wings.some(w => w.props.side === 'right');
+  const mainWings = State.parts.filter(p => p.type === 'wing' && p.props.role === 'main');
+  const hasLeftRight = mainWings.some(w => w.props.side === 'left') && mainWings.some(w => w.props.side === 'right');
 
   el.innerHTML = `
     <div class="section-title">プロパティ — 重心（原点）</div>
@@ -203,6 +206,8 @@ function renderTypeSpecificFields(part) {
         </select>
       </div>
       <div class="hint">位置は推力の作用点（機体重心からのオフセット）として飛行モデルに使用されます。</div>
+      <div class="divider"></div>
+      <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
     `;
     document.getElementById('fThrust').addEventListener('change', (e) => {
       part.props.thrustKgf = parseFloat(e.target.value) || 0;
@@ -210,30 +215,51 @@ function renderTypeSpecificFields(part) {
     document.getElementById('fSpinAxis').addEventListener('change', (e) => {
       part.props.spinAxis = e.target.value;
     });
+    document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
 
   } else if (part.type === 'wing') {
     container.innerHTML = `
-      <div class="subgroup-title">主翼設定</div>
+      <div class="subgroup-title">主翼／尾翼の設定</div>
+      <div class="field">
+        <label>役割</label>
+        <select id="fRole">
+          ${WING_ROLES.map(r => `<option value="${r.value}" ${part.props.role === r.value ? 'selected' : ''}>${r.label}</option>`).join('')}
+        </select>
+      </div>
       <div class="field">
         <label>翼幅の目安（m）</label>
         <input type="text" inputmode="decimal" id="fSpan" value="${part.props.span}">
       </div>
-      <div class="field">
+      <div class="field" id="fSideField" style="${part.props.role === 'vtail' ? 'display:none;' : ''}">
         <label>左右位置</label>
         <select id="fSide">
-          <option value="left" ${part.props.side === 'left' ? 'selected' : ''}>左翼</option>
-          <option value="right" ${part.props.side === 'right' ? 'selected' : ''}>右翼</option>
-          <option value="center" ${part.props.side === 'center' ? 'selected' : ''}>中央（尾翼など）</option>
+          <option value="left" ${part.props.side === 'left' ? 'selected' : ''}>左</option>
+          <option value="right" ${part.props.side === 'right' ? 'selected' : ''}>右</option>
+          <option value="center" ${part.props.side === 'center' ? 'selected' : ''}>中央</option>
         </select>
       </div>
-      <div class="hint">可動翼面（エルロン等）を追加するときの「所属する主翼」として選択できます。</div>
+      <div class="hint">可動翼面（エルロン等）を追加するときの「所属する主翼」として選択できます。垂直尾翼は通常1つで中央配置のため左右位置は表示されません。</div>
+      ${canMirrorPart(part) ? `
+        <div class="divider"></div>
+        <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
+      ` : ''}
     `;
+    document.getElementById('fRole').addEventListener('change', (e) => {
+      part.props.role = e.target.value;
+      if (part.props.role === 'vtail') part.props.side = 'center';
+      else if (part.props.side === 'center') part.props.side = 'left';
+      updateWingGizmoShape(part);
+      renderInspector();
+    });
     document.getElementById('fSpan').addEventListener('change', (e) => {
       part.props.span = parseFloat(e.target.value) || 0;
     });
-    document.getElementById('fSide').addEventListener('change', (e) => {
-      part.props.side = e.target.value;
-    });
+    const sideSelect = document.getElementById('fSide');
+    if (sideSelect) {
+      sideSelect.addEventListener('change', (e) => { part.props.side = e.target.value; });
+    }
+    const btnMirror = document.getElementById('btnMirrorPart');
+    if (btnMirror) btnMirror.addEventListener('click', () => mirrorPart(part.id));
 
   } else if (part.type === 'control_surface') {
     const wingOptions = State.parts.filter(p => p.type === 'wing');
@@ -264,19 +290,22 @@ function renderTypeSpecificFields(part) {
         </div>
       </div>
       <div class="field" style="margin-top:12px;">
-        <label>所属する主翼（任意）</label>
+        <label>所属する主翼／尾翼（任意）</label>
         <select id="fParentWing">
           <option value="">未設定</option>
-          ${wingOptions.map(w => `<option value="${w.id}" ${part.props.parentWingId === w.id ? 'selected' : ''}>${escapeHtml(w.name)}</option>`).join('')}
+          ${wingOptions.map(w => `<option value="${w.id}" ${part.props.parentWingId === w.id ? 'selected' : ''}>${escapeHtml(w.name)}（${WING_ROLES.find(r => r.value === w.props.role)?.label || '主翼'}）</option>`).join('')}
         </select>
       </div>
       <div class="hint">可動軸はこのパーツのローカル座標系での回転軸です。ギズモを「回転」モードにして向きを確認できます。</div>
+      <div class="divider"></div>
+      <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
     `;
     document.getElementById('fKind').addEventListener('change', (e) => { part.props.kind = e.target.value; });
     document.getElementById('fHingeAxis').addEventListener('change', (e) => { part.props.hingeAxis = e.target.value; });
     document.getElementById('fMinDeg').addEventListener('change', (e) => { part.props.minDeg = parseFloat(e.target.value) || 0; });
     document.getElementById('fMaxDeg').addEventListener('change', (e) => { part.props.maxDeg = parseFloat(e.target.value) || 0; });
     document.getElementById('fParentWing').addEventListener('change', (e) => { part.props.parentWingId = e.target.value || null; });
+    document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
 
   } else if (part.type === 'light') {
     container.innerHTML = `
@@ -296,6 +325,8 @@ function renderTypeSpecificFields(part) {
         </select>
       </div>
       <div class="hint">種類を選ぶと色と点灯パターンの初期値が自動設定されます（後から個別に変更可）。</div>
+      <div class="divider"></div>
+      <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
     `;
     document.getElementById('fLightKind').addEventListener('change', (e) => {
       const kindDef = LIGHT_KINDS.find(k => k.value === e.target.value);
@@ -306,6 +337,7 @@ function renderTypeSpecificFields(part) {
       renderInspector();
     });
     document.getElementById('fBlink').addEventListener('change', (e) => { part.props.blink = e.target.value; });
+    document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
   }
 }
 

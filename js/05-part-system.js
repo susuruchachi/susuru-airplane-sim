@@ -10,7 +10,8 @@ function defaultPropsForType(type) {
     case 'wing':
       return {
         span: 2.0,             // 翼幅（m）目安。羽の可動部の親として使う
-        side: 'left',          // left | right | center（尾翼など）
+        role: 'main',          // main | htail | vtail（主翼／水平尾翼／垂直尾翼）
+        side: 'left',          // left | right | center（垂直尾翼など中心配置のもの）
       };
     case 'control_surface':
       return {
@@ -31,25 +32,9 @@ function defaultPropsForType(type) {
   }
 }
 
-function createPartGizmoMesh(type) {
+function createPartGizmoMesh(type, role) {
   const color = new THREE.Color(PART_TYPE_COLORS[type]);
-  let geo;
-  switch (type) {
-    case 'engine':
-      geo = new THREE.CylinderGeometry(0.18, 0.22, 0.4, 16);
-      break;
-    case 'wing':
-      geo = new THREE.BoxGeometry(1.2, 0.06, 0.35);
-      break;
-    case 'control_surface':
-      geo = new THREE.BoxGeometry(0.4, 0.04, 0.18);
-      break;
-    case 'light':
-      geo = new THREE.SphereGeometry(0.07, 12, 12);
-      break;
-    default:
-      geo = new THREE.SphereGeometry(0.1, 8, 8);
-  }
+  const geo = geometryForPart(type, role);
   const mat = new THREE.MeshStandardMaterial({
     color, emissive: color, emissiveIntensity: type === 'light' ? 0.9 : 0.25,
     roughness: 0.4, metalness: 0.2, transparent: true, opacity: 0.92,
@@ -60,16 +45,42 @@ function createPartGizmoMesh(type) {
   return mesh;
 }
 
+function geometryForPart(type, role) {
+  switch (type) {
+    case 'engine':
+      return new THREE.CylinderGeometry(0.18, 0.22, 0.4, 16);
+    case 'wing':
+      // 垂直尾翼は縦に立てた薄板、それ以外（主翼・水平尾翼）は横に広い薄板
+      if (role === 'vtail') return new THREE.BoxGeometry(0.35, 0.9, 0.3);
+      return new THREE.BoxGeometry(1.2, 0.06, 0.35);
+    case 'control_surface':
+      return new THREE.BoxGeometry(0.4, 0.04, 0.18);
+    case 'light':
+      return new THREE.SphereGeometry(0.07, 12, 12);
+    default:
+      return new THREE.SphereGeometry(0.1, 8, 8);
+  }
+}
+
+// 翼の役割（主翼/水平尾翼/垂直尾翼）が変わったとき、ギズモの形状だけ差し替える
+function updateWingGizmoShape(part) {
+  if (part.type !== 'wing' || !part.gizmo) return;
+  part.gizmo.geometry.dispose();
+  part.gizmo.geometry = geometryForPart('wing', part.props.role);
+}
+
 function addPart(type, position) {
   if (!State.model.root) {
     showToast('先に機体モデルを読み込んでください', true);
     return null;
   }
   const id = genPartId();
-  const count = State.parts.filter(p => p.type === type).length + 1;
-  const name = `${PART_TYPE_LABELS[type]} ${count}`;
+  const props = defaultPropsForType(type);
+  const name = type === 'wing'
+    ? `${WING_ROLES.find(r => r.value === props.role)?.label || '主翼'} ${State.parts.filter(p => p.type === 'wing' && p.props.role === props.role).length + 1}`
+    : `${PART_TYPE_LABELS[type]} ${State.parts.filter(p => p.type === type).length + 1}`;
 
-  const gizmoMesh = createPartGizmoMesh(type);
+  const gizmoMesh = createPartGizmoMesh(type, props.role);
   const pos = position || defaultSpawnPosition();
   gizmoMesh.position.copy(pos);
   State.scene.add(gizmoMesh);
@@ -79,7 +90,7 @@ function addPart(type, position) {
     position: { x: pos.x, y: pos.y, z: pos.z },
     rotation: { x: 0, y: 0, z: 0 },
     scale: { x: 1, y: 1, z: 1 },
-    props: defaultPropsForType(type),
+    props,
     gizmo: gizmoMesh,
   };
   State.parts.push(part);
@@ -169,12 +180,70 @@ function applyPartToGizmo(part) {
   part.gizmo.scale.set(part.scale.x, part.scale.y, part.scale.z);
 }
 
+// パーツをX軸反転（機体中心線=X0を挟んで鏡像）した複製を作る
+// 対象: engine / wing（主翼・水平尾翼） / control_surface / light
+// vtail（垂直尾翼）や side=center のパーツは中心配置が前提のため対象外とする
+function canMirrorPart(part) {
+  if (!part) return false;
+  if (!['engine', 'wing', 'control_surface', 'light'].includes(part.type)) return false;
+  if (part.type === 'wing' && part.props.role === 'vtail') return false;
+  if (part.type === 'wing' && part.props.side === 'center') return false;
+  return true;
+}
+
+function mirrorPart(id) {
+  const src = State.parts.find(p => p.id === id);
+  if (!src || !canMirrorPart(src)) return null;
+
+  if (Math.abs(src.position.x) < 0.02) {
+    showToast('中心線付近のパーツはミラーの意味がほぼありません（X座標を確認してください）', true);
+  }
+
+  const newId = genPartId();
+  const mirroredProps = JSON.parse(JSON.stringify(src.props));
+  if (mirroredProps.side === 'left') mirroredProps.side = 'right';
+  else if (mirroredProps.side === 'right') mirroredProps.side = 'left';
+
+  const baseName = src.name.replace(/（ミラー）$/, '');
+  const name = `${baseName}（ミラー）`;
+
+  const gizmoMesh = createPartGizmoMesh(src.type, mirroredProps.role);
+  gizmoMesh.position.set(-src.position.x, src.position.y, src.position.z);
+  // 鏡像変換：X軸まわりの回転はそのまま、Y・Z軸まわりの回転は符号反転
+  gizmoMesh.rotation.set(
+    THREE.MathUtils.degToRad(src.rotation.x),
+    THREE.MathUtils.degToRad(-src.rotation.y),
+    THREE.MathUtils.degToRad(-src.rotation.z)
+  );
+  gizmoMesh.scale.set(src.scale.x, src.scale.y, src.scale.z);
+  State.scene.add(gizmoMesh);
+
+  const part = {
+    id: newId, type: src.type, name,
+    position: { x: -src.position.x, y: src.position.y, z: src.position.z },
+    rotation: { x: src.rotation.x, y: -src.rotation.y, z: -src.rotation.z },
+    scale: { ...src.scale },
+    props: mirroredProps,
+    gizmo: gizmoMesh,
+  };
+  State.parts.push(part);
+  gizmoMesh.userData.partId = newId;
+
+  selectPart(newId);
+  renderPartList();
+  showToast(`「${baseName}」をミラー配置しました`);
+  return part;
+}
+
 // 保存データからパーツを再構築（gizmo mesh を新規生成）
 function rebuildPartsFromSaved(savedParts) {
   clearAllParts();
   let maxIdNum = 0;
   for (const sp of savedParts) {
-    const gizmoMesh = createPartGizmoMesh(sp.type);
+    const props = { ...sp.props };
+    if (sp.type === 'wing' && !props.role) props.role = 'main'; // 旧データ互換（role未設定→主翼扱い）
+
+    const gizmoMesh = createPartGizmoMesh(sp.type, props.role);
     gizmoMesh.position.set(sp.position.x, sp.position.y, sp.position.z);
     gizmoMesh.rotation.set(
       THREE.MathUtils.degToRad(sp.rotation.x),
@@ -188,7 +257,7 @@ function rebuildPartsFromSaved(savedParts) {
     const part = {
       id: sp.id, type: sp.type, name: sp.name,
       position: { ...sp.position }, rotation: { ...sp.rotation }, scale: { ...sp.scale },
-      props: { ...sp.props },
+      props,
       gizmo: gizmoMesh,
     };
     State.parts.push(part);
