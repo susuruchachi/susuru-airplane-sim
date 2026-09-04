@@ -86,6 +86,7 @@ async function saveCurrentConfig(configName) {
   if (!State.model.fileBuffer) {
     throw new Error('モデルが読み込まれていません');
   }
+  const root = State.model.root;
   const record = {
     name: configName,
     savedAt: Date.now(),
@@ -94,6 +95,13 @@ async function saveCurrentConfig(configName) {
     modelBuffer: State.model.fileBuffer,
     parts: serializeParts(),
     cg: { ...State.cg.position },
+    modelTransform: root ? {
+      rotation: { x: root.rotation.x, y: root.rotation.y, z: root.rotation.z }, // ラジアンのまま保存
+      scale: { x: root.scale.x, y: root.scale.y, z: root.scale.z },
+    } : null,
+    modelWeightKg: State.model.weightKg,
+    modelMaxSpeedValue: State.model.maxSpeedValue,
+    modelMaxSpeedUnit: State.model.maxSpeedUnit,
   };
   await dbPut(STORE_CONFIGS, record);
   await dbPut(STORE_META, { key: 'lastConfigName', value: configName });

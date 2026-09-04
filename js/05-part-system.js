@@ -205,14 +205,15 @@ function buildLandingGearHierarchy(props) {
 function rebuildLandingGearGizmo(part) {
   if (part.type !== 'landing_gear') return;
   const oldGizmo = part.gizmo;
+  const parent = oldGizmo.parent || State.model.root;
   const newGizmo = buildLandingGearHierarchy(part.props);
   newGizmo.position.copy(oldGizmo.position);
   newGizmo.rotation.copy(oldGizmo.rotation);
   newGizmo.scale.copy(oldGizmo.scale);
   newGizmo.userData.partId = part.id;
 
-  State.scene.add(newGizmo);
-  State.scene.remove(oldGizmo);
+  parent.add(newGizmo);
+  parent.remove(oldGizmo);
   disposeObject3D(oldGizmo);
 
   if (State.transformControls.object === oldGizmo) {
@@ -321,11 +322,15 @@ function fitGearToGround(part) {
   }
 
   // その伸縮節のワールド空間での「伸びる方向(-Y、ローカル)」がどれだけYに寄与するかを、
-  // ワールド行列から取り出す（quaternionでローカル-Y軸をワールドに変換し、Y成分を見る）
+  // ワールド行列から取り出す（quaternionでローカル-Y軸をワールドに変換し、Y成分を見る）。
+  // 機体モデル自体が拡縮されている場合、ローカル1単位の伸びがワールドではスケール倍になる点も考慮する
   const worldQuat = new THREE.Quaternion();
   strutWorldObj.getWorldQuaternion(worldQuat);
+  const worldScale = new THREE.Vector3();
+  strutWorldObj.getWorldScale(worldScale);
   const localDown = new THREE.Vector3(0, -1, 0).applyQuaternion(worldQuat);
-  const yContributionPerUnit = localDown.y; // この伸縮節を1m伸ばすとワールドYがどれだけ変化するか（脚が下を向いていれば負の値になる）
+  // Y軸方向のスケール（伸縮節はローカルY方向に伸びるため、そのワールドスケールを乗じる）
+  const yContributionPerUnit = localDown.y * worldScale.y; // この伸縮節を1m伸ばすとワールドYがどれだけ変化するか（脚が下を向いていれば負の値になる）
 
   if (Math.abs(yContributionPerUnit) < 0.05) {
     part.props.deployState = savedDeployState;
@@ -362,7 +367,8 @@ function addPart(type, position) {
     : createPartGizmoMesh(type, props.role);
   const pos = position || defaultSpawnPosition();
   gizmoMesh.position.copy(pos);
-  State.scene.add(gizmoMesh);
+  // モデルのローカル座標系の子として追加する：モデル本体の回転/拡縮に自動追従させるため
+  State.model.root.add(gizmoMesh);
 
   const part = {
     id, type, name,
@@ -383,7 +389,9 @@ function addPart(type, position) {
 function defaultSpawnPosition() {
   const r = State.model.boundingRadius || 1;
   const target = State.orbitControls.target;
-  return new THREE.Vector3(target.x, target.y + r * 0.3, target.z);
+  const worldPos = new THREE.Vector3(target.x, target.y + r * 0.3, target.z);
+  // パーツはモデルのローカル座標系に配置するため、カメラ注視点(ワールド座標)をモデル基準に変換する
+  return State.model.root.worldToLocal(worldPos);
 }
 
 function removePart(id) {
@@ -394,7 +402,7 @@ function removePart(id) {
     if (State.transformControls.object === part.gizmo) {
       State.transformControls.detach();
     }
-    State.scene.remove(part.gizmo);
+    if (part.gizmo.parent) part.gizmo.parent.remove(part.gizmo);
     disposeObject3D(part.gizmo);
   }
   State.parts.splice(idx, 1);
@@ -409,7 +417,7 @@ function clearAllParts() {
   State.transformControls.detach();
   for (const p of State.parts) {
     if (p.gizmo) {
-      State.scene.remove(p.gizmo);
+      if (p.gizmo.parent) p.gizmo.parent.remove(p.gizmo);
       disposeObject3D(p.gizmo);
     }
   }
@@ -507,7 +515,7 @@ function mirrorPart(id) {
     THREE.MathUtils.degToRad(-src.rotation.z)
   );
   gizmoMesh.scale.set(src.scale.x, src.scale.y, src.scale.z);
-  State.scene.add(gizmoMesh);
+  State.model.root.add(gizmoMesh);
 
   const part = {
     id: newId, type: src.type, name,
@@ -553,7 +561,7 @@ function rebuildPartsFromSaved(savedParts) {
       THREE.MathUtils.degToRad(sp.rotation.z)
     );
     gizmoMesh.scale.set(sp.scale.x, sp.scale.y, sp.scale.z);
-    State.scene.add(gizmoMesh);
+    State.model.root.add(gizmoMesh);
     gizmoMesh.userData.partId = sp.id;
 
     const part = {

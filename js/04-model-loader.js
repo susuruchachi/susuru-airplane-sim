@@ -4,6 +4,11 @@ const gltfLoader = new THREE.GLTFLoader();
 
 function clearCurrentModel() {
   if (State.model.root) {
+    // 重心ギズモがモデルの子になっている場合、モデルごと消えないようシーン直下に戻してから外す
+    if (State.cg.gizmo && State.cg.gizmo.parent === State.model.root) {
+      State.model.root.remove(State.cg.gizmo);
+      State.scene.add(State.cg.gizmo);
+    }
     State.scene.remove(State.model.root);
     State.model.root = null;
   }
@@ -11,6 +16,9 @@ function clearCurrentModel() {
   clearAllParts();
   State.model.name = null;
   State.model.fileBuffer = null;
+  State.model.weightKg = 1000;
+  State.model.maxSpeedValue = 250;
+  State.model.maxSpeedUnit = 'kt';
   State.cg.position = { x: 0, y: 0, z: 0 };
   if (State.cg.gizmo) hideCgGizmo();
 }
@@ -43,6 +51,10 @@ function loadModelFromArrayBuffer(arrayBuffer, fileName, fileType) {
       State.model.fileType = fileType;
 
       frameCameraToObject(root);
+
+      // 重心ギズモをモデルの子として付け替える（モデル本体の回転/拡縮に自動追従させるため）
+      if (State.cg.gizmo.parent) State.cg.gizmo.parent.remove(State.cg.gizmo);
+      root.add(State.cg.gizmo);
 
       // 重心の初期位置：モデル中心の高さ30%あたり（デフォルト値、後で調整可能）
       State.cg.position = { x: 0, y: State.model.boundingRadius * 0.15, z: 0 };
@@ -84,6 +96,7 @@ function updateModelInfoPanel() {
     nameEl.textContent = 'モデル未読込';
     metaEl.textContent = 'GLB / GLTFファイルを読み込んでください';
   }
+  renderModelSettingsPanel();
 }
 
 function setupModelLoaderUI() {

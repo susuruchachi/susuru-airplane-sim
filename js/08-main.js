@@ -53,6 +53,17 @@ function setupSaveLoadUI() {
 async function applyLoadedConfig(record) {
   try {
     await loadModelFromArrayBuffer(record.modelBuffer, record.modelName, record.modelFileType);
+
+    if (record.modelTransform && State.model.root) {
+      const t = record.modelTransform;
+      State.model.root.rotation.set(t.rotation.x, t.rotation.y, t.rotation.z);
+      State.model.root.scale.set(t.scale.x, t.scale.y, t.scale.z);
+    }
+    if (record.modelWeightKg !== undefined) State.model.weightKg = record.modelWeightKg;
+    if (record.modelMaxSpeedValue !== undefined) State.model.maxSpeedValue = record.modelMaxSpeedValue;
+    if (record.modelMaxSpeedUnit !== undefined) State.model.maxSpeedUnit = record.modelMaxSpeedUnit;
+    renderModelSettingsPanel();
+
     rebuildPartsFromSaved(record.parts || []);
     if (record.cg) {
       State.cg.position = { ...record.cg };

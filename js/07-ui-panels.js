@@ -1,5 +1,122 @@
 // 07-ui-panels.js — 左：パーツ一覧 / 右：インスペクター（種別ごとのプロパティフォーム）
 
+// 機体全体の設定：向き（root.rotation）・大きさ（root.scale）・重量・最高速度
+// root.rotation/scaleがそのまま真の値（このUIはそれを度数などの読みやすい形で読み書きするだけ）
+function renderModelSettingsPanel() {
+  const container = document.getElementById('modelSettings');
+  if (!State.model.root) {
+    container.style.display = 'none';
+    container.innerHTML = '';
+    return;
+  }
+  container.style.display = 'block';
+
+  const root = State.model.root;
+  const rotDeg = {
+    x: THREE.MathUtils.radToDeg(root.rotation.x),
+    y: THREE.MathUtils.radToDeg(root.rotation.y),
+    z: THREE.MathUtils.radToDeg(root.rotation.z),
+  };
+  const scl = root.scale;
+
+  container.innerHTML = `
+    <div class="subgroup-title">機体の向き（度）</div>
+    <div class="row3">
+      ${xyzFieldsHtml('modelRot', rotDeg)}
+    </div>
+    <div class="hint" style="margin-top:4px;">エンジンなど配置済みのパーツは、機体の向きの変更に自動で追従します。</div>
+
+    <div class="subgroup-title">機体の大きさ（倍率）</div>
+    <div class="row3">
+      ${xyzFieldsHtml('modelScl', { x: scl.x, y: scl.y, z: scl.z })}
+    </div>
+    <div class="toggle-row" style="margin-top:2px;">
+      <label>XYZ均等に拡縮</label>
+      <label class="switch">
+        <input type="checkbox" id="fUniformScale" checked>
+        <span class="slider-toggle"></span>
+      </label>
+    </div>
+
+    <div class="subgroup-title">重量・性能</div>
+    <div class="field">
+      <label>総重量（kg）</label>
+      <input type="text" inputmode="decimal" id="fWeightKg" value="${State.model.weightKg}">
+    </div>
+    <div class="field">
+      <label>最高速度</label>
+      <div style="display:flex;gap:6px;">
+        <input type="text" inputmode="decimal" id="fMaxSpeedValue" value="${State.model.maxSpeedValue}" style="flex:1;">
+        <select id="fMaxSpeedUnit" style="flex:0 0 auto;width:90px;">
+          <option value="kt" ${State.model.maxSpeedUnit === 'kt' ? 'selected' : ''}>ノット</option>
+          <option value="mach" ${State.model.maxSpeedUnit === 'mach' ? 'selected' : ''}>マッハ</option>
+        </select>
+      </div>
+    </div>
+    <div class="hint" id="maxSpeedConverted"></div>
+  `;
+
+  bindXyzFields('modelRot', rotDeg, () => {
+    root.rotation.set(
+      THREE.MathUtils.degToRad(rotDeg.x),
+      THREE.MathUtils.degToRad(rotDeg.y),
+      THREE.MathUtils.degToRad(rotDeg.z)
+    );
+  });
+
+  const uniformCheckbox = document.getElementById('fUniformScale');
+  ['x', 'y', 'z'].forEach(axis => {
+    const input = document.getElementById(`f_modelScl_${axis}`);
+    input.addEventListener('change', () => {
+      let v = parseFloat(input.value);
+      if (isNaN(v) || v <= 0) v = 0.01;
+      if (uniformCheckbox.checked) {
+        root.scale.set(v, v, v);
+        ['x', 'y', 'z'].forEach(a => {
+          document.getElementById(`f_modelScl_${a}`).value = v.toFixed(3);
+        });
+      } else {
+        root.scale[axis] = v;
+      }
+    });
+  });
+
+  document.getElementById('fWeightKg').addEventListener('change', (e) => {
+    const v = parseFloat(e.target.value);
+    State.model.weightKg = isNaN(v) ? State.model.weightKg : Math.max(v, 0);
+    e.target.value = State.model.weightKg;
+  });
+
+  const speedValueInput = document.getElementById('fMaxSpeedValue');
+  const speedUnitSelect = document.getElementById('fMaxSpeedUnit');
+  const updateSpeedReadout = () => {
+    document.getElementById('maxSpeedConverted').textContent = formatConvertedSpeed(State.model.maxSpeedValue, State.model.maxSpeedUnit);
+  };
+  speedValueInput.addEventListener('change', (e) => {
+    const v = parseFloat(e.target.value);
+    State.model.maxSpeedValue = isNaN(v) ? State.model.maxSpeedValue : Math.max(v, 0);
+    e.target.value = State.model.maxSpeedValue;
+    updateSpeedReadout();
+  });
+  speedUnitSelect.addEventListener('change', (e) => {
+    State.model.maxSpeedUnit = e.target.value;
+    updateSpeedReadout();
+  });
+  updateSpeedReadout();
+}
+
+// 入力された最高速度を、もう片方の単位に目安換算して表示する（音速は高度により変わるため海面高度の目安値を使用）
+const SOUND_SPEED_KT_AT_SEA_LEVEL = 661.5; // 海面高度・標準大気での音速（ノット）の目安値
+function formatConvertedSpeed(value, unit) {
+  if (unit === 'kt') {
+    const mach = value / SOUND_SPEED_KT_AT_SEA_LEVEL;
+    return `約 マッハ${mach.toFixed(2)}（海面高度目安）`;
+  } else {
+    const kt = value * SOUND_SPEED_KT_AT_SEA_LEVEL;
+    return `約 ${Math.round(kt).toLocaleString()} kt（海面高度目安）`;
+  }
+}
+
 function renderPartList() {
   const listEl = document.getElementById('partList');
   listEl.innerHTML = '';
