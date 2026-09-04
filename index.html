@@ -48,8 +48,11 @@
   /* Left: hierarchy / part list */
   #left{grid-column:1;grid-row:2;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden;}
   #left .section-title{padding:12px 14px 8px;font-size:11px;letter-spacing:.04em;color:var(--text-dim);text-transform:uppercase;}
-  #modelInfo{padding:0 14px 12px;font-size:12px;color:var(--text-dim);border-bottom:1px solid var(--line);padding-bottom:14px;}
+  #modelInfo{padding:0 14px 12px;font-size:12px;color:var(--text-dim);}
   #modelInfo .name{color:var(--text);font-size:13px;margin-bottom:2px;}
+  #modelSettings{padding:0 14px 14px;border-bottom:1px solid var(--line);}
+  #modelSettings .subgroup-title{font-size:12px;color:var(--text);margin:10px 0 8px;font-weight:600;}
+  #modelSettings .subgroup-title:first-child{margin-top:0;}
   #partTypeButtons{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:10px 14px;border-bottom:1px solid var(--line);}
   #partTypeButtons button{
     background:var(--panel-2);border:1px solid var(--line);color:var(--text);
@@ -303,6 +306,8 @@
       <div class="name">モデル未読込</div>
       <div id="modelMeta">GLB / GLTFファイルを読み込んでください</div>
     </div>
+
+    <div id="modelSettings" style="display:none;"></div>
 
     <div class="section-title" style="padding-bottom:0;">パーツを追加</div>
     <div id="partTypeButtons">
