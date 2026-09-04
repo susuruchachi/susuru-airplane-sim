@@ -67,12 +67,6 @@ function syncCgFromGizmo() {
 }
 
 function selectCg() {
-  // 直前に選択されていたパーツが翼なら、頂点ハンドルを消しておく
-  const prevPart = getSelectedPart();
-  if (prevPart && prevPart.type === 'wing') {
-    deselectWingCorner();
-    detachWingCornerHandles(prevPart);
-  }
   State.selectedPartId = null; // パーツ選択とは排他
   State.cg.selected = true;
   State.transformControls.attach(State.cg.gizmo);

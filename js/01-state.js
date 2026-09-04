@@ -1,7 +1,7 @@
 // 01-state.js — アプリ全体のグローバル状態
 // 番号プレフィックス方式：全モジュールはグローバルスコープを共有する
 
-const APP_VERSION = 'v6';
+const APP_VERSION = 'v5';
 
 const State = {
   // Three.js 中枢
@@ -30,7 +30,6 @@ const State = {
   //             gizmo: THREE.Object3D (画面上のハンドル), props: {...種別固有} }
   parts: [],
   selectedPartId: null,
-  selectedCornerKey: null, // 翼パーツの4頂点編集で、現在ドラッグ対象になっている頂点キー（rootLeading等）
   partIdCounter: 1,
   jointIdCounter: 1,
   strutIdCounter: 1,
@@ -71,21 +70,6 @@ const WING_ROLES = [
   { value: 'htail', label: '水平尾翼' },
   { value: 'vtail', label: '垂直尾翼' },
 ];
-
-// 翼の4頂点（コーナー）の識別子。水平な翼（主翼・水平尾翼）と垂直尾翼でラベルの意味が変わる。
-// 配列順は常に [ルート前縁側, ルート後縁側, 翼端前縁側, 翼端後縁側] に対応する頂点キーで統一する
-const WING_CORNER_KEYS = ['rootLeading', 'rootTrailing', 'tipLeading', 'tipTrailing'];
-const WING_CORNER_LABELS_HORIZONTAL = {
-  rootLeading: '付け根・前縁', rootTrailing: '付け根・後縁',
-  tipLeading: '翼端・前縁', tipTrailing: '翼端・後縁',
-};
-const WING_CORNER_LABELS_VTAIL = {
-  rootLeading: '下端・前縁', rootTrailing: '下端・後縁',
-  tipLeading: '上端・前縁', tipTrailing: '上端・後縁',
-};
-function wingCornerLabel(role, key) {
-  return (role === 'vtail' ? WING_CORNER_LABELS_VTAIL : WING_CORNER_LABELS_HORIZONTAL)[key];
-}
 
 // 可動翼面のサブ種別（エルロン／エレベーター／ラダー／フラップ／スポイラー等）
 const CONTROL_SURFACE_KINDS = [
