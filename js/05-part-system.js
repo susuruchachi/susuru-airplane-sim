@@ -12,6 +12,9 @@ function defaultPropsForType(type) {
         span: 2.0,             // 翼幅（m）目安。羽の可動部の親として使う
         role: 'main',          // main | htail | vtail（主翼／水平尾翼／垂直尾翼）
         side: 'left',          // left | right | center（垂直尾翼など中心配置のもの）
+        // 4頂点（コーナー）。パーツのposition基準のローカルオフセット {x,y,z}。
+        // モデルの実際の羽根形状に合わせて個別にドラッグするためのもの。中心が揚力中心として扱われる
+        corners: defaultWingCorners('main'),
       };
     case 'control_surface':
       return {
@@ -41,12 +44,13 @@ function defaultPropsForType(type) {
   }
 }
 
-function createPartGizmoMesh(type, role) {
+function createPartGizmoMesh(type, role, corners) {
   const color = new THREE.Color(PART_TYPE_COLORS[type]);
-  const geo = geometryForPart(type, role);
+  const geo = (type === 'wing' && corners) ? buildWingGeometryFromCorners(corners, role) : geometryForPart(type, role);
   const mat = new THREE.MeshStandardMaterial({
     color, emissive: color, emissiveIntensity: type === 'light' ? 0.9 : 0.25,
     roughness: 0.4, metalness: 0.2, transparent: true, opacity: 0.92,
+    side: type === 'wing' ? THREE.DoubleSide : THREE.FrontSide,
   });
   const mesh = new THREE.Mesh(geo, mat);
   if (type === 'engine') mesh.rotation.z = Math.PI / 2;
@@ -71,11 +75,82 @@ function geometryForPart(type, role) {
   }
 }
 
+// 翼パーツの初期形状ジオメトリ（geometryForPartのwingサイズ）に合わせた4頂点の初期オフセットを返す。
+// 水平翼(main/htail): ルート/翼端はローカルX軸、前縁/後縁はローカルZ軸
+// 垂直尾翼(vtail): ルート/翼端(=下端/上端)はローカルY軸、前縁/後縁はローカルZ軸
+function defaultWingCorners(role) {
+  if (role === 'vtail') {
+    const halfY = 0.45, halfZ = 0.15;
+    return {
+      rootLeading:  { x: 0, y: -halfY, z: -halfZ },
+      rootTrailing: { x: 0, y: -halfY, z: halfZ },
+      tipLeading:   { x: 0, y: halfY, z: -halfZ },
+      tipTrailing:  { x: 0, y: halfY, z: halfZ },
+    };
+  }
+  const halfX = 0.6, halfZ = 0.175;
+  return {
+    rootLeading:  { x: -halfX, y: 0, z: -halfZ },
+    rootTrailing: { x: -halfX, y: 0, z: halfZ },
+    tipLeading:   { x: halfX, y: 0, z: -halfZ },
+    tipTrailing:  { x: halfX, y: 0, z: halfZ },
+  };
+}
+
+// 4頂点の中心（重心）を計算する。主翼ではこれを揚力中心として扱う
+function wingCornersCenter(corners) {
+  const keys = WING_CORNER_KEYS;
+  const sum = { x: 0, y: 0, z: 0 };
+  for (const k of keys) {
+    sum.x += corners[k].x; sum.y += corners[k].y; sum.z += corners[k].z;
+  }
+  return { x: sum.x / keys.length, y: sum.y / keys.length, z: sum.z / keys.length };
+}
+
+// 翼の4頂点（rootLeading, rootTrailing, tipLeading, tipTrailing）から、厚みを持つ板状のジオメトリを生成する。
+// モデルの実際の羽根形状に頂点を合わせたとき、翼のプレースホルダー自体の見た目もそれに追従させるためのもの。
+// 水平翼(main/htail)は厚みをY方向に、垂直尾翼(vtail)は厚みをX方向に加える（板が広がる平面が違うため）
+function buildWingGeometryFromCorners(corners, role) {
+  const rl = corners.rootLeading, rt = corners.rootTrailing, tl = corners.tipLeading, tt = corners.tipTrailing;
+  const thickness = 0.025; // 板の厚み（半分ずつオフセット）
+  const half = thickness / 2;
+  const thicknessAxis = role === 'vtail' ? 'x' : 'y';
+
+  const positions = [];
+  const addTri = (a, b, c) => { positions.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z); };
+  const offset = (p, sign) => ({
+    x: p.x + (thicknessAxis === 'x' ? sign * half : 0),
+    y: p.y + (thicknessAxis === 'y' ? sign * half : 0),
+    z: p.z,
+  });
+
+  const rlU = offset(rl, 1), rtU = offset(rt, 1), tlU = offset(tl, 1), ttU = offset(tt, 1);
+  const rlD = offset(rl, -1), rtD = offset(rt, -1), tlD = offset(tl, -1), ttD = offset(tt, -1);
+
+  // 表面（+方向側。rootLeading, tipLeading, tipTrailing, rootTrailingの順で四角形を三角形2枚に分割）
+  addTri(rlU, tlU, ttU); addTri(rlU, ttU, rtU);
+  // 裏面（-方向側。法線が逆になるよう頂点順を反転）
+  addTri(rlD, ttD, tlD); addTri(rlD, rtD, ttD);
+  // 前縁の側面（rootLeading-tipLeadingの帯）
+  addTri(rlU, rlD, tlD); addTri(rlU, tlD, tlU);
+  // 後縁の側面（rootTrailing-tipTrailingの帯）
+  addTri(rtU, ttD, rtD); addTri(rtU, ttU, ttD);
+  // 翼端の側面（tipLeading-tipTrailingの帯）
+  addTri(tlU, ttD, tlD); addTri(tlU, ttU, ttD);
+  // 付け根の側面（rootLeading-rootTrailingの帯）
+  addTri(rlU, rtD, rlD); addTri(rlU, rtU, rtD);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
 // 翼の役割（主翼/水平尾翼/垂直尾翼）が変わったとき、ギズモの形状だけ差し替える
 function updateWingGizmoShape(part) {
   if (part.type !== 'wing' || !part.gizmo) return;
   part.gizmo.geometry.dispose();
-  part.gizmo.geometry = geometryForPart('wing', part.props.role);
+  part.gizmo.geometry = buildWingGeometryFromCorners(part.props.corners, part.props.role);
 }
 
 // ---- 着陸脚（landing_gear）専用のギズモ構築 ----
@@ -92,6 +167,16 @@ function disposeObject3D(obj) {
     if (child.geometry) child.geometry.dispose();
     if (child.material) child.material.dispose();
   });
+}
+
+// obj が ancestor の子孫（孫以下も含む）かどうかを親を辿って判定する
+function isDescendantOf(obj, ancestor) {
+  let cur = obj ? obj.parent : null;
+  while (cur) {
+    if (cur === ancestor) return true;
+    cur = cur.parent;
+  }
+  return false;
 }
 
 function gearMetalMaterial(color, opts) {
@@ -364,7 +449,7 @@ function addPart(type, position) {
 
   const gizmoMesh = type === 'landing_gear'
     ? buildLandingGearHierarchy(props)
-    : createPartGizmoMesh(type, props.role);
+    : createPartGizmoMesh(type, props.role, props.corners);
   const pos = position || defaultSpawnPosition();
   gizmoMesh.position.copy(pos);
   // モデルのローカル座標系の子として追加する：モデル本体の回転/拡縮に自動追従させるため
@@ -399,8 +484,11 @@ function removePart(id) {
   if (idx === -1) return;
   const part = State.parts[idx];
   if (part.gizmo) {
-    if (State.transformControls.object === part.gizmo) {
+    // TransformControlsが、このパーツ自体か、その子孫（翼の頂点ハンドル等）にアタッチされている場合は先に外す
+    const attached = State.transformControls.object;
+    if (attached && (attached === part.gizmo || isDescendantOf(attached, part.gizmo))) {
       State.transformControls.detach();
+      State.selectedCornerKey = null;
     }
     if (part.gizmo.parent) part.gizmo.parent.remove(part.gizmo);
     disposeObject3D(part.gizmo);
@@ -415,6 +503,7 @@ function removePart(id) {
 
 function clearAllParts() {
   State.transformControls.detach();
+  State.selectedCornerKey = null;
   for (const p of State.parts) {
     if (p.gizmo) {
       if (p.gizmo.parent) p.gizmo.parent.remove(p.gizmo);
@@ -429,6 +518,13 @@ function clearAllParts() {
 }
 
 function selectPart(id) {
+  // 直前に選択されていたパーツが翼なら、頂点ハンドルを消しておく（別パーツ選択・選択解除どちらでも）
+  const prevPart = getSelectedPart();
+  if (prevPart && prevPart.type === 'wing') {
+    deselectWingCorner();
+    detachWingCornerHandles(prevPart);
+  }
+
   State.selectedPartId = id;
   if (id !== null) deselectCg();
   const part = getSelectedPart();
@@ -436,6 +532,7 @@ function selectPart(id) {
     State.transformControls.attach(part.gizmo);
     document.getElementById('gizmoModeBar').style.display = 'flex';
     document.getElementById('axisReadout').style.display = 'block';
+    if (part.type === 'wing') attachWingCornerHandles(part);
     if (isMobileLayout()) openDrawer('right');
   } else if (!State.cg.selected) {
     State.transformControls.detach();
@@ -501,12 +598,19 @@ function mirrorPart(id) {
     mirroredProps.struts = mirroredProps.struts.map(s => ({ ...s, id: genStrutId() }));
   }
 
+  // 翼の4頂点もX座標を反転する（パーツ全体のミラーと整合させ、左右対称の形にするため）
+  if (src.type === 'wing' && mirroredProps.corners) {
+    for (const key of WING_CORNER_KEYS) {
+      mirroredProps.corners[key].x = -mirroredProps.corners[key].x;
+    }
+  }
+
   const baseName = src.name.replace(/（ミラー）$/, '');
   const name = `${baseName}（ミラー）`;
 
   const gizmoMesh = src.type === 'landing_gear'
     ? buildLandingGearHierarchy(mirroredProps)
-    : createPartGizmoMesh(src.type, mirroredProps.role);
+    : createPartGizmoMesh(src.type, mirroredProps.role, mirroredProps.corners);
   gizmoMesh.position.set(-src.position.x, src.position.y, src.position.z);
   // 鏡像変換：X軸まわりの回転はそのまま、Y・Z軸まわりの回転は符号反転
   gizmoMesh.rotation.set(
@@ -543,6 +647,7 @@ function rebuildPartsFromSaved(savedParts) {
   for (const sp of savedParts) {
     const props = { ...sp.props };
     if (sp.type === 'wing' && !props.role) props.role = 'main'; // 旧データ互換（role未設定→主翼扱い）
+    if (sp.type === 'wing' && !props.corners) props.corners = defaultWingCorners(props.role); // 旧データ互換（4頂点未設定→デフォルト形状）
     if (sp.type === 'landing_gear') {
       // 旧データ互換（着陸脚の概念が無かった頃のデータには存在しないため、無ければ空配列で補う）
       if (!props.joints) props.joints = [];
@@ -553,7 +658,7 @@ function rebuildPartsFromSaved(savedParts) {
 
     const gizmoMesh = sp.type === 'landing_gear'
       ? buildLandingGearHierarchy(props)
-      : createPartGizmoMesh(sp.type, props.role);
+      : createPartGizmoMesh(sp.type, props.role, props.corners);
     gizmoMesh.position.set(sp.position.x, sp.position.y, sp.position.z);
     gizmoMesh.rotation.set(
       THREE.MathUtils.degToRad(sp.rotation.x),
