@@ -80,6 +80,19 @@ function loadModelFromArrayBuffer(arrayBuffer, fileName, fileType) {
   });
 }
 
+// 現在の向き（root.rotation）はそのままに、モデルの左右中心をワールド原点のX=0に合わせる。
+// root.positionを一時的に0にしてバウンディングボックスを測ることで、
+// 「今の向きを保ったまま原点に置いたときの中心」を求め、そのX成分だけroot.positionに反映する。
+function centerModelLeftRight() {
+  const root = State.model.root;
+  if (!root) return;
+  const originalX = root.position.x;
+  root.position.x = 0;
+  const box = new THREE.Box3().setFromObject(root);
+  const center = box.getCenter(new THREE.Vector3());
+  root.position.x = originalX - center.x;
+}
+
 function loadModelFromFile(file) {
   const ext = file.name.toLowerCase().endsWith('.gltf') ? 'gltf' : 'glb';
   return file.arrayBuffer().then(buf => loadModelFromArrayBuffer(buf, file.name, ext));

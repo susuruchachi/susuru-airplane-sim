@@ -18,7 +18,7 @@ const State = {
     fileBuffer: null,  // ArrayBuffer（保存用に保持）
     fileType: 'glb',   // 'glb' | 'gltf'
     boundingRadius: 1,
-    // 機体全体の設定。向き・大きさは root.rotation / root.scale が正の値（UIはそこを読み書きする）。
+    // 機体全体の設定。位置・向き・大きさは root.position / root.rotation / root.scale が正の値（UIはそこを読み書きする）。
     // ここには保存/復元のためのメタデータとして重量・最高速度のみ持つ
     weightKg: 1000,          // 総重量（kg）
     maxSpeedValue: 250,      // 最高速度の数値（単位はmaxSpeedUnitに従う）

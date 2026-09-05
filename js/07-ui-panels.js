@@ -1,7 +1,7 @@
 // 07-ui-panels.js — 左：パーツ一覧 / 右：インスペクター（種別ごとのプロパティフォーム）
 
-// 機体全体の設定：向き（root.rotation）・大きさ（root.scale）・重量・最高速度
-// root.rotation/scaleがそのまま真の値（このUIはそれを度数などの読みやすい形で読み書きするだけ）
+// 機体全体の設定：位置（root.position）・向き（root.rotation）・大きさ（root.scale）・重量・最高速度
+// root.position/rotation/scaleがそのまま真の値（このUIはそれを度数などの読みやすい形で読み書きするだけ）
 function renderModelSettingsPanel() {
   const container = document.getElementById('modelSettings');
   if (!State.model.root) {
@@ -18,8 +18,16 @@ function renderModelSettingsPanel() {
     z: THREE.MathUtils.radToDeg(root.rotation.z),
   };
   const scl = root.scale;
+  const pos = { x: root.position.x, y: root.position.y, z: root.position.z };
 
   container.innerHTML = `
+    <div class="subgroup-title">機体の位置</div>
+    <div class="row3">
+      ${xyzFieldsHtml('modelPos', pos)}
+    </div>
+    <button class="btn-danger-outline" id="btnCenterModelX" style="color:var(--accent);border-color:var(--accent-dim);margin-top:6px;">左右の中心を原点に合わせる</button>
+    <div class="hint" style="margin-top:4px;">現在の向きのまま、機体の左右中心（ローカルX）が原点（X=0）に来るよう位置のX成分だけを調整します（Y・Zはそのまま）。エンジンなど配置済みのパーツも自動で追従します。</div>
+
     <div class="subgroup-title">機体の向き（度）</div>
     <div class="row3">
       ${xyzFieldsHtml('modelRot', rotDeg)}
@@ -55,6 +63,15 @@ function renderModelSettingsPanel() {
     </div>
     <div class="hint" id="maxSpeedConverted"></div>
   `;
+
+  bindXyzFields('modelPos', pos, () => {
+    root.position.set(pos.x, pos.y, pos.z);
+  });
+
+  document.getElementById('btnCenterModelX').addEventListener('click', () => {
+    centerModelLeftRight();
+    renderModelSettingsPanel();
+  });
 
   bindXyzFields('modelRot', rotDeg, () => {
     root.rotation.set(

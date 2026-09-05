@@ -114,6 +114,8 @@ async function applyLoadedConfig(record) {
 function applyConfigDataToCurrentModel(data) {
   if (data.modelTransform && State.model.root) {
     const t = data.modelTransform;
+    // position は旧バージョンの保存データには存在しない場合がある（未指定なら読込直後の自動中央寄せ位置のまま）
+    if (t.position) State.model.root.position.set(t.position.x, t.position.y, t.position.z);
     State.model.root.rotation.set(t.rotation.x, t.rotation.y, t.rotation.z);
     State.model.root.scale.set(t.scale.x, t.scale.y, t.scale.z);
   }

@@ -96,6 +96,7 @@ async function saveCurrentConfig(configName) {
     parts: serializeParts(),
     cg: { ...State.cg.position },
     modelTransform: root ? {
+      position: { x: root.position.x, y: root.position.y, z: root.position.z },
       rotation: { x: root.rotation.x, y: root.rotation.y, z: root.rotation.z }, // ラジアンのまま保存
       scale: { x: root.scale.x, y: root.scale.y, z: root.scale.z },
     } : null,
@@ -125,6 +126,7 @@ function buildPortableConfig(configName) {
     parts: serializeParts(),
     cg: { ...State.cg.position },
     modelTransform: {
+      position: { x: root.position.x, y: root.position.y, z: root.position.z },
       rotation: { x: root.rotation.x, y: root.rotation.y, z: root.rotation.z },
       scale: { x: root.scale.x, y: root.scale.y, z: root.scale.z },
     },
