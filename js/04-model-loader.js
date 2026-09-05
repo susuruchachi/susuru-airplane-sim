@@ -83,14 +83,18 @@ function loadModelFromArrayBuffer(arrayBuffer, fileName, fileType) {
 // 現在の向き（root.rotation）はそのままに、モデルの左右中心をワールド原点のX=0に合わせる。
 // root.positionを一時的に0にしてバウンディングボックスを測ることで、
 // 「今の向きを保ったまま原点に置いたときの中心」を求め、そのX成分だけroot.positionに反映する。
+// 位置を変更した直後はmatrixWorldがまだ更新されていないため、Box3を測る前に
+// updateMatrixWorld(true)を明示的に呼んで反映させる（呼ばないと古い位置のまま計算されてズレる）。
 function centerModelLeftRight() {
   const root = State.model.root;
   if (!root) return;
   const originalX = root.position.x;
   root.position.x = 0;
+  root.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(root);
   const center = box.getCenter(new THREE.Vector3());
   root.position.x = originalX - center.x;
+  root.updateMatrixWorld(true);
 }
 
 function loadModelFromFile(file) {
