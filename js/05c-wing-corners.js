@@ -149,3 +149,42 @@ function syncWingCornerFromGizmo(part) {
   c.x = handle.position.x; c.y = handle.position.y; c.z = handle.position.z;
   onWingCornerChanged(part);
 }
+
+// 翼の4頂点から、任意の内部位置をバイリニア補間で求める。
+// spanS: 0=付け根(root) 〜 1=翼端(tip)、chordT: 0=前縁(leading) 〜 1=後縁(trailing)
+function wingPointAt(corners, spanS, chordT) {
+  const lerp3 = (a, b, t) => ({
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
+    z: a.z + (b.z - a.z) * t,
+  });
+  // まず付け根側・翼端側それぞれで前縁→後縁を補間し、その2点を span方向にさらに補間する
+  const rootPoint = lerp3(corners.rootLeading, corners.rootTrailing, chordT);
+  const tipPoint = lerp3(corners.tipLeading, corners.tipTrailing, chordT);
+  return lerp3(rootPoint, tipPoint, spanS);
+}
+
+// 可動翼面を「翼の後縁側1/4」の位置に自動配置する。
+// chordT=0.875（前縁から87.5%＝後縁から1/4の中心線）、spanSは指定位置（デフォルトは翼幅の中央）。
+// 新規パーツを作らず、既存のcontrol_surfaceパーツを対象翼に合わせて配置し直す用途にも使えるよう、
+// 対象パーツ(csPart)と対象翼(wingPart)、span方向の位置(spanS, 0〜1)を引数に取る
+function placeControlSurfaceAtTrailingQuarter(csPart, wingPart, spanS) {
+  if (!csPart || !wingPart || wingPart.type !== 'wing') return;
+  const chordT = 0.875; // 前縁から87.5% = 後縁から1/4の帯の中心線
+  const posOnWing = wingPointAt(wingPart.props.corners, spanS, chordT);
+
+  // wingPart側のローカル座標(位置pos基準)を、csPart側のローカル座標に変換する。
+  // 両パーツは同じ親(機体モデルroot)を共有しているため、
+  // 「wingPart.position + posOnWing(翼のローカル頂点オフセット)」が機体基準の位置になり、
+  // そこからcsPart.positionを引けば良い……のだが、可動翼面はwingPartの子ではなく兄弟なので、
+  // 単純に「機体基準の絶対位置」をそのままcsPart.positionとして設定すれば良い
+  // （wingPart.positionは翼パーツの基準点であり、corners自体がその基準点からのオフセットのため）
+  csPart.position.x = wingPart.position.x + posOnWing.x;
+  csPart.position.y = wingPart.position.y + posOnWing.y;
+  csPart.position.z = wingPart.position.z + posOnWing.z;
+  applyPartToGizmo(csPart);
+
+  csPart.props.parentWingId = wingPart.id;
+}
+
+

@@ -1,7 +1,7 @@
 // 01-state.js — アプリ全体のグローバル状態
 // 番号プレフィックス方式：全モジュールはグローバルスコープを共有する
 
-const APP_VERSION = 'v8';
+const APP_VERSION = 'v9';
 
 const State = {
   // Three.js 中枢
@@ -89,11 +89,11 @@ function wingCornerLabel(role, key) {
 
 // 可動翼面のサブ種別（エルロン／エレベーター／ラダー／フラップ／スポイラー等）
 const CONTROL_SURFACE_KINDS = [
-  { value: 'aileron', label: 'エルロン（補助翼）' },
-  { value: 'elevator', label: 'エレベーター（昇降舵）' },
-  { value: 'rudder', label: 'ラダー（方向舵）' },
-  { value: 'flap', label: 'フラップ（フラップ）' },
-  { value: 'spoiler', label: 'スポイラー' },
+  { value: 'aileron', label: 'エルロン（補助翼）', suggestedSpanS: 0.78 },
+  { value: 'elevator', label: 'エレベーター（昇降舵）', suggestedSpanS: 0.5 },
+  { value: 'rudder', label: 'ラダー（方向舵）', suggestedSpanS: 0.5 },
+  { value: 'flap', label: 'フラップ（フラップ）', suggestedSpanS: 0.3 },
+  { value: 'spoiler', label: 'スポイラー', suggestedSpanS: 0.5 },
 ];
 
 // 航行灯の種別（位置により色や点滅パターンの慣習がある）

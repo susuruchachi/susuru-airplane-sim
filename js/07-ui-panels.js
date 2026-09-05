@@ -442,14 +442,59 @@ function renderTypeSpecificFields(part) {
         </select>
       </div>
       <div class="hint">可動軸はこのパーツのローカル座標系での回転軸です。ギズモを「回転」モードにして向きを確認できます。</div>
+
+      <div class="divider"></div>
+      <div class="subgroup-title">翼から自動配置</div>
+      <div class="field">
+        <label>翼幅方向の位置（0=付け根 〜 1=翼端）</label>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="fSpanS" min="0" max="1" step="0.01" value="${part.props.spanS}" style="flex:1;">
+          <span class="hint" id="spanSReadout" style="margin:0;min-width:38px;text-align:right;">${Math.round(part.props.spanS * 100)}%</span>
+        </div>
+      </div>
+      <button class="btn-danger-outline" id="btnPlaceAtTrailingQuarter" style="color:var(--accent);border-color:var(--accent-dim);" ${!part.props.parentWingId ? 'disabled' : ''}>
+        後縁1/4の位置に自動配置
+      </button>
+      <div class="hint">${part.props.parentWingId ? '選んだ主翼／尾翼の、前縁から75%（後縁側1/4）の位置・上のスライダーで指定した翼幅位置に配置します。' : '先に「所属する主翼／尾翼」を選んでください。'}</div>
+
       <div class="divider"></div>
       <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
     `;
-    document.getElementById('fKind').addEventListener('change', (e) => { part.props.kind = e.target.value; });
+    document.getElementById('fKind').addEventListener('change', (e) => {
+      const oldKindDef = CONTROL_SURFACE_KINDS.find(k => k.value === part.props.kind);
+      const wasAtSuggested = oldKindDef && Math.abs(part.props.spanS - oldKindDef.suggestedSpanS) < 0.001;
+      part.props.kind = e.target.value;
+      // 位置がまだ「前の種類の推奨値」のままなら、新しい種類の推奨値に合わせておく（ユーザーが既に調整済みの位置は尊重し変更しない）
+      if (wasAtSuggested) {
+        const newKindDef = CONTROL_SURFACE_KINDS.find(k => k.value === part.props.kind);
+        if (newKindDef) part.props.spanS = newKindDef.suggestedSpanS;
+      }
+      renderInspector();
+    });
     document.getElementById('fHingeAxis').addEventListener('change', (e) => { part.props.hingeAxis = e.target.value; });
     document.getElementById('fMinDeg').addEventListener('change', (e) => { part.props.minDeg = parseFloat(e.target.value) || 0; });
     document.getElementById('fMaxDeg').addEventListener('change', (e) => { part.props.maxDeg = parseFloat(e.target.value) || 0; });
-    document.getElementById('fParentWing').addEventListener('change', (e) => { part.props.parentWingId = e.target.value || null; });
+    document.getElementById('fParentWing').addEventListener('change', (e) => {
+      part.props.parentWingId = e.target.value || null;
+      renderInspector(); // ボタンの有効/無効状態を更新するため再描画
+    });
+    document.getElementById('fSpanS').addEventListener('input', (e) => {
+      part.props.spanS = parseFloat(e.target.value);
+      document.getElementById('spanSReadout').textContent = Math.round(part.props.spanS * 100) + '%';
+    });
+    const btnPlace = document.getElementById('btnPlaceAtTrailingQuarter');
+    if (btnPlace) {
+      btnPlace.addEventListener('click', () => {
+        const wingPart = State.parts.find(p => p.id === part.props.parentWingId);
+        if (!wingPart) {
+          showToast('所属する主翼／尾翼を選んでください', true);
+          return;
+        }
+        placeControlSurfaceAtTrailingQuarter(part, wingPart, part.props.spanS);
+        renderInspector();
+        showToast(`「${wingPart.name}」の後縁1/4の位置に配置しました`);
+      });
+    }
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
 
   } else if (part.type === 'light') {

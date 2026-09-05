@@ -23,6 +23,7 @@ function defaultPropsForType(type) {
         minDeg: -20,
         maxDeg: 20,
         parentWingId: null,    // どの主翼に属するか（任意）
+        spanS: 0.78,           // 翼幅方向の位置（0=付け根 〜 1=翼端）。「後縁1/4に自動配置」で使う
       };
     case 'light':
       return {
@@ -648,6 +649,11 @@ function rebuildPartsFromSaved(savedParts) {
     const props = { ...sp.props };
     if (sp.type === 'wing' && !props.role) props.role = 'main'; // 旧データ互換（role未設定→主翼扱い）
     if (sp.type === 'wing' && !props.corners) props.corners = defaultWingCorners(props.role); // 旧データ互換（4頂点未設定→デフォルト形状）
+    if (sp.type === 'control_surface' && props.spanS === undefined) {
+      // 旧データ互換（spanS未設定→種類ごとの推奨値、不明ならデフォルトのエルロン相当値）
+      const kindDef = CONTROL_SURFACE_KINDS.find(k => k.value === props.kind);
+      props.spanS = kindDef ? kindDef.suggestedSpanS : 0.78;
+    }
     if (sp.type === 'landing_gear') {
       // 旧データ互換（着陸脚の概念が無かった頃のデータには存在しないため、無ければ空配列で補う）
       if (!props.joints) props.joints = [];
