@@ -1,7 +1,7 @@
 // 01-env-state.js — 環境シーン（空・雲・昼夜サイクル）のグローバル状態
 // 番号プレフィックス方式：flight.html 専用。Builder側(index.html)の State とは別の名前空間。
 
-const ENV_VERSION = 'env-v1';
+const ENV_VERSION = 'env-v2';
 
 const EnvState = {
   // Three.js 中枢
@@ -12,6 +12,7 @@ const EnvState = {
   clock: null,
 
   // 空・天体
+  celestial: null,  // 空ドーム・太陽・月・星をまとめた、カメラに追従するGroup
   sky: null,        // THREE.Sky（大気散乱シェーダーのドーム）
   sunLight: null,   // THREE.DirectionalLight（太陽本体の光）
   moonLight: null,  // THREE.DirectionalLight（月明かり。夜間のみ弱く点く）
@@ -24,23 +25,34 @@ const EnvState = {
   cloudGroup: null,
   cloudClusters: [], // { group, baseX, baseZ, driftX, driftZ } の配列
 
-  // 仮の地面（陸地・海の本実装までのプレースホルダー）
-  ground: null,
+  // 地形（js/env/03b-world.js の高さ関数から作るLOD付きタイル群）と海
+  terrainGroup: null,
+  terrainMaterial: null,
+  sea: null,
+  seaNormalMap: null,
 
-  // 空港（手続き的に生成する既定の空港。GLB読込対応は今後）
-  airport: {
-    group: null,        // 空港全体のTHREE.Group（滑走路の方位はこのgroupのrotation.yで表す）
-    lights: null,       // 灯火のTHREE.Points（夜間に点灯）
-    windsockYaw: null,  // 吹き流しの向きを回すGroup
-    windsockPitch: null,// 吹き流しの垂れ下がりを回すGroup
-    runwayLengthM: 2400,
-    runwayWidthM: 45,
-    headingDeg: 90,     // 滑走路の方位（真北0°、時計回り）。90なら「09/27」
-    lightsMode: 'auto', // auto（夜だけ点灯） | on | off
-    visible: true,
+  // 都市（建物・夜景の灯り）と地名ラベル
+  cityGroup: null,
+  cityBuildings: null,
+  cityLights: null,
+  labelGroup: null,
+  labels: [],
+
+  // 空港。js/env/03b-world.js の WORLD_AIRPORTS からマップ上の固定位置に建てる。
+  // 各要素は { def, id, name, group, lights, windsockYaw, windsockPitch,
+  //            runwayLengthM, runwayWidthM, headingDeg, lightsMode, visible }。
+  airports: [],
+  selectedAirportIndex: 0, // 右パネルの操作対象になっている空港
+
+  // 単一の空港を触っていたころの名残。選択中の空港を指す読み取り専用の別名。
+  get airport() {
+    return this.airports[this.selectedAirportIndex] || null;
   },
 
-  cloudAltitude: 300, // 雲を浮かべる基準高度(m)
+  // ミニマップ（2Dの世界地図）
+  minimap: null,
+
+  cloudAltitude: 1900, // 雲を浮かべる基準高度(m)。積雲の雲底のイメージ
 
   // 昼夜サイクル
   time: {
@@ -55,5 +67,6 @@ const EnvState = {
     windSpeedKmh: 20,
     windDirectionDeg: 90,
     previewAltitudeM: 0,     // 「高度による空の色の変化」のプレビュー用（機体が無いのでスライダーで代用）
+    labelsVisible: true,     // 国名・都市名・空港コードのラベル表示
   },
 };

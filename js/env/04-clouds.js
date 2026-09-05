@@ -1,7 +1,9 @@
 // 04-clouds.js — 雲（ビルボードスプライトの塊を敷き詰め、風で流す）
 
-const CLOUD_MAX_CLUSTERS = 60;
-const CLOUD_FIELD_HALF_SIZE = 3000; // この範囲の外に出たクラスタは反対側から出てくる（無限に続くように見せる）
+// 600km四方のマップでは、原点まわりの数kmだけに雲を置くと空に浮いた板に見えてしまう。
+// 雲原は「カメラを中心とした一定範囲」として扱い、外に出たクラスタは反対側から出てくる。
+const CLOUD_MAX_CLUSTERS = 90;
+const CLOUD_FIELD_HALF_SIZE = 30000; // カメラを中心とした60km四方
 
 let _cloudSpriteTexture = null;
 
@@ -27,7 +29,8 @@ function buildCloudSpriteTexture() {
 function buildCloudCluster() {
   const group = new THREE.Group();
   const puffCount = 5 + Math.floor(Math.random() * 5);
-  const scaleBase = 60 + Math.random() * 90;
+  // 数十km先からでも雲として見える大きさ（積雲1つで1〜2km規模）
+  const scaleBase = 700 + Math.random() * 1100;
   for (let i = 0; i < puffCount; i++) {
     const mat = new THREE.SpriteMaterial({ map: _cloudSpriteTexture, transparent: true, depthWrite: false });
     const sprite = new THREE.Sprite(mat);
@@ -53,7 +56,7 @@ function initClouds() {
     const cluster = buildCloudCluster();
     const baseX = (Math.random() * 2 - 1) * CLOUD_FIELD_HALF_SIZE;
     const baseZ = (Math.random() * 2 - 1) * CLOUD_FIELD_HALF_SIZE;
-    const altitude = EnvState.cloudAltitude + (Math.random() - 0.5) * 80;
+    const altitude = EnvState.cloudAltitude + (Math.random() - 0.5) * 900;
     cluster.position.set(baseX, altitude, baseZ);
     EnvState.cloudGroup.add(cluster);
     EnvState.cloudClusters.push({ group: cluster, baseX, baseZ, driftX: 0, driftZ: 0 });
@@ -79,20 +82,25 @@ function updateClouds(dt) {
   const vz = Math.sin(windRad) * speedMps;
   const box = CLOUD_FIELD_HALF_SIZE * 2;
 
+  // カメラを中心にラップさせるので、どこまで飛んでも雲が周囲に居続ける
+  const cx = EnvState.camera.position.x, cz = EnvState.camera.position.z;
+  const wrapRel = (v) => (((v + CLOUD_FIELD_HALF_SIZE) % box + box) % box) - CLOUD_FIELD_HALF_SIZE;
+
   EnvState.cloudClusters.forEach((c) => {
     c.driftX += vx * dt;
     c.driftZ += vz * dt;
-    const wrap = (base, drift) => (((base + drift + CLOUD_FIELD_HALF_SIZE) % box + box) % box) - CLOUD_FIELD_HALF_SIZE;
-    c.group.position.x = wrap(c.baseX, c.driftX);
-    c.group.position.z = wrap(c.baseZ, c.driftZ);
+    c.group.position.x = cx + wrapRel(c.baseX + c.driftX - cx);
+    c.group.position.z = cz + wrapRel(c.baseZ + c.driftZ - cz);
   });
 }
 
 // 昼夜の光に合わせて雲の色味を変える（03-sky.jsのupdateSkyForSunDirectionから呼ばれる）
 function tintClouds(dayFactor, warmth) {
   if (!EnvState.cloudClusters.length) return;
-  const base = new THREE.Color(0x1c2740).lerp(new THREE.Color(0xffffff), dayFactor);
+  const base = new THREE.Color(0x101828).lerp(new THREE.Color(0xffffff), dayFactor);
   base.lerp(new THREE.Color(0xffb37a), warmth * 0.4 * dayFactor);
+  // ACESトーンマッピング（露出0.6）を通すと白でも灰色に沈むので、1.0を超える明るさを渡す
+  base.multiplyScalar(1 + dayFactor * 0.45);
   EnvState.cloudClusters.forEach((c) => {
     c.group.children.forEach((sprite) => sprite.material.color.copy(base));
   });

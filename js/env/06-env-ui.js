@@ -67,6 +67,7 @@ function setupEnvUI() {
     altitudeReadout.textContent = altitudeSlider.value + ' m';
   });
 
+  setupWorldUI();
   setupAirportUI();
 
   btnReset.addEventListener('click', () => {
@@ -85,62 +86,100 @@ function setupEnvUI() {
     windSpeedSlider.value = 20; windSpeedReadout.textContent = '20 km/h';
     windDirSlider.value = 90; windDirReadout.textContent = '90°';
     altitudeSlider.value = 0; altitudeReadout.textContent = '0 m';
+    setLabelsVisible(true);
+    document.getElementById('envShowLabels').checked = true;
     resetAirportToDefaults();
   });
 }
 
-// 「初期値に戻す」の空港ぶん。EnvStateとUIの両方を既定値へ戻し、空港を作り直す
+// 「初期値に戻す」の空港ぶん。選択中の空港をマップ定義（WORLD_AIRPORTS）の値へ戻す。
 function resetAirportToDefaults() {
   const a = EnvState.airport;
-  a.runwayLengthM = 2400;
-  a.runwayWidthM = 45;
-  a.headingDeg = 90;
+  if (!a) return;
+  a.runwayLengthM = a.def.runwayLengthM;
+  a.runwayWidthM = a.def.runwayWidthM;
+  a.headingDeg = a.def.headingDeg;
   a.lightsMode = 'auto';
   a.visible = true;
   rebuildAirport();
+  syncAirportUIToSelection();
+}
 
-  document.getElementById('envRunwayHeading').value = 90;
-  document.getElementById('envRunwayHeadingReadout').textContent = '090°';
-  document.getElementById('envAirportDesignatorReadout').textContent = '09/27';
-  document.getElementById('envRunwayLength').value = 2400;
-  document.getElementById('envRunwayLengthReadout').textContent = '2400 m';
-  document.getElementById('envRunwayWidth').value = 45;
-  document.getElementById('envRunwayWidthReadout').textContent = '45 m';
-  document.getElementById('envAirportLights').value = 'auto';
-  document.getElementById('envBtnToggleAirport').textContent = '空港を隠す';
+// 右パネルの「世界」セクション（ラベル表示と現在地の読み出し）
+function setupWorldUI() {
+  const showLabels = document.getElementById('envShowLabels');
+  showLabels.checked = EnvState.env.labelsVisible !== false;
+  showLabels.addEventListener('change', () => setLabelsVisible(showLabels.checked));
+}
+
+// カメラの真下がどこかを表示する。毎フレームDOMを触ると重いので5回/秒に間引く。
+let _envWorldReadoutAt = 0;
+
+function updateEnvWorldReadout() {
+  const now = performance.now();
+  if (now - _envWorldReadoutAt < 200) return;
+  _envWorldReadoutAt = now;
+
+  const t = EnvState.orbitControls.target;
+  const regionEl = document.getElementById('envRegionReadout');
+  const groundEl = document.getElementById('envGroundReadout');
+  const nearestEl = document.getElementById('envNearestReadout');
+  if (!regionEl) return;
+
+  const h = worldHeightAt(t.x, t.z);
+  const region = worldRegionAt(t.x, t.z);
+
+  if (h <= 0) {
+    regionEl.textContent = region ? `${region.country.name}沖` : '外洋';
+  } else if (region && region.distanceM < region.city.urbanR) {
+    regionEl.textContent = `${region.country.name} ${region.city.name}`;
+  } else {
+    regionEl.textContent = region ? region.country.name : '--';
+  }
+
+  groundEl.textContent = h > 0
+    ? Math.round(h).toLocaleString() + ' m'
+    : '海面下 ' + Math.round(-h).toLocaleString() + ' m';
+
+  const near = worldNearestAirport(t.x, t.z);
+  nearestEl.textContent = near.airport
+    ? `${near.airport.id} / ${(near.distanceM / 1000).toFixed(0)} km`
+    : '--';
 }
 
 // 空港セクション。滑走路の長さ・幅はジオメトリの作り直しが要るので、
 // ドラッグ中に毎フレーム再生成しないよう change（指を離した時）で反映する。
 // 方位はグループの回転と端の数字の描き直しだけで済むので input（ドラッグ中）で追従させる。
+//
+// 操作対象はセレクトで選んだ1空港。マップ上の位置と標高は固定で、ここでは変えられない
+// （地形がその標高へならされているため。位置を動かすなら js/env/03b-world.js 側を直す）。
 function setupAirportUI() {
-  const a = EnvState.airport;
+  const select = document.getElementById('envAirportSelect');
   const btnToggle = document.getElementById('envBtnToggleAirport');
   const btnFocus = document.getElementById('envBtnFocusAirport');
   const headingSlider = document.getElementById('envRunwayHeading');
-  const headingReadout = document.getElementById('envRunwayHeadingReadout');
-  const designatorReadout = document.getElementById('envAirportDesignatorReadout');
   const lengthSlider = document.getElementById('envRunwayLength');
   const lengthReadout = document.getElementById('envRunwayLengthReadout');
   const widthSlider = document.getElementById('envRunwayWidth');
   const widthReadout = document.getElementById('envRunwayWidthReadout');
   const lightsSelect = document.getElementById('envAirportLights');
 
-  const refreshHeadingLabels = () => {
-    headingReadout.textContent = String(Math.round(a.headingDeg)).padStart(3, '0') + '°';
-    const { near, far } = runwayDesignators(a.headingDeg);
-    designatorReadout.textContent = `${near}/${far}`;
-  };
+  EnvState.airports.forEach((a, i) => {
+    const opt = document.createElement('option');
+    const country = worldCountryById(a.def.country);
+    opt.value = String(i);
+    opt.textContent = `${a.def.id}  ${a.def.name}（${country ? country.name : '?'}）`;
+    select.appendChild(opt);
+  });
 
-  headingSlider.value = a.headingDeg;
-  lengthSlider.value = a.runwayLengthM;
-  widthSlider.value = a.runwayWidthM;
-  lightsSelect.value = a.lightsMode;
-  lengthReadout.textContent = a.runwayLengthM + ' m';
-  widthReadout.textContent = a.runwayWidthM + ' m';
-  refreshHeadingLabels();
+  select.addEventListener('change', () => {
+    EnvState.selectedAirportIndex = parseInt(select.value, 10) || 0;
+    syncAirportUIToSelection();
+    focusCameraOnAirport();
+  });
 
   btnToggle.addEventListener('click', () => {
+    const a = EnvState.airport;
     a.visible = !a.visible;
     a.group.visible = a.visible;
     btnToggle.textContent = a.visible ? '空港を隠す' : '空港を表示';
@@ -149,7 +188,7 @@ function setupAirportUI() {
   btnFocus.addEventListener('click', focusCameraOnAirport);
 
   headingSlider.addEventListener('input', () => {
-    a.headingDeg = parseFloat(headingSlider.value);
+    EnvState.airport.headingDeg = parseFloat(headingSlider.value);
     applyAirportHeading();
     refreshRunwayNumbers();
     refreshHeadingLabels();
@@ -159,7 +198,7 @@ function setupAirportUI() {
     lengthReadout.textContent = lengthSlider.value + ' m';
   });
   lengthSlider.addEventListener('change', () => {
-    a.runwayLengthM = parseFloat(lengthSlider.value);
+    EnvState.airport.runwayLengthM = parseFloat(lengthSlider.value);
     rebuildAirport();
   });
 
@@ -167,13 +206,46 @@ function setupAirportUI() {
     widthReadout.textContent = widthSlider.value + ' m';
   });
   widthSlider.addEventListener('change', () => {
-    a.runwayWidthM = parseFloat(widthSlider.value);
+    EnvState.airport.runwayWidthM = parseFloat(widthSlider.value);
     rebuildAirport();
   });
 
   lightsSelect.addEventListener('change', () => {
-    a.lightsMode = lightsSelect.value;
+    EnvState.airport.lightsMode = lightsSelect.value;
   });
+
+  syncAirportUIToSelection();
+}
+
+// 方位の読み出しと滑走路の呼称（例:09/27）を書き直す
+function refreshHeadingLabels() {
+  const a = EnvState.airport;
+  if (!a) return;
+  document.getElementById('envRunwayHeadingReadout').textContent =
+    String(Math.round(a.headingDeg)).padStart(3, '0') + '°';
+  const { near, far } = runwayDesignators(a.headingDeg);
+  document.getElementById('envAirportDesignatorReadout').textContent = `${near}/${far}`;
+}
+
+// 選択中の空港の値をUI一式へ反映する（空港を切り替えたとき・初期値に戻したとき）
+function syncAirportUIToSelection() {
+  const a = EnvState.airport;
+  if (!a) return;
+
+  document.getElementById('envAirportSelect').value = String(EnvState.selectedAirportIndex);
+  document.getElementById('envRunwayHeading').value = a.headingDeg;
+
+  // 地形をならしてある範囲からはみ出さないよう、長さの上限は空港ごとに変える
+  const lengthSlider = document.getElementById('envRunwayLength');
+  lengthSlider.max = Math.min(a.def.maxRunwayLengthM, 4500);
+  lengthSlider.value = a.runwayLengthM;
+  document.getElementById('envRunwayLengthReadout').textContent = a.runwayLengthM + ' m';
+
+  document.getElementById('envRunwayWidth').value = a.runwayWidthM;
+  document.getElementById('envRunwayWidthReadout').textContent = a.runwayWidthM + ' m';
+  document.getElementById('envAirportLights').value = a.lightsMode;
+  document.getElementById('envBtnToggleAirport').textContent = a.visible ? '空港を隠す' : '空港を表示';
+  refreshHeadingLabels();
 }
 
 // 毎フレーム、現在時刻の表示とスライダー位置を更新する（ドラッグ中は上書きしない）

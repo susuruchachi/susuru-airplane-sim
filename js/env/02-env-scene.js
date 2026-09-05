@@ -4,7 +4,12 @@ function initEnvScene() {
   const canvas = document.getElementById('envViewport');
   const centerEl = document.getElementById('envCenter');
 
-  EnvState.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  // 対数深度バッファ。near=5m のまま 220km 先まで描くと、通常の深度バッファでは
+  // 数十km先で数十mの高低差が潰れてしまい、海面(y=0)が標高10mの島を覆い隠す。
+  // 対数深度なら遠方でも精度が保たれるので、低地の島も滑走路の路面標識も破綻しない。
+  EnvState.renderer = new THREE.WebGLRenderer({
+    canvas, antialias: true, logarithmicDepthBuffer: true,
+  });
   EnvState.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   EnvState.renderer.setSize(centerEl.clientWidth, centerEl.clientHeight);
   EnvState.renderer.outputEncoding = THREE.sRGBEncoding;
@@ -15,10 +20,10 @@ function initEnvScene() {
 
   EnvState.scene = new THREE.Scene();
 
-  // nearを詰めすぎると深度バッファの精度が遠方で足りなくなり、
-  // 地面と滑走路のように高さ差の小さい面が数km先で描き負ける（滑走路が消える）
+  // 対数深度バッファを使っているので near を詰めても遠方の精度が落ちない。
+  // far は600km四方のマップを見渡せる距離。これ以上伸ばしても大気の霞で見えない。
   EnvState.camera = new THREE.PerspectiveCamera(
-    55, centerEl.clientWidth / centerEl.clientHeight, 5, 100000
+    55, centerEl.clientWidth / centerEl.clientHeight, 1, 260000
   );
   EnvState.camera.position.set(0, 60, 220);
 
@@ -27,7 +32,7 @@ function initEnvScene() {
   EnvState.orbitControls.dampingFactor = 0.08;
   EnvState.orbitControls.target.set(0, 40, 0);
   EnvState.orbitControls.minDistance = 5;
-  EnvState.orbitControls.maxDistance = 6000;
+  EnvState.orbitControls.maxDistance = 120000;
   EnvState.orbitControls.maxPolarAngle = Math.PI * 0.495; // 地面の下を覗き込みにくくする
   EnvState.orbitControls.update();
 
@@ -51,7 +56,12 @@ function animateEnv() {
   const dt = Math.min(EnvState.clock.getDelta(), 0.1);
   EnvState.orbitControls.update();
   updateDayNightCycle(dt);
+  updateTerrain();      // カメラが動いたぶんだけ地形タイルのLODを入れ替える
+  updateSea(dt);
   updateClouds(dt);
   updateWindsock();
+  updatePlaceLabels();
+  updateMinimap();
+  updateEnvWorldReadout();
   EnvState.renderer.render(EnvState.scene, EnvState.camera);
 }

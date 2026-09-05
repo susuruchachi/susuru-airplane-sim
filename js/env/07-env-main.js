@@ -6,8 +6,11 @@ function bootstrapEnv() {
   try {
     initEnvScene();
     initSky();
+    initTerrain();   // 地形と海。以降の都市・空港はこの高さの上に載る
+    initPlaces();    // 都市と地名ラベル
     initClouds();
     initAirport();
+    initMinimap();
     setupEnvUI();
     focusCameraOnAirport(); // 起動時は空港全体が見える位置から始める
     animateEnv();

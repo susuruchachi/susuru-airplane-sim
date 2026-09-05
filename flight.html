@@ -93,6 +93,20 @@
   </div>
 
   <div id="right">
+    <div class="section-title">世界</div>
+    <div class="env-group">
+      <canvas id="envMinimap"
+              style="width:100%;max-width:232px;display:block;margin:0 auto 8px;border-radius:6px;border:1px solid #2a3340;background:#0a1017;"></canvas>
+      <div class="env-note" style="margin-top:0;">クリックした地点へ視点が移動します。</div>
+      <div class="env-row" style="margin-top:10px;"><label>現在地</label><span id="envRegionReadout" class="val">--</span></div>
+      <div class="env-row" style="margin-top:6px;"><label>地表の標高</label><span id="envGroundReadout" class="val">-- m</span></div>
+      <div class="env-row" style="margin-top:6px;"><label>最寄りの空港</label><span id="envNearestReadout" class="val">--</span></div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;">
+        <input type="checkbox" id="envShowLabels" checked>
+        <span>国名・都市名・空港名を表示</span>
+      </label>
+    </div>
+
     <div class="section-title">昼夜サイクル</div>
     <div class="env-group">
       <div class="env-row"><label>時刻</label><span id="envTimeReadout" class="val">09:00</span></div>
@@ -123,7 +137,9 @@
 
     <div class="section-title">空港</div>
     <div class="env-group">
-      <div class="env-row"><label>表示</label><span id="envAirportDesignatorReadout" class="val">09/27</span></div>
+      <div class="env-row"><label>空港</label></div>
+      <select id="envAirportSelect"></select>
+      <div class="env-row" style="margin-top:10px;"><label>滑走路</label><span id="envAirportDesignatorReadout" class="val">09/27</span></div>
       <button id="envBtnToggleAirport">空港を隠す</button>
       <div class="env-row" style="margin-top:10px;"><label>滑走路の方位</label><span id="envRunwayHeadingReadout" class="val">090°</span></div>
       <input type="range" id="envRunwayHeading" min="0" max="359" step="1">
@@ -137,7 +153,7 @@
         <option value="on">常時点灯</option>
         <option value="off">消灯</option>
       </select>
-      <button id="envBtnFocusAirport">空港へ視点を戻す</button>
+      <button id="envBtnFocusAirport">この空港へ視点を移す</button>
     </div>
 
     <div class="section-title">高度（プレビュー）</div>
@@ -192,6 +208,10 @@
 <script src="js/env/01-env-state.js" onerror="_markFailed('js/env/01-env-state.js')"></script>
 <script src="js/env/02-env-scene.js" onerror="_markFailed('js/env/02-env-scene.js')"></script>
 <script src="js/env/03-sky.js" onerror="_markFailed('js/env/03-sky.js')"></script>
+<script src="js/env/03b-world.js" onerror="_markFailed('js/env/03b-world.js')"></script>
+<script src="js/env/03c-terrain.js" onerror="_markFailed('js/env/03c-terrain.js')"></script>
+<script src="js/env/03d-places.js" onerror="_markFailed('js/env/03d-places.js')"></script>
+<script src="js/env/03e-minimap.js" onerror="_markFailed('js/env/03e-minimap.js')"></script>
 <script src="js/env/04-clouds.js" onerror="_markFailed('js/env/04-clouds.js')"></script>
 <script src="js/env/04b-airport.js" onerror="_markFailed('js/env/04b-airport.js')"></script>
 <script src="js/env/05-daynight.js" onerror="_markFailed('js/env/05-daynight.js')"></script>

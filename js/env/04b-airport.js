@@ -10,11 +10,11 @@
 // 地面(y=0)の上に、整地エリア→舗装→標識の順で重ねる。
 // 数km先でも描き負けないよう、高さ差は「見た目に響かない範囲で大きめ」に取り、
 // さらに各マテリアルへポリゴンオフセット（デカール用の深度バイアス）をかけている。
-const AIRFIELD_Y = 0.15;
-const TAXIWAY_Y = 0.3;
-const RUNWAY_SURFACE_Y = 0.35;
-const RUNWAY_MARK_Y = 0.5;
-const LIGHT_Y = 1.0;
+const AIRFIELD_Y = 0.4;
+const TAXIWAY_Y = 0.8;
+const RUNWAY_SURFACE_Y = 1.0;
+const RUNWAY_MARK_Y = 1.4;
+const LIGHT_Y = 2.2;
 
 // 重ね順（数字が大きいほど手前に描く）
 const OFFSET_AIRFIELD = 1;
@@ -376,17 +376,45 @@ function buildWindsock(x, z) {
 
 // --- 組み立てと更新 ---------------------------------------------------------
 
+// 世界に定義されたすべての空港（js/env/03b-world.js の WORLD_AIRPORTS）を建てる。
+// 位置・標高・滑走路の向きはマップ側で固定されており、地形はその標高へならされている。
 function initAirport() {
-  EnvState.airport.group = new THREE.Group();
-  EnvState.scene.add(EnvState.airport.group);
-  rebuildAirport();
+  EnvState.airports = WORLD_AIRPORTS.map((def) => ({
+    def,
+    id: def.id,
+    name: def.name,
+    runwayLengthM: def.runwayLengthM,
+    runwayWidthM: def.runwayWidthM,
+    headingDeg: def.headingDeg,
+    lightsMode: 'auto',
+    visible: true,
+    group: null,
+    lights: null,
+    windsockYaw: null,
+    windsockPitch: null,
+  }));
+  EnvState.selectedAirportIndex = 0;
+  for (let i = 0; i < EnvState.airports.length; i++) rebuildAirportAt(i);
 }
 
-// パラメータ（長さ・幅・方位）から空港一式を作り直す
+// 現在UIで選ばれている空港を作り直す
 function rebuildAirport() {
-  const a = EnvState.airport;
-  const group = a.group;
+  rebuildAirportAt(EnvState.selectedAirportIndex);
+}
 
+// 指定した空港をパラメータ（長さ・幅・方位）から作り直す。
+// グループはワールド上の空港位置＋標高に置くので、中身は原点まわりのローカル座標のままでよい。
+function rebuildAirportAt(index) {
+  const a = EnvState.airports[index];
+  if (!a) return;
+
+  if (!a.group) {
+    a.group = new THREE.Group();
+    a.group.position.set(a.def.x, a.def.elevationM, a.def.z);
+    EnvState.scene.add(a.group);
+  }
+
+  const group = a.group;
   while (group.children.length > 0) {
     const child = group.children[0];
     group.remove(child);
@@ -420,12 +448,14 @@ function rebuildAirport() {
 // 方位はグループ全体の回転だけで表す（数字の描き直しだけ別途必要）
 function applyAirportHeading() {
   const a = EnvState.airport;
+  if (!a || !a.group) return;
   a.group.rotation.y = THREE.MathUtils.degToRad(90 - a.headingDeg);
 }
 
 // 方位変更時：回転はそのまま、滑走路端の数字だけ描き直す
 function refreshRunwayNumbers() {
   const a = EnvState.airport;
+  if (!a || !a.group) return;
   const old = a.group.children.find((c) => c.userData.isRunwayNumbers);
   if (old) {
     a.group.remove(old);
@@ -436,36 +466,51 @@ function refreshRunwayNumbers() {
 
 // 昼夜に合わせて灯火を点灯/消灯する（03-sky.jsのupdateSkyForSunDirectionから呼ばれる）
 function updateAirportForDaylight(dayFactor) {
-  const a = EnvState.airport;
-  if (!a.lights) return;
-  let target;
-  if (a.lightsMode === 'on') target = 1;
-  else if (a.lightsMode === 'off') target = 0;
-  else target = 1 - THREE.MathUtils.clamp(dayFactor, 0, 1); // auto：暗くなるほど明るく
-  a.lights.material.opacity = target;
-  a.lights.visible = target > 0.01;
+  for (const a of EnvState.airports) {
+    if (!a.lights) continue;
+    let target;
+    if (a.lightsMode === 'on') target = 1;
+    else if (a.lightsMode === 'off') target = 0;
+    else target = 1 - THREE.MathUtils.clamp(dayFactor, 0, 1); // auto：暗くなるほど明るく
+    a.lights.material.opacity = target;
+    a.lights.visible = target > 0.01;
+  }
 }
 
-// 吹き流しを風向へ向け、風速に応じて水平まで持ち上げる
+// 吹き流しを風向へ向け、風速に応じて水平まで持ち上げる（全空港ぶん）
 function updateWindsock() {
-  const a = EnvState.airport;
-  if (!a.windsockYaw) return;
-
   // 風のベクトルは04-clouds.jsと同じ定義（windDirectionDegは「風が流れていく向き」）
   const d = THREE.MathUtils.degToRad(EnvState.env.windDirectionDeg);
-  // +X を (cos d, 0, sin d) に向ける回転は rotation.y = -d。空港ごと回っているぶんを差し引く
-  a.windsockYaw.rotation.y = -d - a.group.rotation.y;
-
   // 30km/hで水平、0km/hでほぼ真下
   const windFactor = THREE.MathUtils.clamp(EnvState.env.windSpeedKmh / 30, 0, 1);
-  a.windsockPitch.rotation.z = -(1 - windFactor) * THREE.MathUtils.degToRad(78);
+  const pitch = -(1 - windFactor) * THREE.MathUtils.degToRad(78);
+
+  for (const a of EnvState.airports) {
+    if (!a.windsockYaw) continue;
+    // +X を (cos d, 0, sin d) に向ける回転は rotation.y = -d。空港ごと回っているぶんを差し引く
+    a.windsockYaw.rotation.y = -d - a.group.rotation.y;
+    a.windsockPitch.rotation.z = pitch;
+  }
 }
 
 // 空港全体が視界に入る位置へカメラを戻す。
 // 滑走路の全長が入るよう斜め手前から見下ろす（真上すぎても遠すぎても滑走路が線にしか見えないため）
 function focusCameraOnAirport() {
-  const L = EnvState.airport.runwayLengthM;
-  EnvState.orbitControls.target.set(L * 0.06, 0, 20);
-  EnvState.camera.position.set(-L * 0.62, L * 0.155, L * 0.30);
+  const a = EnvState.airport;
+  if (!a) return;
+  const L = a.runwayLengthM;
+  const ox = a.def.x, oy = a.def.elevationM, oz = a.def.z;
+
+  // 滑走路の伸びる向き（方位θ）と、その直交方向
+  const hd = THREE.MathUtils.degToRad(a.headingDeg);
+  const fx = Math.sin(hd), fz = -Math.cos(hd);
+  const sx = -fz, sz = fx;
+
+  EnvState.orbitControls.target.set(ox, oy, oz);
+  EnvState.camera.position.set(
+    ox - fx * L * 0.60 + sx * L * 0.22,
+    oy + L * 0.17,
+    oz - fz * L * 0.60 + sz * L * 0.22
+  );
   EnvState.orbitControls.update();
 }
