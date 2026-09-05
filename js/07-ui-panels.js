@@ -21,10 +21,19 @@ function renderModelSettingsPanel() {
 
   container.innerHTML = `
     <div class="subgroup-title">原点の調整</div>
-    <button class="btn-danger-outline" id="btnCenterModelHorizontally" style="color:var(--accent);border-color:var(--accent-dim);margin-top:0;">
-      原点を機体の左右中心に揃える
+    <div class="field">
+      <label>左右（翼幅）方向の軸</label>
+      <select id="fLateralAxis">
+        <option value="x">X軸</option>
+        <option value="y">Y軸</option>
+        <option value="z">Z軸</option>
+      </select>
+    </div>
+    <button class="btn-danger-outline" id="btnCenterModelOnAxis" style="color:var(--accent);border-color:var(--accent-dim);margin-top:0;">
+      原点をこの軸の中心に揃える
     </button>
-    <div class="hint">モデルの左右方向（X）の中心が原点に来るよう、機体本体だけを移動します。ミラー配置を正しく効かせたいときに使ってください。</div>
+    <div class="hint">選んだ軸方向の中心が原点に来るよう、機体本体だけを移動します。モデルの向きが90度ずれている場合は、実際に翼が伸びている軸を選んでください。</div>
+    <div class="hint" id="modelSizeReadout" style="font-family:var(--mono);"></div>
 
     <div class="subgroup-title">機体の向き（度）</div>
     <div class="row3">
@@ -62,7 +71,18 @@ function renderModelSettingsPanel() {
     <div class="hint" id="maxSpeedConverted"></div>
   `;
 
-  document.getElementById('btnCenterModelHorizontally').addEventListener('click', () => {
+  // 軸選択の初期値を推定値にし、各軸の実寸も表示して判断材料にする
+  const lateralSelect = document.getElementById('fLateralAxis');
+  const guessedAxis = guessLateralAxis();
+  lateralSelect.value = guessedAxis;
+  const meshBox = computeModelMeshBoundingBox();
+  if (meshBox) {
+    const s = meshBox.getSize(new THREE.Vector3());
+    document.getElementById('modelSizeReadout').textContent =
+      `寸法 X ${s.x.toFixed(1)} / Y ${s.y.toFixed(1)} / Z ${s.z.toFixed(1)}（推定: 左右は${guessedAxis.toUpperCase()}軸）`;
+  }
+
+  document.getElementById('btnCenterModelOnAxis').addEventListener('click', () => {
     // パーツは動かさないため、既に配置済みの場合は相対位置がずれる旨を確認する
     if (State.parts.length > 0) {
       const ok = confirm(
@@ -70,16 +90,18 @@ function renderModelSettingsPanel() {
       );
       if (!ok) return;
     }
-    const result = centerModelHorizontally();
+    const axis = document.getElementById('fLateralAxis').value;
+    const result = centerModelOnAxis(axis);
     if (!result) {
       showToast('機体の位置を計算できませんでした', true);
       return;
     }
-    if (Math.abs(result.shiftX) < 0.0005) {
-      showToast('すでに原点が左右中心にあります');
+    if (Math.abs(result.shift) < 0.0005) {
+      showToast(`すでに原点が${axis.toUpperCase()}軸の中心にあります`);
       return;
     }
-    showToast(`機体を X方向に ${result.shiftX.toFixed(3)} 移動し、原点を左右中心に揃えました`);
+    renderModelSettingsPanel(); // 寸法表示を更新
+    showToast(`機体を ${axis.toUpperCase()}方向に ${result.shift.toFixed(3)} 移動し、原点を中心に揃えました`);
   });
 
   bindXyzFields('modelRot', rotDeg, () => {

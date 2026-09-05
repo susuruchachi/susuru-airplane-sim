@@ -102,7 +102,7 @@ async function saveCurrentConfig(configName) {
     modelWeightKg: State.model.weightKg,
     modelMaxSpeedValue: State.model.maxSpeedValue,
     modelMaxSpeedUnit: State.model.maxSpeedUnit,
-    modelMeshOffsetX: State.model.meshOffsetX,
+    modelMeshOffset: { ...State.model.meshOffset },
   };
   await dbPut(STORE_CONFIGS, record);
   await dbPut(STORE_META, { key: 'lastConfigName', value: configName });
@@ -132,7 +132,7 @@ function buildPortableConfig(configName) {
     modelWeightKg: State.model.weightKg,
     modelMaxSpeedValue: State.model.maxSpeedValue,
     modelMaxSpeedUnit: State.model.maxSpeedUnit,
-    modelMeshOffsetX: State.model.meshOffsetX,
+    modelMeshOffset: { ...State.model.meshOffset },
   };
 }
 

@@ -120,7 +120,8 @@ function applyConfigDataToCurrentModel(data) {
   if (data.modelWeightKg !== undefined) State.model.weightKg = data.modelWeightKg;
   if (data.modelMaxSpeedValue !== undefined) State.model.maxSpeedValue = data.modelMaxSpeedValue;
   if (data.modelMaxSpeedUnit !== undefined) State.model.maxSpeedUnit = data.modelMaxSpeedUnit;
-  if (data.modelMeshOffsetX) applyMeshOffsetX(data.modelMeshOffsetX); // 原点を左右中心に揃えた調整を再現
+  if (data.modelMeshOffset) applyMeshOffset(data.modelMeshOffset); // 原点を中心に揃えた調整を再現
+  else if (data.modelMeshOffsetX) applyMeshOffset({ x: data.modelMeshOffsetX, y: 0, z: 0 }); // 旧データ互換（X方向のみ記録していた頃）
   renderModelSettingsPanel();
 
   rebuildPartsFromSaved(data.parts || []);

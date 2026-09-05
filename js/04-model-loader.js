@@ -19,7 +19,7 @@ function clearCurrentModel() {
   State.model.weightKg = 1000;
   State.model.maxSpeedValue = 250;
   State.model.maxSpeedUnit = 'kt';
-  State.model.meshOffsetX = 0;
+  State.model.meshOffset = { x: 0, y: 0, z: 0 };
   State.cg.position = { x: 0, y: 0, z: 0 };
   if (State.cg.gizmo) hideCgGizmo();
 }
@@ -121,34 +121,51 @@ function computeModelMeshBoundingBox() {
   return found ? box : null;
 }
 
-// 機体モデル本体を左右方向(X)に動かして、原点がモデルの左右中心に来るようにする。
+// モデルの寸法から「左右（翼幅）方向がどの軸か」を推定する。
+// 上下は最も短い軸とみなし、残る水平2軸のうち短い方を左右とする
+// （多くの機体で 全長 > 翼幅 のため）。あくまで初期値の提案であり、ユーザーが選び直せる
+function guessLateralAxis() {
+  const box = computeModelMeshBoundingBox();
+  if (!box) return 'x';
+  const size = box.getSize(new THREE.Vector3());
+  const dims = [{ axis: 'x', len: size.x }, { axis: 'y', len: size.y }, { axis: 'z', len: size.z }];
+  dims.sort((a, b) => a.len - b.len);
+  // dims[0]が最短（上下とみなす）、dims[1]とdims[2]が水平2軸。そのうち短いdims[1]を左右とする
+  return dims[1].axis;
+}
+
+// 機体モデル本体を指定軸方向に動かして、原点がモデルのその軸方向の中心に来るようにする。
+// モデルによっては機首がX軸を向いている（一般的な向きから90度ずれている）ことがあるため、
+// 「左右」がどの軸かを呼び出し側から指定できるようにしている。
 // パーツ・重心ギズモは動かさない（ユーザーが配置した位置をそのまま保つ）ため、
 // 既にパーツを置いている場合は相対位置がずれる点を呼び出し側で警告する
-function centerModelHorizontally() {
+function centerModelOnAxis(axis) {
   if (!State.model.root) return null;
   const box = computeModelMeshBoundingBox();
   if (!box) return null;
 
   const center = box.getCenter(new THREE.Vector3());
-  const shiftX = -center.x; // この量だけモデル本体をずらせば、原点が左右中心に来る
+  const shift = -center[axis]; // この量だけモデル本体をずらせば、原点がその軸の中心に来る
 
   for (const child of State.model.root.children) {
     if (!child.userData.isModelMeshRoot) continue;
-    child.position.x += shiftX;
+    child.position[axis] += shift;
   }
-  State.model.meshOffsetX += shiftX; // 保存・復元で同じ状態を再現できるよう累計を記録
+  State.model.meshOffset[axis] += shift; // 保存・復元で同じ状態を再現できるよう累計を記録
 
-  return { shiftX, previousCenterX: center.x };
+  return { axis, shift, previousCenter: center[axis] };
 }
 
 // 保存データから復元するときに、記録しておいた原点調整量をモデル本体へ適用し直す
-function applyMeshOffsetX(offsetX) {
-  if (!State.model.root || !offsetX) return;
+function applyMeshOffset(offset) {
+  if (!State.model.root || !offset) return;
   for (const child of State.model.root.children) {
     if (!child.userData.isModelMeshRoot) continue;
-    child.position.x += offsetX;
+    child.position.x += offset.x || 0;
+    child.position.y += offset.y || 0;
+    child.position.z += offset.z || 0;
   }
-  State.model.meshOffsetX = offsetX;
+  State.model.meshOffset = { x: offset.x || 0, y: offset.y || 0, z: offset.z || 0 };
 }
 
 function setupModelLoaderUI() {

@@ -1,7 +1,7 @@
 // 01-state.js — アプリ全体のグローバル状態
 // 番号プレフィックス方式：全モジュールはグローバルスコープを共有する
 
-const APP_VERSION = 'v11';
+const APP_VERSION = 'v12';
 
 const State = {
   // Three.js 中枢
@@ -23,7 +23,7 @@ const State = {
     weightKg: 1000,          // 総重量（kg）
     maxSpeedValue: 250,      // 最高速度の数値（単位はmaxSpeedUnitに従う）
     maxSpeedUnit: 'kt',      // 'kt'（ノット） | 'mach'（マッハ）
-    meshOffsetX: 0,          // 「原点を左右中心に揃える」で機体本体をずらした累計量（保存・復元用）
+    meshOffset: { x: 0, y: 0, z: 0 }, // 「原点を中心に揃える」で機体本体をずらした累計量（保存・復元用）
   },
 
   // パーツ定義一覧
