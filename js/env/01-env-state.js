@@ -27,6 +27,19 @@ const EnvState = {
   // 仮の地面（陸地・海の本実装までのプレースホルダー）
   ground: null,
 
+  // 空港（手続き的に生成する既定の空港。GLB読込対応は今後）
+  airport: {
+    group: null,        // 空港全体のTHREE.Group（滑走路の方位はこのgroupのrotation.yで表す）
+    lights: null,       // 灯火のTHREE.Points（夜間に点灯）
+    windsockYaw: null,  // 吹き流しの向きを回すGroup
+    windsockPitch: null,// 吹き流しの垂れ下がりを回すGroup
+    runwayLengthM: 2400,
+    runwayWidthM: 45,
+    headingDeg: 90,     // 滑走路の方位（真北0°、時計回り）。90なら「09/27」
+    lightsMode: 'auto', // auto（夜だけ点灯） | on | off
+    visible: true,
+  },
+
   cloudAltitude: 300, // 雲を浮かべる基準高度(m)
 
   // 昼夜サイクル

@@ -3,7 +3,8 @@
 
 const ENV_SUN_DISTANCE = 4000;
 const ENV_MOON_DISTANCE = 4000;
-const ENV_BASE_FOG_DENSITY = 0.00035;
+// 快晴時の視程が数kmになる程度の薄さ。濃くすると数km先の滑走路が霞んで見えなくなる
+const ENV_BASE_FOG_DENSITY = 0.00018;
 
 function initSky() {
   // 大気散乱シェーダーによる空ドーム（Preethamモデル。CDNのTHREE.Skyを利用）
@@ -59,7 +60,8 @@ function initSky() {
   EnvState.scene.fog = new THREE.FogExp2(0xbfd6e8, ENV_BASE_FOG_DENSITY);
 
   // 仮の地面（陸地・海の実装はロードマップの後続項目。今は基準面として平面のみ）
-  const groundMat = new THREE.MeshLambertMaterial({ color: 0x2d5a3d });
+  // 色は outputEncoding=sRGB で持ち上がるぶんを見越して暗めに指定する
+  const groundMat = new THREE.MeshLambertMaterial({ color: 0x13301d });
   EnvState.ground = new THREE.Mesh(new THREE.PlaneGeometry(40000, 40000), groundMat);
   EnvState.ground.rotation.x = -Math.PI / 2;
   EnvState.scene.add(EnvState.ground);
@@ -101,6 +103,7 @@ function updateSkyForSunDirection(sunDir, elevationDeg) {
 
   updateSkyColorsForAltitude(dayFactor);
   if (typeof tintClouds === 'function') tintClouds(dayFactor, warmth);
+  if (typeof updateAirportForDaylight === 'function') updateAirportForDaylight(dayFactor);
 }
 
 // 高度（プレビュー用スライダー）に応じて霧の色・濃さを変える。高いほど霞が減り、空の色が濃くなる。

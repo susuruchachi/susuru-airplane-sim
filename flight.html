@@ -55,16 +55,18 @@
   .env-row label{color:var(--text-dim);}
   .env-row .val{font-family:var(--mono);color:var(--text);font-size:12px;min-width:56px;text-align:right;}
   .env-group input[type=range]{width:100%;accent-color:var(--accent);}
-  .env-group input[type=number]{
+  .env-group input[type=number], .env-group select{
     width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
     padding:6px 8px;border-radius:6px;font-size:12.5px;font-family:var(--mono);
   }
+  .env-group select{font-family:var(--sans);}
   .env-note{font-size:11px;color:var(--text-dim);line-height:1.5;margin-top:4px;}
-  #envBtnToggleTime, #envBtnReset{
+  #envBtnToggleTime, #envBtnReset, #envBtnToggleAirport, #envBtnFocusAirport{
     width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
     padding:8px 10px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:var(--sans);margin-top:6px;
   }
-  #envBtnToggleTime:hover, #envBtnReset:hover{border-color:var(--accent-dim);}
+  #envBtnToggleTime:hover, #envBtnReset:hover,
+  #envBtnToggleAirport:hover, #envBtnFocusAirport:hover{border-color:var(--accent-dim);}
   #envBtnToggleTime.active{background:var(--accent-dim);border-color:var(--accent-dim);}
   #envTimeReadout, #envSunElevationReadout{font-family:var(--mono);color:var(--accent);}
 
@@ -117,6 +119,25 @@
       <input type="range" id="envWindSpeed" min="0" max="150" step="1">
       <div class="env-row" style="margin-top:10px;"><label>風向</label><span id="envWindDirectionReadout" class="val">90°</span></div>
       <input type="range" id="envWindDirection" min="0" max="360" step="1">
+    </div>
+
+    <div class="section-title">空港</div>
+    <div class="env-group">
+      <div class="env-row"><label>表示</label><span id="envAirportDesignatorReadout" class="val">09/27</span></div>
+      <button id="envBtnToggleAirport">空港を隠す</button>
+      <div class="env-row" style="margin-top:10px;"><label>滑走路の方位</label><span id="envRunwayHeadingReadout" class="val">090°</span></div>
+      <input type="range" id="envRunwayHeading" min="0" max="359" step="1">
+      <div class="env-row" style="margin-top:10px;"><label>滑走路の長さ</label><span id="envRunwayLengthReadout" class="val">2400 m</span></div>
+      <input type="range" id="envRunwayLength" min="800" max="4000" step="100">
+      <div class="env-row" style="margin-top:10px;"><label>滑走路の幅</label><span id="envRunwayWidthReadout" class="val">45 m</span></div>
+      <input type="range" id="envRunwayWidth" min="23" max="60" step="1">
+      <div class="env-row" style="margin-top:10px;"><label>灯火</label></div>
+      <select id="envAirportLights">
+        <option value="auto">自動（夜間に点灯）</option>
+        <option value="on">常時点灯</option>
+        <option value="off">消灯</option>
+      </select>
+      <button id="envBtnFocusAirport">空港へ視点を戻す</button>
     </div>
 
     <div class="section-title">高度（プレビュー）</div>
@@ -172,6 +193,7 @@
 <script src="js/env/02-env-scene.js" onerror="_markFailed('js/env/02-env-scene.js')"></script>
 <script src="js/env/03-sky.js" onerror="_markFailed('js/env/03-sky.js')"></script>
 <script src="js/env/04-clouds.js" onerror="_markFailed('js/env/04-clouds.js')"></script>
+<script src="js/env/04b-airport.js" onerror="_markFailed('js/env/04b-airport.js')"></script>
 <script src="js/env/05-daynight.js" onerror="_markFailed('js/env/05-daynight.js')"></script>
 <script src="js/env/06-env-ui.js" onerror="_markFailed('js/env/06-env-ui.js')"></script>
 <script src="js/env/07-env-main.js" onerror="_markFailed('js/env/07-env-main.js')"></script>

@@ -7,7 +7,9 @@ function bootstrapEnv() {
     initEnvScene();
     initSky();
     initClouds();
+    initAirport();
     setupEnvUI();
+    focusCameraOnAirport(); // 起動時は空港全体が見える位置から始める
     animateEnv();
     envBootstrapOk = true;
   } catch (err) {

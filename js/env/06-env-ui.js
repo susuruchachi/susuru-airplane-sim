@@ -67,6 +67,8 @@ function setupEnvUI() {
     altitudeReadout.textContent = altitudeSlider.value + ' m';
   });
 
+  setupAirportUI();
+
   btnReset.addEventListener('click', () => {
     EnvState.time.hours = 9;
     EnvState.time.cycleMinutes = 15;
@@ -83,6 +85,94 @@ function setupEnvUI() {
     windSpeedSlider.value = 20; windSpeedReadout.textContent = '20 km/h';
     windDirSlider.value = 90; windDirReadout.textContent = '90°';
     altitudeSlider.value = 0; altitudeReadout.textContent = '0 m';
+    resetAirportToDefaults();
+  });
+}
+
+// 「初期値に戻す」の空港ぶん。EnvStateとUIの両方を既定値へ戻し、空港を作り直す
+function resetAirportToDefaults() {
+  const a = EnvState.airport;
+  a.runwayLengthM = 2400;
+  a.runwayWidthM = 45;
+  a.headingDeg = 90;
+  a.lightsMode = 'auto';
+  a.visible = true;
+  rebuildAirport();
+
+  document.getElementById('envRunwayHeading').value = 90;
+  document.getElementById('envRunwayHeadingReadout').textContent = '090°';
+  document.getElementById('envAirportDesignatorReadout').textContent = '09/27';
+  document.getElementById('envRunwayLength').value = 2400;
+  document.getElementById('envRunwayLengthReadout').textContent = '2400 m';
+  document.getElementById('envRunwayWidth').value = 45;
+  document.getElementById('envRunwayWidthReadout').textContent = '45 m';
+  document.getElementById('envAirportLights').value = 'auto';
+  document.getElementById('envBtnToggleAirport').textContent = '空港を隠す';
+}
+
+// 空港セクション。滑走路の長さ・幅はジオメトリの作り直しが要るので、
+// ドラッグ中に毎フレーム再生成しないよう change（指を離した時）で反映する。
+// 方位はグループの回転と端の数字の描き直しだけで済むので input（ドラッグ中）で追従させる。
+function setupAirportUI() {
+  const a = EnvState.airport;
+  const btnToggle = document.getElementById('envBtnToggleAirport');
+  const btnFocus = document.getElementById('envBtnFocusAirport');
+  const headingSlider = document.getElementById('envRunwayHeading');
+  const headingReadout = document.getElementById('envRunwayHeadingReadout');
+  const designatorReadout = document.getElementById('envAirportDesignatorReadout');
+  const lengthSlider = document.getElementById('envRunwayLength');
+  const lengthReadout = document.getElementById('envRunwayLengthReadout');
+  const widthSlider = document.getElementById('envRunwayWidth');
+  const widthReadout = document.getElementById('envRunwayWidthReadout');
+  const lightsSelect = document.getElementById('envAirportLights');
+
+  const refreshHeadingLabels = () => {
+    headingReadout.textContent = String(Math.round(a.headingDeg)).padStart(3, '0') + '°';
+    const { near, far } = runwayDesignators(a.headingDeg);
+    designatorReadout.textContent = `${near}/${far}`;
+  };
+
+  headingSlider.value = a.headingDeg;
+  lengthSlider.value = a.runwayLengthM;
+  widthSlider.value = a.runwayWidthM;
+  lightsSelect.value = a.lightsMode;
+  lengthReadout.textContent = a.runwayLengthM + ' m';
+  widthReadout.textContent = a.runwayWidthM + ' m';
+  refreshHeadingLabels();
+
+  btnToggle.addEventListener('click', () => {
+    a.visible = !a.visible;
+    a.group.visible = a.visible;
+    btnToggle.textContent = a.visible ? '空港を隠す' : '空港を表示';
+  });
+
+  btnFocus.addEventListener('click', focusCameraOnAirport);
+
+  headingSlider.addEventListener('input', () => {
+    a.headingDeg = parseFloat(headingSlider.value);
+    applyAirportHeading();
+    refreshRunwayNumbers();
+    refreshHeadingLabels();
+  });
+
+  lengthSlider.addEventListener('input', () => {
+    lengthReadout.textContent = lengthSlider.value + ' m';
+  });
+  lengthSlider.addEventListener('change', () => {
+    a.runwayLengthM = parseFloat(lengthSlider.value);
+    rebuildAirport();
+  });
+
+  widthSlider.addEventListener('input', () => {
+    widthReadout.textContent = widthSlider.value + ' m';
+  });
+  widthSlider.addEventListener('change', () => {
+    a.runwayWidthM = parseFloat(widthSlider.value);
+    rebuildAirport();
+  });
+
+  lightsSelect.addEventListener('change', () => {
+    a.lightsMode = lightsSelect.value;
   });
 }
 
