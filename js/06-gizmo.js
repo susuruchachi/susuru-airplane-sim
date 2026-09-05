@@ -17,6 +17,14 @@ function setupGizmoUI() {
       updateInspectorNumbersOnly(null, true);
       return;
     }
+    if (State.selectedCornerKey) {
+      const part = getSelectedPart();
+      if (part) {
+        syncWingCornerFromGizmo(part);
+        updateInspectorNumbersOnly(part);
+      }
+      return;
+    }
     const part = getSelectedPart();
     if (part) {
       syncPartFromGizmo(part);
@@ -27,6 +35,7 @@ function setupGizmoUI() {
   // キーボードショートカット（W/E/R = 移動/回転/拡縮、船シム/宇宙船シムと共通の慣習）
   window.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (State.selectedCornerKey) return; // 頂点編集中はモード切替（移動のみ固定）を無効化
     if (e.key === 'w' || e.key === 'W') setGizmoMode('translate');
     if (e.key === 'e' || e.key === 'E') setGizmoMode('rotate');
     if (e.key === 'r' || e.key === 'R') setGizmoMode('scale');
@@ -35,7 +44,7 @@ function setupGizmoUI() {
         removePart(State.selectedPartId);
       }
     }
-    if (e.key === 'Escape') { selectPart(null); deselectCg(); renderInspector(); }
+    if (e.key === 'Escape') { deselectWingCorner(); selectPart(null); deselectCg(); renderInspector(); }
   });
 }
 
@@ -69,6 +78,17 @@ function setupViewportPicking() {
     mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(mouse, State.camera);
 
+    // 選択中パーツの頂点ハンドルがあれば最優先でピッキング対象にする（翼本体よりハンドルを優先して掴めるように）
+    const selectedPart = getSelectedPart();
+    if (selectedPart && selectedPart.cornerHandleMeshes) {
+      const handleMeshes = Object.values(selectedPart.cornerHandleMeshes);
+      const handleHits = raycaster.intersectObjects(handleMeshes, false);
+      if (handleHits.length > 0) {
+        selectWingCorner(selectedPart, handleHits[0].object.userData.cornerKey);
+        return;
+      }
+    }
+
     const pickables = State.parts.map(p => p.gizmo).filter(Boolean);
     if (State.cg.gizmo && State.cg.gizmo.visible) pickables.push(State.cg.gizmo);
     const hits = raycaster.intersectObjects(pickables, true);
@@ -77,10 +97,12 @@ function setupViewportPicking() {
       // 重心ギズモはGroupなので子メッシュからルートを辿る
       while (obj.parent && !obj.userData.partId && !obj.userData.isCgGizmo) obj = obj.parent;
       if (obj.userData.isCgGizmo) {
+        deselectWingCorner();
         deselectCg();
         selectPart(null);
         selectCg();
       } else if (obj.userData.partId) {
+        deselectWingCorner();
         deselectCg();
         selectPart(obj.userData.partId);
       }
@@ -102,6 +124,16 @@ function updateAxisReadout() {
   }
   const part = getSelectedPart();
   if (!part) return;
+  if (State.selectedCornerKey && part.props.corners) {
+    const c = part.props.corners[State.selectedCornerKey];
+    el.innerHTML = `
+      <div class="row" style="color:#ffb300;margin-bottom:2px;">頂点：${wingCornerLabel(part.props.role, State.selectedCornerKey)}</div>
+      <div class="row"><span class="axis-x">X ${c.x.toFixed(2)}</span></div>
+      <div class="row"><span class="axis-y">Y ${c.y.toFixed(2)}</span></div>
+      <div class="row"><span class="axis-z">Z ${c.z.toFixed(2)}</span></div>
+    `;
+    return;
+  }
   el.innerHTML = `
     <div class="row"><span class="axis-x">X ${part.position.x.toFixed(2)}</span></div>
     <div class="row"><span class="axis-y">Y ${part.position.y.toFixed(2)}</span></div>

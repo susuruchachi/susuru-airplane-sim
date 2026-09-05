@@ -3,6 +3,9 @@
 function setupSaveLoadUI() {
   const btnSave = document.getElementById('btnSaveConfig');
   const btnLoadSaved = document.getElementById('btnLoadSaved');
+  const btnDownload = document.getElementById('btnDownloadConfig');
+  const btnImport = document.getElementById('btnImportConfig');
+  const configFileInput = document.getElementById('configFileInput');
   const statusEl = document.getElementById('saveStatus');
 
   btnSave.addEventListener('click', async () => {
@@ -48,34 +51,82 @@ function setupSaveLoadUI() {
     }
     await applyLoadedConfig(record);
   });
+
+  // 3Dモデル本体を含まない設定ファイル(.json)をダウンロード — デバイス間で設定だけ持ち運ぶ用
+  btnDownload.addEventListener('click', () => {
+    if (!State.model.root) {
+      showToast('ダウンロードするにはまずモデルを読み込んでください', true);
+      return;
+    }
+    const defaultName = State.configName || State.model.name || 'flight-sim-config';
+    const input = prompt('ダウンロードする設定の名前を入力してください', defaultName);
+    if (input === null) return; // キャンセル
+    const name = input.trim() || 'flight-sim-config';
+    try {
+      downloadPortableConfig(name);
+      showToast('設定ファイルをダウンロードしました（3Dモデル本体は含まれません）');
+    } catch (err) {
+      console.error(err);
+      showToast('ダウンロードに失敗しました', true);
+    }
+  });
+
+  // 設定ファイル(.json)を読み込んで、今開いているモデルに適用する
+  btnImport.addEventListener('click', () => {
+    if (!State.model.root) {
+      showToast('設定を読み込む前に、まず機体モデルを読み込んでください', true);
+      return;
+    }
+    configFileInput.click();
+  });
+  configFileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const data = await readPortableConfigFile(file);
+      applyConfigDataToCurrentModel(data);
+      State.configName = data.name || State.configName;
+      statusEl.textContent = `「${data.name || 'インポートした設定'}」を適用しました`;
+      showToast('設定を読み込みました（今開いているモデルに適用されました）');
+    } catch (err) {
+      console.error(err);
+      showToast('設定ファイルの読込に失敗しました。ファイル形式を確認してください', true);
+    }
+    configFileInput.value = '';
+  });
 }
 
 async function applyLoadedConfig(record) {
   try {
     await loadModelFromArrayBuffer(record.modelBuffer, record.modelName, record.modelFileType);
-
-    if (record.modelTransform && State.model.root) {
-      const t = record.modelTransform;
-      State.model.root.rotation.set(t.rotation.x, t.rotation.y, t.rotation.z);
-      State.model.root.scale.set(t.scale.x, t.scale.y, t.scale.z);
-    }
-    if (record.modelWeightKg !== undefined) State.model.weightKg = record.modelWeightKg;
-    if (record.modelMaxSpeedValue !== undefined) State.model.maxSpeedValue = record.modelMaxSpeedValue;
-    if (record.modelMaxSpeedUnit !== undefined) State.model.maxSpeedUnit = record.modelMaxSpeedUnit;
-    renderModelSettingsPanel();
-
-    rebuildPartsFromSaved(record.parts || []);
-    if (record.cg) {
-      State.cg.position = { ...record.cg };
-      applyCgToGizmo();
-      if (State.cg.selected) updateInspectorNumbersOnly(null, true);
-    }
+    applyConfigDataToCurrentModel(record);
     State.configName = record.name;
     document.getElementById('saveStatus').textContent = `「${record.name}」を読み込みました`;
     showToast(`「${record.name}」を読み込みました`);
   } catch (err) {
     console.error(err);
     showToast('設定の読込に失敗しました', true);
+  }
+}
+
+// パーツ・重心・機体の向き/大きさ/重量/速度を、現在読み込み済みのモデルに適用する共通処理。
+// 保存済み設定の読込(applyLoadedConfig)と、モデルを含まないポータブル設定のインポート(importPortableConfigFile)の両方から使う
+function applyConfigDataToCurrentModel(data) {
+  if (data.modelTransform && State.model.root) {
+    const t = data.modelTransform;
+    State.model.root.rotation.set(t.rotation.x, t.rotation.y, t.rotation.z);
+    State.model.root.scale.set(t.scale.x, t.scale.y, t.scale.z);
+  }
+  if (data.modelWeightKg !== undefined) State.model.weightKg = data.modelWeightKg;
+  if (data.modelMaxSpeedValue !== undefined) State.model.maxSpeedValue = data.modelMaxSpeedValue;
+  if (data.modelMaxSpeedUnit !== undefined) State.model.maxSpeedUnit = data.modelMaxSpeedUnit;
+  renderModelSettingsPanel();
+
+  rebuildPartsFromSaved(data.parts || []);
+  if (data.cg) {
+    State.cg.position = { ...data.cg };
+    applyCgToGizmo();
+    if (State.cg.selected) updateInspectorNumbersOnly(null, true);
   }
 }
 

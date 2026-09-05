@@ -294,6 +294,16 @@ function updateInspectorNumbersOnly(part, isCg) {
     });
     return;
   }
+  if (State.selectedCornerKey && part.props.corners) {
+    const c = part.props.corners[State.selectedCornerKey];
+    ['x', 'y', 'z'].forEach(axis => {
+      const input = document.getElementById(`f_corner_${axis}`);
+      if (input && document.activeElement !== input) {
+        input.value = c[axis].toFixed(3);
+      }
+    });
+    return;
+  }
   ['pos', 'rot', 'scl'].forEach(prefix => {
     const vec = prefix === 'pos' ? part.position : prefix === 'rot' ? part.rotation : part.scale;
     ['x', 'y', 'z'].forEach(axis => {
@@ -335,6 +345,7 @@ function renderTypeSpecificFields(part) {
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
 
   } else if (part.type === 'wing') {
+    const center = wingCornersCenter(part.props.corners);
     container.innerHTML = `
       <div class="subgroup-title">主翼／尾翼の設定</div>
       <div class="field">
@@ -356,6 +367,18 @@ function renderTypeSpecificFields(part) {
         </select>
       </div>
       <div class="hint">可動翼面（エルロン等）を追加するときの「所属する主翼」として選択できます。垂直尾翼は通常1つで中央配置のため左右位置は表示されません。</div>
+
+      <div class="divider"></div>
+      <div class="subgroup-title">4頂点でモデルの羽根形状に合わせる</div>
+      <div class="hint" style="margin-bottom:10px;">ビューポート上の黄色い点をドラッグするか、下のボタンで頂点を選んで数値入力できます。4頂点の中心（赤い点）が自動計算され、${part.props.role === 'main' ? '揚力の発生する中心位置' : '基準位置'}として扱われます。</div>
+      <div id="cornerButtonsRow" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;"></div>
+      <div id="cornerFieldsArea"></div>
+
+      <div class="field" style="margin-top:4px;">
+        <label>${part.props.role === 'main' ? '揚力中心（自動計算・参考値）' : '4頂点の中心（自動計算・参考値）'}</label>
+        <div class="hint" style="font-family:var(--mono);margin-top:0;">X ${center.x.toFixed(3)}　Y ${center.y.toFixed(3)}　Z ${center.z.toFixed(3)}</div>
+      </div>
+
       ${canMirrorPart(part) ? `
         <div class="divider"></div>
         <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
@@ -365,8 +388,10 @@ function renderTypeSpecificFields(part) {
       part.props.role = e.target.value;
       if (part.props.role === 'vtail') part.props.side = 'center';
       else if (part.props.side === 'center') part.props.side = 'left';
-      updateWingGizmoShape(part);
+      part.props.corners = defaultWingCorners(part.props.role); // 役割が変わると頂点の意味も変わるため初期形状にリセット
+      onWingCornerChanged(part);
       renderInspector();
+      showToast('役割の変更に伴い、4頂点の位置をリセットしました');
     });
     document.getElementById('fSpan').addEventListener('change', (e) => {
       part.props.span = parseFloat(e.target.value) || 0;
@@ -375,6 +400,9 @@ function renderTypeSpecificFields(part) {
     if (sideSelect) {
       sideSelect.addEventListener('change', (e) => { part.props.side = e.target.value; });
     }
+
+    renderWingCornerButtons(part);
+
     const btnMirror = document.getElementById('btnMirrorPart');
     if (btnMirror) btnMirror.addEventListener('click', () => mirrorPart(part.id));
 
@@ -647,6 +675,45 @@ function renderLandingGearFields(container, part) {
   });
 
   document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
+}
+
+// 翼の4頂点：選択ボタン一式＋選択中頂点のXYZ数値入力欄
+function renderWingCornerButtons(part) {
+  const buttonsRow = document.getElementById('cornerButtonsRow');
+  const fieldsArea = document.getElementById('cornerFieldsArea');
+  if (!buttonsRow || !fieldsArea) return;
+
+  buttonsRow.innerHTML = WING_CORNER_KEYS.map(key => {
+    const isSelected = State.selectedCornerKey === key;
+    return `<button class="btn-danger-outline" data-corner="${key}" style="
+      color:${isSelected ? '#04121e' : 'var(--accent)'};
+      background:${isSelected ? 'var(--accent)' : 'transparent'};
+      border-color:var(--accent-dim);font-size:11.5px;padding:7px 6px;
+    ">${wingCornerLabel(part.props.role, key)}</button>`;
+  }).join('');
+
+  buttonsRow.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      selectWingCorner(part, btn.dataset.corner);
+      renderInspector();
+    });
+  });
+
+  if (State.selectedCornerKey && part.props.corners[State.selectedCornerKey]) {
+    const key = State.selectedCornerKey;
+    const c = part.props.corners[key];
+    fieldsArea.innerHTML = `
+      <div class="subgroup-title" style="font-size:11.5px;color:var(--text-dim);">選択中：${wingCornerLabel(part.props.role, key)}（パーツ基準のローカル座標, m）</div>
+      <div class="row3">${xyzFieldsHtml('corner', c)}</div>
+    `;
+    bindXyzFields('corner', c, () => {
+      const handle = part.cornerHandleMeshes ? part.cornerHandleMeshes[key] : null;
+      if (handle) handle.position.set(c.x, c.y, c.z);
+      onWingCornerChanged(part);
+    });
+  } else {
+    fieldsArea.innerHTML = `<div class="hint">上のボタンで頂点を選ぶと、ここに座標を数値入力できます。</div>`;
+  }
 }
 
 function updatePartGizmoColor(part) {
