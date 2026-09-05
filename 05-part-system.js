@@ -1,0 +1,704 @@
+// 05-part-system.js — パーツ（エンジン/主翼/可動翼面/航行灯）の追加・削除・可視化
+
+function defaultPropsForType(type) {
+  switch (type) {
+    case 'engine':
+      return {
+        thrustKgf: 2000,       // 最大推力（kgf、参考値・後の飛行モデルで使用）
+        spinAxis: 'z',         // プロペラ/ファンの回転軸
+      };
+    case 'wing':
+      return {
+        span: 2.0,             // 翼幅（m）目安。羽の可動部の親として使う
+        role: 'main',          // main | htail | vtail（主翼／水平尾翼／垂直尾翼）
+        side: 'left',          // left | right | center（垂直尾翼など中心配置のもの）
+        // 4頂点（コーナー）。パーツのposition基準のローカルオフセット {x,y,z}。
+        // モデルの実際の羽根形状に合わせて個別にドラッグするためのもの。中心が揚力中心として扱われる
+        corners: defaultWingCorners('main'),
+      };
+    case 'control_surface':
+      return {
+        kind: 'aileron',
+        hingeAxis: 'x',        // 可動軸（ローカル座標系）
+        minDeg: -20,
+        maxDeg: 20,
+        parentWingId: null,    // どの主翼に属するか（任意）
+        spanS: 0.78,           // 翼幅方向の位置（0=付け根 〜 1=翼端）。「後縁1/4に自動配置」で使う
+      };
+    case 'light':
+      return {
+        kind: 'nav_red',
+        color: LIGHT_KINDS[0].color,
+        blink: LIGHT_KINDS[0].blink,
+      };
+    case 'landing_gear':
+      return {
+        gearPosition: 'nose',   // nose | main_left | main_right | other
+        deployState: 1,         // 0=格納 〜 1=展開（プレビュー用の現在値）
+        retractedAtZero: true,  // true: deployState=0が「関節角度・伸縮ともに最小」＝格納 / false: 逆
+        // 初期状態で1関節+1伸縮節を持たせ、追加直後から「折りたたみ脚」らしい見た目にする
+        joints: [{ id: genJointId(), axis: 'x', minDeg: -90, maxDeg: 0, label: '主関節' }],
+        struts: [{ id: genStrutId(), axis: 'y', minLength: 0.3, maxLength: 0.7, label: '伸縮支柱' }],
+      };
+    default:
+      return {};
+  }
+}
+
+function createPartGizmoMesh(type, role, corners) {
+  const color = new THREE.Color(PART_TYPE_COLORS[type]);
+  const geo = (type === 'wing' && corners) ? buildWingGeometryFromCorners(corners, role) : geometryForPart(type, role);
+  const mat = new THREE.MeshStandardMaterial({
+    color, emissive: color, emissiveIntensity: type === 'light' ? 0.9 : 0.25,
+    roughness: 0.4, metalness: 0.2, transparent: true, opacity: 0.92,
+    side: type === 'wing' ? THREE.DoubleSide : THREE.FrontSide,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  if (type === 'engine') mesh.rotation.z = Math.PI / 2;
+  mesh.userData.isPartGizmo = true;
+  return mesh;
+}
+
+function geometryForPart(type, role) {
+  switch (type) {
+    case 'engine':
+      return new THREE.CylinderGeometry(0.18, 0.22, 0.4, 16);
+    case 'wing':
+      // 垂直尾翼は縦に立てた薄板、それ以外（主翼・水平尾翼）は横に広い薄板
+      if (role === 'vtail') return new THREE.BoxGeometry(0.35, 0.9, 0.3);
+      return new THREE.BoxGeometry(1.2, 0.06, 0.35);
+    case 'control_surface':
+      return new THREE.BoxGeometry(0.4, 0.04, 0.18);
+    case 'light':
+      return new THREE.SphereGeometry(0.07, 12, 12);
+    default:
+      return new THREE.SphereGeometry(0.1, 8, 8);
+  }
+}
+
+// 翼パーツの初期形状ジオメトリ（geometryForPartのwingサイズ）に合わせた4頂点の初期オフセットを返す。
+// 水平翼(main/htail): ルート/翼端はローカルX軸、前縁/後縁はローカルZ軸
+// 垂直尾翼(vtail): ルート/翼端(=下端/上端)はローカルY軸、前縁/後縁はローカルZ軸
+function defaultWingCorners(role) {
+  if (role === 'vtail') {
+    const halfY = 0.45, halfZ = 0.15;
+    return {
+      rootLeading:  { x: 0, y: -halfY, z: -halfZ },
+      rootTrailing: { x: 0, y: -halfY, z: halfZ },
+      tipLeading:   { x: 0, y: halfY, z: -halfZ },
+      tipTrailing:  { x: 0, y: halfY, z: halfZ },
+    };
+  }
+  const halfX = 0.6, halfZ = 0.175;
+  return {
+    rootLeading:  { x: -halfX, y: 0, z: -halfZ },
+    rootTrailing: { x: -halfX, y: 0, z: halfZ },
+    tipLeading:   { x: halfX, y: 0, z: -halfZ },
+    tipTrailing:  { x: halfX, y: 0, z: halfZ },
+  };
+}
+
+// 4頂点の中心（重心）を計算する。主翼ではこれを揚力中心として扱う
+function wingCornersCenter(corners) {
+  const keys = WING_CORNER_KEYS;
+  const sum = { x: 0, y: 0, z: 0 };
+  for (const k of keys) {
+    sum.x += corners[k].x; sum.y += corners[k].y; sum.z += corners[k].z;
+  }
+  return { x: sum.x / keys.length, y: sum.y / keys.length, z: sum.z / keys.length };
+}
+
+// 翼の4頂点（rootLeading, rootTrailing, tipLeading, tipTrailing）から、厚みを持つ板状のジオメトリを生成する。
+// モデルの実際の羽根形状に頂点を合わせたとき、翼のプレースホルダー自体の見た目もそれに追従させるためのもの。
+// 水平翼(main/htail)は厚みをY方向に、垂直尾翼(vtail)は厚みをX方向に加える（板が広がる平面が違うため）
+function buildWingGeometryFromCorners(corners, role) {
+  const rl = corners.rootLeading, rt = corners.rootTrailing, tl = corners.tipLeading, tt = corners.tipTrailing;
+  const thickness = 0.025; // 板の厚み（半分ずつオフセット）
+  const half = thickness / 2;
+  const thicknessAxis = role === 'vtail' ? 'x' : 'y';
+
+  const positions = [];
+  const addTri = (a, b, c) => { positions.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z); };
+  const offset = (p, sign) => ({
+    x: p.x + (thicknessAxis === 'x' ? sign * half : 0),
+    y: p.y + (thicknessAxis === 'y' ? sign * half : 0),
+    z: p.z,
+  });
+
+  const rlU = offset(rl, 1), rtU = offset(rt, 1), tlU = offset(tl, 1), ttU = offset(tt, 1);
+  const rlD = offset(rl, -1), rtD = offset(rt, -1), tlD = offset(tl, -1), ttD = offset(tt, -1);
+
+  // 表面（+方向側。rootLeading, tipLeading, tipTrailing, rootTrailingの順で四角形を三角形2枚に分割）
+  addTri(rlU, tlU, ttU); addTri(rlU, ttU, rtU);
+  // 裏面（-方向側。法線が逆になるよう頂点順を反転）
+  addTri(rlD, ttD, tlD); addTri(rlD, rtD, ttD);
+  // 前縁の側面（rootLeading-tipLeadingの帯）
+  addTri(rlU, rlD, tlD); addTri(rlU, tlD, tlU);
+  // 後縁の側面（rootTrailing-tipTrailingの帯）
+  addTri(rtU, ttD, rtD); addTri(rtU, ttU, ttD);
+  // 翼端の側面（tipLeading-tipTrailingの帯）
+  addTri(tlU, ttD, tlD); addTri(tlU, ttU, ttD);
+  // 付け根の側面（rootLeading-rootTrailingの帯）
+  addTri(rlU, rtD, rlD); addTri(rlU, rtU, rtD);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+// 翼の役割（主翼/水平尾翼/垂直尾翼）が変わったとき、ギズモの形状だけ差し替える
+function updateWingGizmoShape(part) {
+  if (part.type !== 'wing' || !part.gizmo) return;
+  part.gizmo.geometry.dispose();
+  part.gizmo.geometry = buildWingGeometryFromCorners(part.props.corners, part.props.role);
+}
+
+// ---- 着陸脚（landing_gear）専用のギズモ構築 ----
+// 構造：基点(Group) → [関節(Group,回転) → 伸縮節(Group,軸方向移動) → 関節 → ...] → 先端の車輪的マーカー
+// joints/strutsの配列順が、そのまま基点から先端に向かうチェーンの順序になる
+// 見た目は「軸を示す記号」ではなく、脚そのものを表す銀色の円柱にする（実機の脚を模した仮モデル）
+const GEAR_METAL_COLOR = 0xc8ccd2;   // 銀色（脚の支柱本体）
+const GEAR_ACCENT_COLOR = 0x8a8f99;  // 関節部分のアクセント（やや暗い銀）
+const GEAR_TIRE_COLOR = 0x1a1a1a;    // タイヤ（先端マーカー）
+
+function disposeObject3D(obj) {
+  if (!obj) return;
+  obj.traverse(child => {
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) child.material.dispose();
+  });
+}
+
+// obj が ancestor の子孫（孫以下も含む）かどうかを親を辿って判定する
+function isDescendantOf(obj, ancestor) {
+  let cur = obj ? obj.parent : null;
+  while (cur) {
+    if (cur === ancestor) return true;
+    cur = cur.parent;
+  }
+  return false;
+}
+
+function gearMetalMaterial(color, opts) {
+  return new THREE.MeshStandardMaterial({
+    color, roughness: 0.28, metalness: 0.75,
+    emissive: color, emissiveIntensity: 0.06,
+    ...opts,
+  });
+}
+
+function createJointVisual() {
+  // 関節部分：脚の支柱と同じ太さの短い円柱（回転軸そのものが脚の一部に見えるようにする）
+  const group = new THREE.Group();
+  const axisMesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.045, 0.045, 0.16, 14),
+    gearMetalMaterial(GEAR_ACCENT_COLOR)
+  );
+  group.add(axisMesh);
+  // 関節の可動を示す薄いリング（円柱よりわずかに太い径で、繋ぎ目の存在がわかるように）
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.052, 0.008, 8, 24),
+    gearMetalMaterial(0xdddddd, { metalness: 0.9, roughness: 0.15 })
+  );
+  ring.rotation.x = Math.PI / 2;
+  group.add(ring);
+  return group;
+}
+
+function createStrutVisual(length) {
+  // テレスコピック（入れ子シリンダー）の脚支柱。銀色の太い円柱（外筒）＋少し細い円柱（内筒）
+  // 着陸脚は機体の下（-Y方向）へ伸びて地面に届く想定なので、-Y方向に伸ばす
+  const group = new THREE.Group();
+  const outer = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.06, 0.05, length, 14),
+    gearMetalMaterial(GEAR_METAL_COLOR)
+  );
+  outer.position.y = -length / 2; // 基点(付け根)から-Y方向（下方向）に伸びる形にする
+  group.add(outer);
+  const inner = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.032, 0.032, length * 0.55, 14),
+    gearMetalMaterial(0xe8eaed, { metalness: 0.85, roughness: 0.2 })
+  );
+  inner.position.y = -length * 0.78;
+  group.add(inner);
+  group.userData.isStrutVisual = true;
+  group.userData.baseLength = length;
+
+  // 次のセグメント（関節や先端）をぶら下げるためのアンカー。伸縮節の先端位置（-Y方向）に置く。
+  // 長さが変わるたびに applyDeployStateToGear 側でこのアンカーのposition.yも更新すること。
+  const endAnchor = new THREE.Group();
+  endAnchor.position.y = -length;
+  endAnchor.userData.isStrutEndAnchor = true;
+  group.add(endAnchor);
+
+  return group;
+}
+
+// jointsとstrutsの定義から、実際の3D階層（基点→関節→伸縮節→関節→...→先端）を組み立てる
+// 戻り値のrootに対し、part.gizmo = root とする。各関節/伸縮節のGroupはuserDataにidと種別を持つので、
+// 展開状態プレビュー（applyDeployStateToGear）でid照合して角度・長さを反映できる
+function buildLandingGearHierarchy(props) {
+  const root = new THREE.Group();
+  root.userData.isPartGizmo = true;
+  root.userData.isLandingGearRoot = true;
+
+  // 基点マーカー（付け根の位置を示す小さな球、脚の取付部分）
+  const baseMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(0.07, 12, 12),
+    gearMetalMaterial(GEAR_ACCENT_COLOR)
+  );
+  root.add(baseMarker);
+
+  let current = root; // チェーンの末端（次のセグメントをここにぶら下げる）
+
+  // joints[i] と struts[i] を交互に、定義順（関節→伸縮節→関節→伸縮節...）でチェーンする。
+  // 数が揃っていなくても対応できるよう、長い方の配列に合わせてループする
+  const n = Math.max(props.joints.length, props.struts.length);
+  for (let i = 0; i < n; i++) {
+    const jointDef = props.joints[i];
+    if (jointDef) {
+      const jointVisual = createJointVisual();
+      jointVisual.userData.isJointVisual = true;
+      jointVisual.userData.jointId = jointDef.id;
+      current.add(jointVisual);
+      current = jointVisual;
+    }
+    const strutDef = props.struts[i];
+    if (strutDef) {
+      const len = strutDef.minLength;
+      const strutVisual = createStrutVisual(Math.max(len, 0.05));
+      strutVisual.userData.strutId = strutDef.id;
+      current.add(strutVisual);
+      // 次のセグメントは伸縮節の「先端アンカー」にぶら下げる（伸縮節自体ではなく、その子）
+      current = strutVisual.children.find(c => c.userData.isStrutEndAnchor);
+    }
+  }
+
+  // 先端マーカー（車輪＝タイヤ相当。黒めのトーラスでそれらしく）
+  const tip = new THREE.Mesh(
+    new THREE.TorusGeometry(0.09, 0.045, 10, 20),
+    new THREE.MeshStandardMaterial({ color: GEAR_TIRE_COLOR, roughness: 0.8, metalness: 0.1 })
+  );
+  tip.userData.isGearTip = true;
+  current.add(tip);
+
+  return root;
+}
+
+// 関節/伸縮節の追加・削除・軸変更のたびに呼び、gizmo階層を作り直す
+// （既存のgizmoは破棄して新規に作り直す。シーンへの追加・位置/回転/スケールの再適用は呼び出し側で行う）
+function rebuildLandingGearGizmo(part) {
+  if (part.type !== 'landing_gear') return;
+  const oldGizmo = part.gizmo;
+  const parent = oldGizmo.parent || State.model.root;
+  const newGizmo = buildLandingGearHierarchy(part.props);
+  newGizmo.position.copy(oldGizmo.position);
+  newGizmo.rotation.copy(oldGizmo.rotation);
+  newGizmo.scale.copy(oldGizmo.scale);
+  newGizmo.userData.partId = part.id;
+
+  parent.add(newGizmo);
+  parent.remove(oldGizmo);
+  disposeObject3D(oldGizmo);
+
+  if (State.transformControls.object === oldGizmo) {
+    State.transformControls.detach();
+    State.transformControls.attach(newGizmo);
+  }
+
+  part.gizmo = newGizmo;
+  applyDeployStateToGear(part); // 現在のdeployStateを新しい階層にも反映
+}
+
+// deployState(0〜1)に応じて、各関節の角度・各伸縮節の長さを線形補間してプレビューに反映する
+function applyDeployStateToGear(part) {
+  if (part.type !== 'landing_gear' || !part.gizmo) return;
+  const t = part.props.retractedAtZero ? part.props.deployState : (1 - part.props.deployState);
+
+  part.gizmo.traverse(obj => {
+    if (obj.userData.isJointVisual) {
+      const jointDef = part.props.joints.find(j => j.id === obj.userData.jointId);
+      if (!jointDef) return;
+      const deg = THREE.MathUtils.lerp(jointDef.minDeg, jointDef.maxDeg, t);
+      const rad = THREE.MathUtils.degToRad(deg);
+      obj.rotation.set(0, 0, 0);
+      if (jointDef.axis === 'x') obj.rotation.x = rad;
+      else if (jointDef.axis === 'y') obj.rotation.y = rad;
+      else obj.rotation.z = rad;
+    }
+    if (obj.userData.isStrutVisual && obj.userData.strutId) {
+      const strutDef = part.props.struts.find(s => s.id === obj.userData.strutId);
+      if (!strutDef) return;
+      const len = Math.max(THREE.MathUtils.lerp(strutDef.minLength, strutDef.maxLength, t), 0.05);
+      // outer/inner の2子メッシュを長さに応じて再配置（createStrutVisualと同じ径・比率で再生成する）。
+      // endAnchor（次のセグメントの接続点）もこの長さぶん先端（-Y方向）へ押し出す＝これが無いと伸縮しても
+      // 先のパーツ（関節や車輪）の見た目の位置が動かない
+      const outer = obj.children[0], inner = obj.children[1], endAnchor = obj.children[2];
+      if (outer) {
+        outer.geometry.dispose();
+        outer.geometry = new THREE.CylinderGeometry(0.06, 0.05, len, 14);
+        outer.position.y = -len / 2;
+      }
+      if (inner) {
+        inner.geometry.dispose();
+        inner.geometry = new THREE.CylinderGeometry(0.032, 0.032, len * 0.55, 14);
+        inner.position.y = -len * 0.78;
+      }
+      if (endAnchor && endAnchor.userData.isStrutEndAnchor) {
+        endAnchor.position.y = -len;
+      }
+    }
+  });
+}
+
+// 全展開(deployState=1)時に、脚の先端（タイヤ）が地面(Y=0)にちょうど届くよう、
+// 地面に一番近い伸縮節のmaxLengthを自動調整する。関節の角度（斜めの向き）も含めて
+// 実際のワールド座標で計算するため、脚がどんな折れ方をしていても正確に合わせられる。
+// 伸縮節が1つも無い場合は調整できないため、その旨を知らせる。
+function fitGearToGround(part) {
+  if (part.type !== 'landing_gear' || !part.gizmo) return false;
+  if (part.props.struts.length === 0) {
+    showToast('伸縮節がありません。地面合わせには伸縮節を1つ以上追加してください', true);
+    return false;
+  }
+
+  const savedDeployState = part.props.deployState;
+  part.props.deployState = 1;
+  applyDeployStateToGear(part);
+  part.gizmo.updateMatrixWorld(true);
+
+  let tipWorldY = null;
+  part.gizmo.traverse(obj => {
+    if (obj.userData.isGearTip) {
+      const worldPos = new THREE.Vector3();
+      obj.getWorldPosition(worldPos);
+      tipWorldY = worldPos.y;
+    }
+  });
+
+  if (tipWorldY === null) {
+    part.props.deployState = savedDeployState;
+    applyDeployStateToGear(part);
+    showToast('脚の先端が見つかりませんでした', true);
+    return false;
+  }
+
+  const shortfall = tipWorldY - 0; // 地面(Y=0)との差。正なら地面に届いていない（脚が短い）
+  if (Math.abs(shortfall) < 0.005) {
+    showToast('すでに地面の高さに合っています');
+    part.props.deployState = savedDeployState;
+    applyDeployStateToGear(part);
+    return true;
+  }
+
+  // 地面に一番近い（＝先端に一番近い）伸縮節を延長/短縮する。
+  // 関節の角度によって伸縮節の向きが斜めになっている場合、その伸縮節を1m伸ばしたときの
+  // 実際のワールドY方向の変化量（現在の傾き分）を先に測り、必要な伸び量に換算する
+  const lastStrutDef = part.props.struts[part.props.struts.length - 1];
+  let strutWorldObj = null;
+  part.gizmo.traverse(obj => {
+    if (obj.userData.isStrutVisual && obj.userData.strutId === lastStrutDef.id) strutWorldObj = obj;
+  });
+  if (!strutWorldObj) {
+    part.props.deployState = savedDeployState;
+    applyDeployStateToGear(part);
+    showToast('伸縮節の位置を特定できませんでした', true);
+    return false;
+  }
+
+  // その伸縮節のワールド空間での「伸びる方向(-Y、ローカル)」がどれだけYに寄与するかを、
+  // ワールド行列から取り出す（quaternionでローカル-Y軸をワールドに変換し、Y成分を見る）。
+  // 機体モデル自体が拡縮されている場合、ローカル1単位の伸びがワールドではスケール倍になる点も考慮する
+  const worldQuat = new THREE.Quaternion();
+  strutWorldObj.getWorldQuaternion(worldQuat);
+  const worldScale = new THREE.Vector3();
+  strutWorldObj.getWorldScale(worldScale);
+  const localDown = new THREE.Vector3(0, -1, 0).applyQuaternion(worldQuat);
+  // Y軸方向のスケール（伸縮節はローカルY方向に伸びるため、そのワールドスケールを乗じる）
+  const yContributionPerUnit = localDown.y * worldScale.y; // この伸縮節を1m伸ばすとワールドYがどれだけ変化するか（脚が下を向いていれば負の値になる）
+
+  if (Math.abs(yContributionPerUnit) < 0.05) {
+    part.props.deployState = savedDeployState;
+    applyDeployStateToGear(part);
+    showToast('この脚は伸縮節がほぼ水平を向いており、地面合わせができません（関節の角度を調整してください）', true);
+    return false;
+  }
+
+  // 必要な伸び量：先端をワールドY方向に -shortfall だけ動かしたい（地面に近づける）ので、
+  // ΔY = neededDelta × yContributionPerUnit の関係から neededDelta = (-shortfall) / yContributionPerUnit
+  const neededDelta = -shortfall / yContributionPerUnit;
+  const newMaxLength = Math.max(lastStrutDef.maxLength + neededDelta, lastStrutDef.minLength + 0.05, 0.1);
+  lastStrutDef.maxLength = Math.round(newMaxLength * 1000) / 1000;
+
+  part.props.deployState = savedDeployState;
+  applyDeployStateToGear(part);
+  showToast(`「${lastStrutDef.label}」の展開側の長さを ${lastStrutDef.maxLength.toFixed(3)}m に調整しました`);
+  return true;
+}
+
+function addPart(type, position) {
+  if (!State.model.root) {
+    showToast('先に機体モデルを読み込んでください', true);
+    return null;
+  }
+  const id = genPartId();
+  const props = defaultPropsForType(type);
+  const name = type === 'wing'
+    ? `${WING_ROLES.find(r => r.value === props.role)?.label || '主翼'} ${State.parts.filter(p => p.type === 'wing' && p.props.role === props.role).length + 1}`
+    : `${PART_TYPE_LABELS[type]} ${State.parts.filter(p => p.type === type).length + 1}`;
+
+  const gizmoMesh = type === 'landing_gear'
+    ? buildLandingGearHierarchy(props)
+    : createPartGizmoMesh(type, props.role, props.corners);
+  const pos = position || defaultSpawnPosition();
+  gizmoMesh.position.copy(pos);
+  // モデルのローカル座標系の子として追加する：モデル本体の回転/拡縮に自動追従させるため
+  State.model.root.add(gizmoMesh);
+
+  const part = {
+    id, type, name,
+    position: { x: pos.x, y: pos.y, z: pos.z },
+    rotation: { x: 0, y: 0, z: 0 },
+    scale: { x: 1, y: 1, z: 1 },
+    props,
+    gizmo: gizmoMesh,
+  };
+  State.parts.push(part);
+  gizmoMesh.userData.partId = id;
+
+  selectPart(id);
+  renderPartList();
+  return part;
+}
+
+function defaultSpawnPosition() {
+  const r = State.model.boundingRadius || 1;
+  const target = State.orbitControls.target;
+  const worldPos = new THREE.Vector3(target.x, target.y + r * 0.3, target.z);
+  // パーツはモデルのローカル座標系に配置するため、カメラ注視点(ワールド座標)をモデル基準に変換する
+  return State.model.root.worldToLocal(worldPos);
+}
+
+function removePart(id) {
+  const idx = State.parts.findIndex(p => p.id === id);
+  if (idx === -1) return;
+  const part = State.parts[idx];
+  if (part.gizmo) {
+    // TransformControlsが、このパーツ自体か、その子孫（翼の頂点ハンドル等）にアタッチされている場合は先に外す
+    const attached = State.transformControls.object;
+    if (attached && (attached === part.gizmo || isDescendantOf(attached, part.gizmo))) {
+      State.transformControls.detach();
+      State.selectedCornerKey = null;
+    }
+    if (part.gizmo.parent) part.gizmo.parent.remove(part.gizmo);
+    disposeObject3D(part.gizmo);
+  }
+  State.parts.splice(idx, 1);
+  if (State.selectedPartId === id) {
+    State.selectedPartId = null;
+    renderInspector();
+  }
+  renderPartList();
+}
+
+function clearAllParts() {
+  State.transformControls.detach();
+  State.selectedCornerKey = null;
+  for (const p of State.parts) {
+    if (p.gizmo) {
+      if (p.gizmo.parent) p.gizmo.parent.remove(p.gizmo);
+      disposeObject3D(p.gizmo);
+    }
+  }
+  State.parts = [];
+  State.selectedPartId = null;
+  State.cg.selected = false;
+  renderPartList();
+  renderInspector();
+}
+
+function selectPart(id) {
+  // 直前に選択されていたパーツが翼なら、頂点ハンドルを消しておく（別パーツ選択・選択解除どちらでも）
+  const prevPart = getSelectedPart();
+  if (prevPart && prevPart.type === 'wing') {
+    deselectWingCorner();
+    detachWingCornerHandles(prevPart);
+  }
+
+  State.selectedPartId = id;
+  if (id !== null) deselectCg();
+  const part = getSelectedPart();
+  if (part && part.gizmo) {
+    State.transformControls.attach(part.gizmo);
+    document.getElementById('gizmoModeBar').style.display = 'flex';
+    document.getElementById('axisReadout').style.display = 'block';
+    if (part.type === 'wing') attachWingCornerHandles(part);
+    if (isMobileLayout()) openDrawer('right');
+  } else if (!State.cg.selected) {
+    State.transformControls.detach();
+    document.getElementById('gizmoModeBar').style.display = 'none';
+    document.getElementById('axisReadout').style.display = 'none';
+  }
+  renderPartList();
+  renderInspector();
+}
+
+// gizmoが動かされた後、part.position/rotation/scaleへ反映
+function syncPartFromGizmo(part) {
+  if (!part || !part.gizmo) return;
+  part.position.x = part.gizmo.position.x;
+  part.position.y = part.gizmo.position.y;
+  part.position.z = part.gizmo.position.z;
+  part.rotation.x = THREE.MathUtils.radToDeg(part.gizmo.rotation.x);
+  part.rotation.y = THREE.MathUtils.radToDeg(part.gizmo.rotation.y);
+  part.rotation.z = THREE.MathUtils.radToDeg(part.gizmo.rotation.z);
+  part.scale.x = part.gizmo.scale.x;
+  part.scale.y = part.gizmo.scale.y;
+  part.scale.z = part.gizmo.scale.z;
+}
+
+function applyPartToGizmo(part) {
+  if (!part || !part.gizmo) return;
+  part.gizmo.position.set(part.position.x, part.position.y, part.position.z);
+  part.gizmo.rotation.set(
+    THREE.MathUtils.degToRad(part.rotation.x),
+    THREE.MathUtils.degToRad(part.rotation.y),
+    THREE.MathUtils.degToRad(part.rotation.z)
+  );
+  part.gizmo.scale.set(part.scale.x, part.scale.y, part.scale.z);
+}
+
+// パーツをX軸反転（機体中心線=X0を挟んで鏡像）した複製を作る
+// 対象: engine / wing（主翼・水平尾翼・垂直尾翼） / control_surface / light / landing_gear
+// 中心線付近（X≈0）のパーツはmirrorPart内でその旨を警告する（複製自体は行う。双垂直尾翼など中心以外に置くケースもあるため一律には除外しない）
+function canMirrorPart(part) {
+  if (!part) return false;
+  if (!['engine', 'wing', 'control_surface', 'light', 'landing_gear'].includes(part.type)) return false;
+  return true;
+}
+
+function mirrorPart(id) {
+  const src = State.parts.find(p => p.id === id);
+  if (!src || !canMirrorPart(src)) return null;
+
+  if (Math.abs(src.position.x) < 0.02) {
+    showToast('中心線付近のパーツはミラーの意味がほぼありません（X座標を確認してください）', true);
+  }
+
+  const newId = genPartId();
+  const mirroredProps = JSON.parse(JSON.stringify(src.props));
+  if (mirroredProps.side === 'left') mirroredProps.side = 'right';
+  else if (mirroredProps.side === 'right') mirroredProps.side = 'left';
+  if (mirroredProps.gearPosition === 'main_left') mirroredProps.gearPosition = 'main_right';
+  else if (mirroredProps.gearPosition === 'main_right') mirroredProps.gearPosition = 'main_left';
+
+  // 着陸脚は関節/伸縮節のidを複製先で振り直す（gizmo階層のuserData参照とprops配列の対応がずれないように）
+  if (src.type === 'landing_gear') {
+    mirroredProps.joints = mirroredProps.joints.map(j => ({ ...j, id: genJointId() }));
+    mirroredProps.struts = mirroredProps.struts.map(s => ({ ...s, id: genStrutId() }));
+  }
+
+  // 翼の4頂点もX座標を反転する（パーツ全体のミラーと整合させ、左右対称の形にするため）
+  if (src.type === 'wing' && mirroredProps.corners) {
+    for (const key of WING_CORNER_KEYS) {
+      mirroredProps.corners[key].x = -mirroredProps.corners[key].x;
+    }
+  }
+
+  const baseName = src.name.replace(/（ミラー）$/, '');
+  const name = `${baseName}（ミラー）`;
+
+  const gizmoMesh = src.type === 'landing_gear'
+    ? buildLandingGearHierarchy(mirroredProps)
+    : createPartGizmoMesh(src.type, mirroredProps.role, mirroredProps.corners);
+  gizmoMesh.position.set(-src.position.x, src.position.y, src.position.z);
+  // 鏡像変換：X軸まわりの回転はそのまま、Y・Z軸まわりの回転は符号反転
+  gizmoMesh.rotation.set(
+    THREE.MathUtils.degToRad(src.rotation.x),
+    THREE.MathUtils.degToRad(-src.rotation.y),
+    THREE.MathUtils.degToRad(-src.rotation.z)
+  );
+  gizmoMesh.scale.set(src.scale.x, src.scale.y, src.scale.z);
+  State.model.root.add(gizmoMesh);
+
+  const part = {
+    id: newId, type: src.type, name,
+    position: { x: -src.position.x, y: src.position.y, z: src.position.z },
+    rotation: { x: src.rotation.x, y: -src.rotation.y, z: -src.rotation.z },
+    scale: { ...src.scale },
+    props: mirroredProps,
+    gizmo: gizmoMesh,
+  };
+  State.parts.push(part);
+  gizmoMesh.userData.partId = newId;
+
+  selectPart(newId);
+  renderPartList();
+  showToast(`「${baseName}」をミラー配置しました`);
+  return part;
+}
+
+// 保存データからパーツを再構築（gizmo mesh を新規生成）
+function rebuildPartsFromSaved(savedParts) {
+  clearAllParts();
+  let maxIdNum = 0;
+  let maxJointNum = 0;
+  let maxStrutNum = 0;
+  for (const sp of savedParts) {
+    const props = { ...sp.props };
+    if (sp.type === 'wing' && !props.role) props.role = 'main'; // 旧データ互換（role未設定→主翼扱い）
+    if (sp.type === 'wing' && !props.corners) props.corners = defaultWingCorners(props.role); // 旧データ互換（4頂点未設定→デフォルト形状）
+    if (sp.type === 'control_surface' && props.spanS === undefined) {
+      // 旧データ互換（spanS未設定→種類ごとの推奨値、不明ならデフォルトのエルロン相当値）
+      const kindDef = CONTROL_SURFACE_KINDS.find(k => k.value === props.kind);
+      props.spanS = kindDef ? kindDef.suggestedSpanS : 0.78;
+    }
+    if (sp.type === 'landing_gear') {
+      // 旧データ互換（着陸脚の概念が無かった頃のデータには存在しないため、無ければ空配列で補う）
+      if (!props.joints) props.joints = [];
+      if (!props.struts) props.struts = [];
+      if (props.deployState === undefined) props.deployState = 1;
+      if (props.retractedAtZero === undefined) props.retractedAtZero = true;
+    }
+
+    const gizmoMesh = sp.type === 'landing_gear'
+      ? buildLandingGearHierarchy(props)
+      : createPartGizmoMesh(sp.type, props.role, props.corners);
+    gizmoMesh.position.set(sp.position.x, sp.position.y, sp.position.z);
+    gizmoMesh.rotation.set(
+      THREE.MathUtils.degToRad(sp.rotation.x),
+      THREE.MathUtils.degToRad(sp.rotation.y),
+      THREE.MathUtils.degToRad(sp.rotation.z)
+    );
+    gizmoMesh.scale.set(sp.scale.x, sp.scale.y, sp.scale.z);
+    State.model.root.add(gizmoMesh);
+    gizmoMesh.userData.partId = sp.id;
+
+    const part = {
+      id: sp.id, type: sp.type, name: sp.name,
+      position: { ...sp.position }, rotation: { ...sp.rotation }, scale: { ...sp.scale },
+      props,
+      gizmo: gizmoMesh,
+    };
+    State.parts.push(part);
+    if (sp.type === 'landing_gear') applyDeployStateToGear(part);
+
+    const numPart = parseInt(sp.id.replace('part_', ''), 10);
+    if (!isNaN(numPart) && numPart > maxIdNum) maxIdNum = numPart;
+    if (sp.type === 'landing_gear') {
+      for (const j of props.joints) {
+        const n = parseInt(String(j.id).replace('joint_', ''), 10);
+        if (!isNaN(n) && n > maxJointNum) maxJointNum = n;
+      }
+      for (const s of props.struts) {
+        const n = parseInt(String(s.id).replace('strut_', ''), 10);
+        if (!isNaN(n) && n > maxStrutNum) maxStrutNum = n;
+      }
+    }
+  }
+  State.partIdCounter = maxIdNum + 1;
+  State.jointIdCounter = maxJointNum + 1;
+  State.strutIdCounter = maxStrutNum + 1;
+  renderPartList();
+}
