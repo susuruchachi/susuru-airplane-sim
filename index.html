@@ -291,23 +291,23 @@
     #topbar .spacer{display:none;} /* saveStatusが無くなる分の余白も詰める */
   }
 
-  /* 非常に狭い画面（幅400px未満）：トップバーのボタンラベルをアイコンのみに */
+  /* 非常に狭い画面（幅400px未満）：トップバーのボタンラベルをアイコンのみに。
+     ラベルを消す指定は、上の @media(max-width:860px) の `#topbar button`（詳細度が上）に
+     負けないよう #topbar を前置する。負けると font-size:0 が効かず、
+     元のラベルの前に::beforeのアイコン文字が付いた二重表示になる。 */
   @media (max-width: 400px){
-    #btnLoadModel::before{content:"📂 読込";}
-    #btnLoadModel{font-size:0;}
-    #btnLoadModel::before{font-size:11.5px;}
-    #btnSaveConfig::before{content:"💾 保存";}
-    #btnSaveConfig{font-size:0;}
-    #btnSaveConfig::before{font-size:11.5px;}
-    #btnLoadSaved::before{content:"📁 開く";}
-    #btnLoadSaved{font-size:0;}
-    #btnLoadSaved::before{font-size:11.5px;}
-    #btnDownloadConfig::before{content:"⇩ DL";}
-    #btnDownloadConfig{font-size:0;}
-    #btnDownloadConfig::before{font-size:11.5px;}
-    #btnImportConfig::before{content:"⇧ 読込";}
-    #btnImportConfig{font-size:0;}
-    #btnImportConfig::before{font-size:11.5px;}
+    #topbar #btnLoadModel{font-size:0;}
+    #btnLoadModel::before{content:"📂 読込";font-size:11.5px;}
+    #topbar #btnSaveConfig{font-size:0;}
+    #btnSaveConfig::before{content:"💾 保存";font-size:11.5px;}
+    #topbar #btnLoadSaved{font-size:0;}
+    #btnLoadSaved::before{content:"📁 開く";font-size:11.5px;}
+    #topbar #btnDownloadConfig{font-size:0;}
+    #btnDownloadConfig::before{content:"⇩ DL";font-size:11.5px;}
+    #topbar #btnImportConfig{font-size:0;}
+    #btnImportConfig::before{content:"⇧ 読込";font-size:11.5px;}
+    #topbar #linkEnvPreview{font-size:0;}
+    #linkEnvPreview::before{content:"🌤 環境";font-size:11.5px;}
   }
 </style>
 </head>
