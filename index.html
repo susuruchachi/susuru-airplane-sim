@@ -43,6 +43,14 @@
   #topbar button:hover{border-color:var(--accent-dim);background:#0f1822;}
   #topbar button.primary{background:var(--accent);border-color:var(--accent);color:#04121e;font-weight:600;}
   #topbar button.primary:hover{background:#5cb8ff;}
+  /* 別ページ（環境プレビュー）への導線。見た目はトップバーのボタンに揃える */
+  #topbar a.navlink{
+    background:transparent;border:1px solid var(--line);color:var(--text);text-decoration:none;
+    padding:6px 12px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:var(--sans);
+    display:flex;align-items:center;gap:6px;transition:border-color .15s, background .15s;
+    white-space:nowrap;flex-shrink:0;
+  }
+  #topbar a.navlink:hover{border-color:var(--accent-dim);background:#0f1822;}
   #topbar .spacer{flex:1 1 auto;min-width:0;}
   #topbarScroll{
     display:flex;align-items:center;gap:12px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;
@@ -239,7 +247,7 @@
     #app{grid-template-columns:1fr;grid-template-rows:48px 1fr;}
     #topbar{grid-column:1;padding:0 8px;gap:8px;}
     #topbar .brand{font-size:12px;}
-    #topbar button{padding:6px 9px;font-size:11.5px;}
+    #topbar button, #topbar a.navlink{padding:6px 9px;font-size:11.5px;}
     .mobile-only{display:flex;}
 
     #left, #right{
@@ -283,23 +291,23 @@
     #topbar .spacer{display:none;} /* saveStatusが無くなる分の余白も詰める */
   }
 
-  /* 非常に狭い画面（幅400px未満）：トップバーのボタンラベルをアイコンのみに */
+  /* 非常に狭い画面（幅400px未満）：トップバーのボタンラベルをアイコンのみに。
+     ラベルを消す指定は、上の @media(max-width:860px) の `#topbar button`（詳細度が上）に
+     負けないよう #topbar を前置する。負けると font-size:0 が効かず、
+     元のラベルの前に::beforeのアイコン文字が付いた二重表示になる。 */
   @media (max-width: 400px){
-    #btnLoadModel::before{content:"📂 読込";}
-    #btnLoadModel{font-size:0;}
-    #btnLoadModel::before{font-size:11.5px;}
-    #btnSaveConfig::before{content:"💾 保存";}
-    #btnSaveConfig{font-size:0;}
-    #btnSaveConfig::before{font-size:11.5px;}
-    #btnLoadSaved::before{content:"📁 開く";}
-    #btnLoadSaved{font-size:0;}
-    #btnLoadSaved::before{font-size:11.5px;}
-    #btnDownloadConfig::before{content:"⇩ DL";}
-    #btnDownloadConfig{font-size:0;}
-    #btnDownloadConfig::before{font-size:11.5px;}
-    #btnImportConfig::before{content:"⇧ 読込";}
-    #btnImportConfig{font-size:0;}
-    #btnImportConfig::before{font-size:11.5px;}
+    #topbar #btnLoadModel{font-size:0;}
+    #btnLoadModel::before{content:"📂 読込";font-size:11.5px;}
+    #topbar #btnSaveConfig{font-size:0;}
+    #btnSaveConfig::before{content:"💾 保存";font-size:11.5px;}
+    #topbar #btnLoadSaved{font-size:0;}
+    #btnLoadSaved::before{content:"📁 開く";font-size:11.5px;}
+    #topbar #btnDownloadConfig{font-size:0;}
+    #btnDownloadConfig::before{content:"⇩ DL";font-size:11.5px;}
+    #topbar #btnImportConfig{font-size:0;}
+    #btnImportConfig::before{content:"⇧ 読込";font-size:11.5px;}
+    #topbar #linkEnvPreview{font-size:0;}
+    #linkEnvPreview::before{content:"🌤 環境";font-size:11.5px;}
   }
 </style>
 </head>
@@ -317,6 +325,8 @@
       <div class="topbar-sep"></div>
       <button id="btnDownloadConfig" title="3Dモデルを含まない設定ファイル(.json)をダウンロードします">⇩ 設定をダウンロード</button>
       <button id="btnImportConfig" title="ダウンロードした設定ファイル(.json)を、今開いているモデルに適用します">⇧ 設定を読込</button>
+      <div class="topbar-sep"></div>
+      <a id="linkEnvPreview" class="navlink" href="flight.html" title="空・雲・昼夜サイクルの環境プレビューを開きます">🌤 環境プレビュー</a>
     </div>
     <div class="spacer"></div>
     <span id="saveStatus"></span>
