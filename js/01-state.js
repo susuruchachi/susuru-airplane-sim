@@ -1,7 +1,7 @@
 // 01-state.js — アプリ全体のグローバル状態
 // 番号プレフィックス方式：全モジュールはグローバルスコープを共有する
 
-const APP_VERSION = 'v12';
+const APP_VERSION = 'v13';
 
 const State = {
   // Three.js 中枢
