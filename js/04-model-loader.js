@@ -12,7 +12,6 @@ function clearCurrentModel() {
     State.scene.remove(State.model.root);
     State.model.root = null;
   }
-  State.model.meshRoots = [];
   // モデルに紐づくパーツも全部消す（別モデルの座標は意味を持たないため）
   clearAllParts();
   State.model.name = null;
@@ -20,6 +19,7 @@ function clearCurrentModel() {
   State.model.weightKg = 1000;
   State.model.maxSpeedValue = 250;
   State.model.maxSpeedUnit = 'kt';
+  State.model.meshOffsetX = 0;
   State.cg.position = { x: 0, y: 0, z: 0 };
   if (State.cg.gizmo) hideCgGizmo();
 }
@@ -36,11 +36,11 @@ function loadModelFromArrayBuffer(arrayBuffer, fileName, fileType) {
           obj.receiveShadow = true;
         }
       });
-
-      // 実モデルのメッシュ群（ギズモ等を子として足す前の状態）を控えておく。
-      // 後からパーツのギズモや重心ギズモがrootの子として追加されるため、
-      // 「モデル本体だけ」のバウンディングボックスを測りたい場面（左右中心合わせ等）ではこちらを使う。
-      State.model.meshRoots = root.children.slice();
+      // モデル本体のメッシュ群と、後から追加されるパーツ/重心ギズモを区別するための印。
+      // 「原点を左右中心に揃える」機能で、モデル本体だけを動かすために使う
+      for (const child of root.children) {
+        child.userData.isModelMeshRoot = true;
+      }
 
       // 原点をモデルの中心（底面基準）に合わせて扱いやすくする
       const box = new THREE.Box3().setFromObject(root);
@@ -86,28 +86,6 @@ function loadModelFromArrayBuffer(arrayBuffer, fileName, fileType) {
   });
 }
 
-// 現在の向き（root.rotation）はそのままに、モデルの左右中心をワールド原点のX=0に合わせる。
-// root.positionを一時的に0にしてバウンディングボックスを測ることで、
-// 「今の向きを保ったまま原点に置いたときの中心」を求め、そのX成分だけroot.positionに反映する。
-// 位置を変更した直後はmatrixWorldがまだ更新されていないため、Box3を測る前に
-// updateMatrixWorld(true)を明示的に呼んで反映させる（呼ばないと古い位置のまま計算されてズレる）。
-// バウンディングボックスは State.model.meshRoots（＝モデル本来のメッシュ群）だけを対象にする。
-// root自体には重心ギズモやパーツのギズモも子として乗っているため、rootをそのまま測ると
-// それらの位置まで含んだ中心になってしまい、ボタンを押すたびに結果がズレ続ける原因になる。
-function centerModelLeftRight() {
-  const root = State.model.root;
-  if (!root) return;
-  const meshRoots = (State.model.meshRoots && State.model.meshRoots.length) ? State.model.meshRoots : [root];
-  const originalX = root.position.x;
-  root.position.x = 0;
-  root.updateMatrixWorld(true);
-  const box = new THREE.Box3();
-  meshRoots.forEach(obj => box.expandByObject(obj));
-  const center = box.getCenter(new THREE.Vector3());
-  root.position.x = originalX - center.x;
-  root.updateMatrixWorld(true);
-}
-
 function loadModelFromFile(file) {
   const ext = file.name.toLowerCase().endsWith('.gltf') ? 'gltf' : 'glb';
   return file.arrayBuffer().then(buf => loadModelFromArrayBuffer(buf, file.name, ext));
@@ -125,6 +103,52 @@ function updateModelInfoPanel() {
     metaEl.textContent = 'GLB / GLTFファイルを読み込んでください';
   }
   renderModelSettingsPanel();
+}
+
+// モデル本体のメッシュ群だけのバウンディングボックスを求める
+// （パーツのギズモや重心マーカーはmodel.rootの子として混在しているため、それらを除外する）
+function computeModelMeshBoundingBox() {
+  if (!State.model.root) return null;
+  const box = new THREE.Box3();
+  let found = false;
+  for (const child of State.model.root.children) {
+    if (!child.userData.isModelMeshRoot) continue;
+    const childBox = new THREE.Box3().setFromObject(child);
+    if (childBox.isEmpty()) continue;
+    if (found) box.union(childBox);
+    else { box.copy(childBox); found = true; }
+  }
+  return found ? box : null;
+}
+
+// 機体モデル本体を左右方向(X)に動かして、原点がモデルの左右中心に来るようにする。
+// パーツ・重心ギズモは動かさない（ユーザーが配置した位置をそのまま保つ）ため、
+// 既にパーツを置いている場合は相対位置がずれる点を呼び出し側で警告する
+function centerModelHorizontally() {
+  if (!State.model.root) return null;
+  const box = computeModelMeshBoundingBox();
+  if (!box) return null;
+
+  const center = box.getCenter(new THREE.Vector3());
+  const shiftX = -center.x; // この量だけモデル本体をずらせば、原点が左右中心に来る
+
+  for (const child of State.model.root.children) {
+    if (!child.userData.isModelMeshRoot) continue;
+    child.position.x += shiftX;
+  }
+  State.model.meshOffsetX += shiftX; // 保存・復元で同じ状態を再現できるよう累計を記録
+
+  return { shiftX, previousCenterX: center.x };
+}
+
+// 保存データから復元するときに、記録しておいた原点調整量をモデル本体へ適用し直す
+function applyMeshOffsetX(offsetX) {
+  if (!State.model.root || !offsetX) return;
+  for (const child of State.model.root.children) {
+    if (!child.userData.isModelMeshRoot) continue;
+    child.position.x += offsetX;
+  }
+  State.model.meshOffsetX = offsetX;
 }
 
 function setupModelLoaderUI() {

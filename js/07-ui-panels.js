@@ -1,7 +1,7 @@
 // 07-ui-panels.js — 左：パーツ一覧 / 右：インスペクター（種別ごとのプロパティフォーム）
 
-// 機体全体の設定：位置（root.position）・向き（root.rotation）・大きさ（root.scale）・重量・最高速度
-// root.position/rotation/scaleがそのまま真の値（このUIはそれを度数などの読みやすい形で読み書きするだけ）
+// 機体全体の設定：向き（root.rotation）・大きさ（root.scale）・重量・最高速度
+// root.rotation/scaleがそのまま真の値（このUIはそれを度数などの読みやすい形で読み書きするだけ）
 function renderModelSettingsPanel() {
   const container = document.getElementById('modelSettings');
   if (!State.model.root) {
@@ -18,15 +18,13 @@ function renderModelSettingsPanel() {
     z: THREE.MathUtils.radToDeg(root.rotation.z),
   };
   const scl = root.scale;
-  const pos = { x: root.position.x, y: root.position.y, z: root.position.z };
 
   container.innerHTML = `
-    <div class="subgroup-title">機体の位置</div>
-    <div class="row3">
-      ${xyzFieldsHtml('modelPos', pos)}
-    </div>
-    <button class="btn-danger-outline" id="btnCenterModelX" style="color:var(--accent);border-color:var(--accent-dim);margin-top:6px;">左右の中心を原点に合わせる</button>
-    <div class="hint" style="margin-top:4px;">現在の向きのまま、機体の左右中心（ローカルX）が原点（X=0）に来るよう位置のX成分だけを調整します（Y・Zはそのまま）。エンジンなど配置済みのパーツも自動で追従します。</div>
+    <div class="subgroup-title">原点の調整</div>
+    <button class="btn-danger-outline" id="btnCenterModelHorizontally" style="color:var(--accent);border-color:var(--accent-dim);margin-top:0;">
+      原点を機体の左右中心に揃える
+    </button>
+    <div class="hint">モデルの左右方向（X）の中心が原点に来るよう、機体本体だけを移動します。ミラー配置を正しく効かせたいときに使ってください。</div>
 
     <div class="subgroup-title">機体の向き（度）</div>
     <div class="row3">
@@ -64,13 +62,24 @@ function renderModelSettingsPanel() {
     <div class="hint" id="maxSpeedConverted"></div>
   `;
 
-  bindXyzFields('modelPos', pos, () => {
-    root.position.set(pos.x, pos.y, pos.z);
-  });
-
-  document.getElementById('btnCenterModelX').addEventListener('click', () => {
-    centerModelLeftRight();
-    renderModelSettingsPanel();
+  document.getElementById('btnCenterModelHorizontally').addEventListener('click', () => {
+    // パーツは動かさないため、既に配置済みの場合は相対位置がずれる旨を確認する
+    if (State.parts.length > 0) {
+      const ok = confirm(
+        '機体本体だけを移動します。配置済みのパーツ（エンジン・翼など）はその場に残るため、機体との相対位置がずれます。\n\n続けますか？'
+      );
+      if (!ok) return;
+    }
+    const result = centerModelHorizontally();
+    if (!result) {
+      showToast('機体の位置を計算できませんでした', true);
+      return;
+    }
+    if (Math.abs(result.shiftX) < 0.0005) {
+      showToast('すでに原点が左右中心にあります');
+      return;
+    }
+    showToast(`機体を X方向に ${result.shiftX.toFixed(3)} 移動し、原点を左右中心に揃えました`);
   });
 
   bindXyzFields('modelRot', rotDeg, () => {

@@ -1,7 +1,7 @@
 // 01-state.js — アプリ全体のグローバル状態
 // 番号プレフィックス方式：全モジュールはグローバルスコープを共有する
 
-const APP_VERSION = 'v10';
+const APP_VERSION = 'v11';
 
 const State = {
   // Three.js 中枢
@@ -13,17 +13,17 @@ const State = {
 
   // 現在読み込まれている機体モデル
   model: {
-    root: null,        // THREE.Group（モデルのルート。ギズモ類もこの子として乗る）
-    meshRoots: [],      // rootのうち実モデル本来の子だけの配列（ギズモを除いた「機体そのもの」の範囲を測るときに使う）
+    root: null,        // THREE.Group（モデルのルート）
     name: null,        // 表示名（ファイル名）
     fileBuffer: null,  // ArrayBuffer（保存用に保持）
     fileType: 'glb',   // 'glb' | 'gltf'
     boundingRadius: 1,
-    // 機体全体の設定。位置・向き・大きさは root.position / root.rotation / root.scale が正の値（UIはそこを読み書きする）。
+    // 機体全体の設定。向き・大きさは root.rotation / root.scale が正の値（UIはそこを読み書きする）。
     // ここには保存/復元のためのメタデータとして重量・最高速度のみ持つ
     weightKg: 1000,          // 総重量（kg）
     maxSpeedValue: 250,      // 最高速度の数値（単位はmaxSpeedUnitに従う）
     maxSpeedUnit: 'kt',      // 'kt'（ノット） | 'mach'（マッハ）
+    meshOffsetX: 0,          // 「原点を左右中心に揃える」で機体本体をずらした累計量（保存・復元用）
   },
 
   // パーツ定義一覧

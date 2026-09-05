@@ -114,14 +114,13 @@ async function applyLoadedConfig(record) {
 function applyConfigDataToCurrentModel(data) {
   if (data.modelTransform && State.model.root) {
     const t = data.modelTransform;
-    // position は旧バージョンの保存データには存在しない場合がある（未指定なら読込直後の自動中央寄せ位置のまま）
-    if (t.position) State.model.root.position.set(t.position.x, t.position.y, t.position.z);
     State.model.root.rotation.set(t.rotation.x, t.rotation.y, t.rotation.z);
     State.model.root.scale.set(t.scale.x, t.scale.y, t.scale.z);
   }
   if (data.modelWeightKg !== undefined) State.model.weightKg = data.modelWeightKg;
   if (data.modelMaxSpeedValue !== undefined) State.model.maxSpeedValue = data.modelMaxSpeedValue;
   if (data.modelMaxSpeedUnit !== undefined) State.model.maxSpeedUnit = data.modelMaxSpeedUnit;
+  if (data.modelMeshOffsetX) applyMeshOffsetX(data.modelMeshOffsetX); // 原点を左右中心に揃えた調整を再現
   renderModelSettingsPanel();
 
   rebuildPartsFromSaved(data.parts || []);
