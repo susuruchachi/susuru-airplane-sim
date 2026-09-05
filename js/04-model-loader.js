@@ -12,6 +12,7 @@ function clearCurrentModel() {
     State.scene.remove(State.model.root);
     State.model.root = null;
   }
+  State.model.meshRoots = [];
   // モデルに紐づくパーツも全部消す（別モデルの座標は意味を持たないため）
   clearAllParts();
   State.model.name = null;
@@ -35,6 +36,11 @@ function loadModelFromArrayBuffer(arrayBuffer, fileName, fileType) {
           obj.receiveShadow = true;
         }
       });
+
+      // 実モデルのメッシュ群（ギズモ等を子として足す前の状態）を控えておく。
+      // 後からパーツのギズモや重心ギズモがrootの子として追加されるため、
+      // 「モデル本体だけ」のバウンディングボックスを測りたい場面（左右中心合わせ等）ではこちらを使う。
+      State.model.meshRoots = root.children.slice();
 
       // 原点をモデルの中心（底面基準）に合わせて扱いやすくする
       const box = new THREE.Box3().setFromObject(root);
@@ -85,13 +91,18 @@ function loadModelFromArrayBuffer(arrayBuffer, fileName, fileType) {
 // 「今の向きを保ったまま原点に置いたときの中心」を求め、そのX成分だけroot.positionに反映する。
 // 位置を変更した直後はmatrixWorldがまだ更新されていないため、Box3を測る前に
 // updateMatrixWorld(true)を明示的に呼んで反映させる（呼ばないと古い位置のまま計算されてズレる）。
+// バウンディングボックスは State.model.meshRoots（＝モデル本来のメッシュ群）だけを対象にする。
+// root自体には重心ギズモやパーツのギズモも子として乗っているため、rootをそのまま測ると
+// それらの位置まで含んだ中心になってしまい、ボタンを押すたびに結果がズレ続ける原因になる。
 function centerModelLeftRight() {
   const root = State.model.root;
   if (!root) return;
+  const meshRoots = (State.model.meshRoots && State.model.meshRoots.length) ? State.model.meshRoots : [root];
   const originalX = root.position.x;
   root.position.x = 0;
   root.updateMatrixWorld(true);
-  const box = new THREE.Box3().setFromObject(root);
+  const box = new THREE.Box3();
+  meshRoots.forEach(obj => box.expandByObject(obj));
   const center = box.getCenter(new THREE.Vector3());
   root.position.x = originalX - center.x;
   root.updateMatrixWorld(true);

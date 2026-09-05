@@ -13,7 +13,8 @@ const State = {
 
   // 現在読み込まれている機体モデル
   model: {
-    root: null,        // THREE.Group（モデルのルート）
+    root: null,        // THREE.Group（モデルのルート。ギズモ類もこの子として乗る）
+    meshRoots: [],      // rootのうち実モデル本来の子だけの配列（ギズモを除いた「機体そのもの」の範囲を測るときに使う）
     name: null,        // 表示名（ファイル名）
     fileBuffer: null,  // ArrayBuffer（保存用に保持）
     fileType: 'glb',   // 'glb' | 'gltf'
