@@ -379,6 +379,13 @@ function renderTypeSpecificFields(part) {
         <div class="hint" style="font-family:var(--mono);margin-top:0;">X ${center.x.toFixed(3)}　Y ${center.y.toFixed(3)}　Z ${center.z.toFixed(3)}</div>
       </div>
 
+      <div class="divider"></div>
+      <div class="subgroup-title">可動翼面</div>
+      <button class="btn-danger-outline" id="btnAddControlSurfaceToWing" style="color:var(--accent);border-color:var(--accent-dim);">
+        ＋ この翼に可動翼面を追加（後縁1/4に自動配置）
+      </button>
+      <div class="hint">${part.props.role === 'vtail' ? 'ラダー' : part.props.role === 'htail' ? 'エレベーター' : 'エルロン'}として追加され、この翼の後縁側1/4の位置に自動配置されます。種類・位置は追加後に右パネルで変更できます。</div>
+
       ${canMirrorPart(part) ? `
         <div class="divider"></div>
         <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
@@ -402,6 +409,15 @@ function renderTypeSpecificFields(part) {
     }
 
     renderWingCornerButtons(part);
+
+    document.getElementById('btnAddControlSurfaceToWing').addEventListener('click', () => {
+      const cs = addControlSurfaceToWing(part);
+      if (cs) {
+        renderInspector(); // kind/position等をaddPart後に書き換えているため、画面に反映するため再描画
+        renderPartList();  // 名前もaddPart後に書き換えているため、左パネルの一覧も更新する
+        showToast(`「${cs.name}」を「${part.name}」の後縁1/4に追加しました`);
+      }
+    });
 
     const btnMirror = document.getElementById('btnMirrorPart');
     if (btnMirror) btnMirror.addEventListener('click', () => mirrorPart(part.id));

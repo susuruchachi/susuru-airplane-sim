@@ -187,4 +187,37 @@ function placeControlSurfaceAtTrailingQuarter(csPart, wingPart, spanS) {
   csPart.props.parentWingId = wingPart.id;
 }
 
+// 翼の役割(role)・左右位置(side)から、可動翼面の種類の初期値をそれらしく推測する
+function suggestControlSurfaceKindForWing(wingPart) {
+  if (wingPart.props.role === 'vtail') return 'rudder';
+  if (wingPart.props.role === 'htail') return 'elevator';
+  return 'aileron'; // main（主翼）
+}
+
+// 「この翼に可動翼面を追加」ボタンから呼ばれる一気通貫の処理：
+// 可動翼面パーツを新規作成し、種類を翼の役割から推測し、後縁1/4の位置に自動配置し、所属も設定する
+function addControlSurfaceToWing(wingPart) {
+  if (!wingPart || wingPart.type !== 'wing') return null;
+
+  const kind = suggestControlSurfaceKindForWing(wingPart);
+  const kindDef = CONTROL_SURFACE_KINDS.find(k => k.value === kind);
+  const spanS = kindDef ? kindDef.suggestedSpanS : 0.78;
+
+  // 位置はいったんデフォルトのスポーン位置で作成し、直後に後縁1/4へ配置し直す
+  const csPart = addPart('control_surface');
+  if (!csPart) return null; // モデル未読込などでaddPartがnullを返した場合
+
+  csPart.props.kind = kind;
+  csPart.props.spanS = spanS;
+  placeControlSurfaceAtTrailingQuarter(csPart, wingPart, spanS);
+
+  const kindLabel = kindDef ? kindDef.label : kind;
+  csPart.name = `${kindLabel} 1`;
+  // 同種の可動翼面が既にあれば連番にする
+  const sameKindCount = State.parts.filter(p => p.type === 'control_surface' && p.props.kind === kind).length;
+  csPart.name = `${kindLabel} ${sameKindCount}`;
+
+  return csPart;
+}
+
 
