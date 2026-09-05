@@ -21,11 +21,15 @@
     --sans: -apple-system, 'Hiragino Sans', 'Yu Gothic', 'Segoe UI', sans-serif;
   }
   *{box-sizing:border-box;}
-  html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);overflow:hidden;}
-  #app{display:grid;grid-template-columns:340px 1fr 320px;grid-template-rows:48px 1fr;height:100%;}
+  html,body{margin:0;padding:0;height:100%;height:100dvh;background:var(--bg);color:var(--text);font-family:var(--sans);overflow:hidden;}
+  #app{display:grid;grid-template-columns:340px 1fr 320px;grid-template-rows:48px 1fr;height:100%;height:100dvh;}
 
   /* Top bar */
-  #topbar{grid-column:1/4;grid-row:1;display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel-2);border-bottom:1px solid var(--line);}
+  #topbar{
+    grid-column:1/4;grid-row:1;display:flex;align-items:center;gap:12px;padding:0 16px;
+    background:var(--panel-2);border-bottom:1px solid var(--line);
+    height:48px;box-sizing:border-box;flex-wrap:nowrap;overflow:hidden;min-height:0;
+  }
   #topbar .brand{font-weight:600;letter-spacing:.02em;font-size:14px;color:var(--text);white-space:nowrap;}
   #topbar .brand span{color:var(--accent);}
   #topbar .sep{width:1px;height:22px;background:var(--line);}
@@ -34,20 +38,27 @@
     background:transparent;border:1px solid var(--line);color:var(--text);
     padding:6px 12px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:var(--sans);
     display:flex;align-items:center;gap:6px;transition:border-color .15s, background .15s;
+    white-space:nowrap;flex-shrink:0;
   }
   #topbar button:hover{border-color:var(--accent-dim);background:#0f1822;}
   #topbar button.primary{background:var(--accent);border-color:var(--accent);color:#04121e;font-weight:600;}
   #topbar button.primary:hover{background:#5cb8ff;}
-  #topbar .spacer{flex:1;}
-  #topbarScroll{display:flex;align-items:center;gap:12px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;}
+  #topbar .spacer{flex:1 1 auto;min-width:0;}
+  #topbarScroll{
+    display:flex;align-items:center;gap:12px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;
+    flex:0 1 auto;min-width:0;
+  }
   #topbarScroll::-webkit-scrollbar{display:none;}
-  #saveStatus{font-size:11.5px;color:var(--text-dim);font-family:var(--mono);white-space:nowrap;}
+  #saveStatus{
+    font-size:11.5px;color:var(--text-dim);font-family:var(--mono);white-space:nowrap;
+    flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  }
   input[type=file]{display:none;}
   .mobile-only{display:none;}
   #drawerOverlay{display:none;}
 
   /* Left: hierarchy / part list */
-  #left{grid-column:1;grid-row:2;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden;}
+  #left{grid-column:1;grid-row:2;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;}
   #left .section-title{padding:12px 14px 8px;font-size:11px;letter-spacing:.04em;color:var(--text-dim);text-transform:uppercase;}
   #modelInfo{padding:0 14px 12px;font-size:12px;color:var(--text-dim);}
   #modelInfo .name{color:var(--text);font-size:13px;margin-bottom:2px;}
@@ -62,7 +73,7 @@
   }
   #partTypeButtons button:hover{border-color:var(--accent-dim);}
   #partTypeButtons button .ico{font-size:15px;}
-  #partList{flex:1;overflow-y:auto;padding:6px 8px;}
+  #partList{padding:6px 8px;}
   .part-row{
     display:flex;align-items:center;gap:8px;padding:8px 8px;border-radius:6px;cursor:pointer;
     font-size:12.5px;margin-bottom:2px;border:1px solid transparent;
@@ -265,6 +276,9 @@
     #btnToggleProjection{top:108px;} /* axisViewBarが2列×3行になり縦に伸びるため、その分下げる */
     #topbar .brand{display:none;} /* 縦画面の狭い横幅ではブランド名を省略しボタン領域を確保 */
     #topbar .sep{display:none;}
+    /* 縦画面の狭い横幅では、保存結果の常設テキストがボタン列を圧迫するため隠す（結果はトースト通知で表示済み） */
+    #saveStatus{display:none;}
+    #topbar .spacer{display:none;} /* saveStatusが無くなる分の余白も詰める */
   }
 
   /* 非常に狭い画面（幅400px未満）：トップバーのボタンラベルをアイコンのみに */
