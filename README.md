@@ -45,6 +45,24 @@ Three.js (r128, jsDelivr CDN) + vanilla JS。ビルドツールなし、ロー�
 | `js/env/06-env-ui.js` | 右パネルの操作UI（時刻・周期・雲量・風・高度プレビュー） |
 | `js/env/07-env-main.js` | 起動処理 |
 
+## 公開（GitHub Pages）
+
+ビルド不要の静的サイトなので、リポジトリをそのままGitHub Pagesで公開できる。
+
+1. リポジトリの Settings → Pages
+2. Source: `Deploy from a branch`
+3. Branch: `main` / フォルダ: `/ (root)` → Save
+
+公開後のURL:
+
+- Builder: `https://<ユーザー名>.github.io/susuru-airplane-sim/`
+- 環境プレビュー: `https://<ユーザー名>.github.io/susuru-airplane-sim/flight.html`
+
+前提として、HTML/JSの参照はすべて相対パスにしてある（`/susuru-airplane-sim/` のような
+サブパス配信でも壊れないようにするため）。Three.jsはjsDelivrのhttps配信なので
+混在コンテンツエラーは出ず、IndexedDBへの保存もhttpsオリジンなので通常どおり動く。
+ルートの `.nojekyll` はJekyll処理をスキップさせるためのもの。
+
 ## 設計上の重要な決めごと
 
 ### 座標系と親子関係

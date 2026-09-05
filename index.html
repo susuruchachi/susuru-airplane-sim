@@ -43,6 +43,14 @@
   #topbar button:hover{border-color:var(--accent-dim);background:#0f1822;}
   #topbar button.primary{background:var(--accent);border-color:var(--accent);color:#04121e;font-weight:600;}
   #topbar button.primary:hover{background:#5cb8ff;}
+  /* 別ページ（環境プレビュー）への導線。見た目はトップバーのボタンに揃える */
+  #topbar a.navlink{
+    background:transparent;border:1px solid var(--line);color:var(--text);text-decoration:none;
+    padding:6px 12px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:var(--sans);
+    display:flex;align-items:center;gap:6px;transition:border-color .15s, background .15s;
+    white-space:nowrap;flex-shrink:0;
+  }
+  #topbar a.navlink:hover{border-color:var(--accent-dim);background:#0f1822;}
   #topbar .spacer{flex:1 1 auto;min-width:0;}
   #topbarScroll{
     display:flex;align-items:center;gap:12px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;
@@ -239,7 +247,7 @@
     #app{grid-template-columns:1fr;grid-template-rows:48px 1fr;}
     #topbar{grid-column:1;padding:0 8px;gap:8px;}
     #topbar .brand{font-size:12px;}
-    #topbar button{padding:6px 9px;font-size:11.5px;}
+    #topbar button, #topbar a.navlink{padding:6px 9px;font-size:11.5px;}
     .mobile-only{display:flex;}
 
     #left, #right{
@@ -317,6 +325,8 @@
       <div class="topbar-sep"></div>
       <button id="btnDownloadConfig" title="3Dモデルを含まない設定ファイル(.json)をダウンロードします">⇩ 設定をダウンロード</button>
       <button id="btnImportConfig" title="ダウンロードした設定ファイル(.json)を、今開いているモデルに適用します">⇧ 設定を読込</button>
+      <div class="topbar-sep"></div>
+      <a id="linkEnvPreview" class="navlink" href="flight.html" title="空・雲・昼夜サイクルの環境プレビューを開きます">🌤 環境プレビュー</a>
     </div>
     <div class="spacer"></div>
     <span id="saveStatus"></span>
