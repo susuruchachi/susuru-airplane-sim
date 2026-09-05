@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flight Sim — 環境プレビュー</title>
+<style>
+  :root{
+    --bg:#0b1016;
+    --panel:#121a24;
+    --panel-2:#0e151d;
+    --line:#233042;
+    --text:#dbe6f0;
+    --text-dim:#7f93a8;
+    --accent:#3fa9ff;
+    --accent-dim:#1c4a6e;
+    --warn:#ff9f40;
+    --ok:#4fd18b;
+    --danger:#ff5d5d;
+    --mono: 'SF Mono', 'Consolas', 'Menlo', monospace;
+    --sans: -apple-system, 'Hiragino Sans', 'Yu Gothic', 'Segoe UI', sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;height:100dvh;background:var(--bg);color:var(--text);font-family:var(--sans);overflow:hidden;}
+  #app{display:grid;grid-template-columns:1fr 300px;grid-template-rows:48px 1fr;height:100%;height:100dvh;}
+
+  #topbar{
+    grid-column:1/3;grid-row:1;display:flex;align-items:center;gap:12px;padding:0 16px;
+    background:var(--panel-2);border-bottom:1px solid var(--line);
+    height:48px;box-sizing:border-box;flex-wrap:nowrap;overflow:hidden;min-height:0;
+  }
+  #topbar .brand{font-weight:600;letter-spacing:.02em;font-size:14px;color:var(--text);white-space:nowrap;}
+  #topbar .brand span{color:var(--accent);}
+  #topbar .sep{width:1px;height:22px;background:var(--line);}
+  #topbar a.navlink{
+    color:var(--text-dim);text-decoration:none;font-size:12.5px;padding:6px 12px;border:1px solid var(--line);
+    border-radius:6px;white-space:nowrap;
+  }
+  #topbar a.navlink:hover{border-color:var(--accent-dim);color:var(--text);}
+  #topbar .spacer{flex:1 1 auto;min-width:0;}
+
+  #envCenter{grid-column:1;grid-row:2;position:relative;background:#000;overflow:hidden;}
+  #envViewport{width:100%;height:100%;display:block;}
+  #versionTag{
+    position:absolute;bottom:8px;left:10px;font-size:11px;color:var(--text-dim);font-family:var(--mono);
+    white-space:pre-wrap;max-width:70%;pointer-events:none;
+  }
+  #versionTag.err{color:var(--danger);}
+  #versionTag.ok{color:var(--text-dim);}
+
+  #right{grid-column:2;grid-row:2;background:var(--panel);border-left:1px solid var(--line);overflow-y:auto;}
+  #right .section-title{padding:14px 14px 8px;font-size:11px;letter-spacing:.04em;color:var(--text-dim);text-transform:uppercase;}
+  .env-group{padding:0 14px 16px;border-bottom:1px solid var(--line);margin-bottom:4px;}
+  .env-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;font-size:12.5px;}
+  .env-row label{color:var(--text-dim);}
+  .env-row .val{font-family:var(--mono);color:var(--text);font-size:12px;min-width:56px;text-align:right;}
+  .env-group input[type=range]{width:100%;accent-color:var(--accent);}
+  .env-group input[type=number]{
+    width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+    padding:6px 8px;border-radius:6px;font-size:12.5px;font-family:var(--mono);
+  }
+  .env-note{font-size:11px;color:var(--text-dim);line-height:1.5;margin-top:4px;}
+  #envBtnToggleTime, #envBtnReset{
+    width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+    padding:8px 10px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:var(--sans);margin-top:6px;
+  }
+  #envBtnToggleTime:hover, #envBtnReset:hover{border-color:var(--accent-dim);}
+  #envBtnToggleTime.active{background:var(--accent-dim);border-color:var(--accent-dim);}
+  #envTimeReadout, #envSunElevationReadout{font-family:var(--mono);color:var(--accent);}
+
+  @media (max-width: 760px){
+    #app{grid-template-columns:1fr;grid-template-rows:48px 1fr 40vh;}
+    #envCenter{grid-column:1;grid-row:2;}
+    #right{grid-column:1;grid-row:3;border-left:none;border-top:1px solid var(--line);}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="topbar">
+    <div class="brand">FLIGHT SIM <span>ENVIRONMENT</span></div>
+    <div class="sep"></div>
+    <a class="navlink" href="index.html">← 機体設定（Builder）に戻る</a>
+    <div class="spacer"></div>
+  </div>
+
+  <div id="envCenter">
+    <canvas id="envViewport"></canvas>
+    <div id="versionTag">起動中…</div>
+  </div>
+
+  <div id="right">
+    <div class="section-title">昼夜サイクル</div>
+    <div class="env-group">
+      <div class="env-row"><label>時刻</label><span id="envTimeReadout" class="val">09:00</span></div>
+      <input type="range" id="envTimeSlider" min="0" max="24" step="0.0167">
+      <button id="envBtnToggleTime">❚❚ 一時停止</button>
+      <div class="env-row" style="margin-top:10px;">
+        <label>周期（分＝24時間分）</label>
+      </div>
+      <input type="number" id="envCycleMinutes" min="1" max="1440" step="1">
+      <div class="env-row" style="margin-top:8px;">
+        <label>太陽の仰角</label><span id="envSunElevationReadout" class="val">--°</span>
+      </div>
+    </div>
+
+    <div class="section-title">雲</div>
+    <div class="env-group">
+      <div class="env-row"><label>雲量</label><span id="envCloudCoverageReadout" class="val">45%</span></div>
+      <input type="range" id="envCloudCoverage" min="0" max="100" step="1">
+    </div>
+
+    <div class="section-title">風</div>
+    <div class="env-group">
+      <div class="env-row"><label>風速</label><span id="envWindSpeedReadout" class="val">20 km/h</span></div>
+      <input type="range" id="envWindSpeed" min="0" max="150" step="1">
+      <div class="env-row" style="margin-top:10px;"><label>風向</label><span id="envWindDirectionReadout" class="val">90°</span></div>
+      <input type="range" id="envWindDirection" min="0" max="360" step="1">
+    </div>
+
+    <div class="section-title">高度（プレビュー）</div>
+    <div class="env-group">
+      <div class="env-row"><label>高度</label><span id="envAltitudeReadout" class="val">0 m</span></div>
+      <input type="range" id="envAltitude" min="0" max="15000" step="100">
+      <div class="env-note">空の色・霧の変化を確認するための仮スライダー。実際の機体高度と連動させるのは飛行シーン本体の実装後。</div>
+    </div>
+
+    <div class="env-group" style="border-bottom:none;">
+      <button id="envBtnReset">初期値に戻す</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // 診断ログ：各<script>の読込成否をここに積み、画面左下(#versionTag)にまとめて表示する。
+  window._loadLog = { failedScripts: [], cdnOk: false };
+  function _markFailed(label) {
+    window._loadLog.failedScripts.push(label);
+    _renderVersionTag();
+  }
+  function _renderVersionTag() {
+    const el = document.getElementById('versionTag');
+    if (!el) return;
+    const log = window._loadLog;
+    if (log.failedScripts.length > 0) {
+      el.className = 'err';
+      el.textContent = '読込失敗: ' + log.failedScripts.join(', ') + '\n(パス／ネットワークをご確認ください)';
+      return;
+    }
+    if (typeof envBootstrapOk !== 'undefined' && envBootstrapOk) {
+      el.className = 'ok';
+      el.textContent = 'Flight Sim Environment ' + (typeof ENV_VERSION !== 'undefined' ? ENV_VERSION : '?');
+    }
+  }
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js" onerror="_markFailed('three.min.js (CDN)')"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js" onerror="_markFailed('OrbitControls.js (CDN)')"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/objects/Sky.js" onerror="_markFailed('Sky.js (CDN)')"></script>
+<script>
+  window.addEventListener('DOMContentLoaded', () => {
+    if (typeof THREE === 'undefined') { _markFailed('THREE本体が未定義'); return; }
+    if (typeof THREE.OrbitControls === 'undefined') _markFailed('THREE.OrbitControlsが未定義');
+    if (typeof THREE.Sky === 'undefined') _markFailed('THREE.Skyが未定義');
+    window._loadLog.cdnOk = window._loadLog.failedScripts.length === 0;
+  });
+</script>
+
+<script src="js/env/01-env-state.js" onerror="_markFailed('js/env/01-env-state.js')"></script>
+<script src="js/env/02-env-scene.js" onerror="_markFailed('js/env/02-env-scene.js')"></script>
+<script src="js/env/03-sky.js" onerror="_markFailed('js/env/03-sky.js')"></script>
+<script src="js/env/04-clouds.js" onerror="_markFailed('js/env/04-clouds.js')"></script>
+<script src="js/env/05-daynight.js" onerror="_markFailed('js/env/05-daynight.js')"></script>
+<script src="js/env/06-env-ui.js" onerror="_markFailed('js/env/06-env-ui.js')"></script>
+<script src="js/env/07-env-main.js" onerror="_markFailed('js/env/07-env-main.js')"></script>
+<script>
+  window.addEventListener('DOMContentLoaded', () => {
+    setTimeout(_renderVersionTag, 300);
+  });
+</script>
+</body>
+</html>
