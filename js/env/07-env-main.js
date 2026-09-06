@@ -4,6 +4,7 @@ let envBootstrapOk = false;
 
 function bootstrapEnv() {
   try {
+    initWorld();     // 地形の高さ関数・国・都市・空港を用意する（以降すべての土台）
     initEnvScene();
     initSky();
     initTerrain();   // 地形と海。以降の都市・空港はこの高さの上に載る

@@ -1,15 +1,25 @@
-// 03c-terrain.js — 地形メッシュ（LOD付きタイル）と海
+// 03c-terrain.js — 地形メッシュ（ストリーミング＋LOD）と海
 //
 // 高さはすべて js/env/03b-world.js の worldHeightAt() から取る。
-// 600km四方を一枚のメッシュにすると頂点が多すぎるので、30km角のタイルに分割し、
-// カメラからの距離でタイルごとの解像度（LOD）を切り替える。
 //
-// 海は「y=0に置いた半透明の一枚板」。浅瀬の水色は海面ではなく
+// 世界は3,000km四方あるが、地形は **カメラの周りだけを作っては捨てる**。
+// 30km角のタイルに切り、カメラから約300km（＝カメラのfarより少し広い）以内のタイルだけを
+// 実体化し、外へ出たものは破棄する。これで WORLD_SIZE をいくら大きくしても
+// メモリと描画の負荷は変わらない。
+//
+// 座標について：タイルの頂点は **タイル原点からのローカル座標** で持ち、
+// ワールド上の位置は mesh.position に入れる。頂点をワールド座標のまま持つと、
+// 原点から1,000km以上離れた場所で float32 の精度が1m近くまで落ち、
+// 滑走路の路面標識のような細かい造作が壊れる。
+// three.js は modelViewMatrix を倍精度で組んでから float32 に落とすので、
+// この持ち方なら遠方でも精度が保たれる。
+//
+// 海は「y=0に置いた半透明の水面」。浅瀬の水色は海面ではなく
 // 海底（地形メッシュ）の色で表現している。こうすると砂浜〜浅瀬〜深海の
 // 移り変わりが地形の解像度そのままで出るので、海面側にシェーダーを書かずに済む。
 
-const TERRAIN_TILE_COUNT = 20;                          // 20 x 20 タイル
-const TERRAIN_TILE_SIZE = WORLD_SIZE / TERRAIN_TILE_COUNT; // 30km角
+const TERRAIN_TILE_SIZE = 30000;        // 30km角
+const TERRAIN_ACTIVE_RADIUS = 300000;   // この距離までのタイルを実体化する（カメラのfarより少し広く）
 
 // カメラからの水平距離でタイルの分割数を決める。近いほど細かい。
 const TERRAIN_LOD_STEPS = [
@@ -23,79 +33,125 @@ const TERRAIN_LOD_STEPS = [
 // LODが違うタイル同士の境目にできる隙間を隠すための「スカート」（縁を下へ垂らす）
 const TERRAIN_SKIRT_DEPTH = 1200;
 
-// LOD切り替えでカクつかないよう、1フレームに作り直すタイル数を制限する
+// 1フレームに作り直すタイル数の上限（LOD切り替えでカクつかないように）
 const TERRAIN_REBUILD_BUDGET = 3;
 
-// カメラがこれだけ動いたらLODを見直す（毎フレーム全タイル分の距離計算をしないため）
-const TERRAIN_LOD_RECHECK_DIST = 3000;
+// カメラがこれだけ動いたらタイルの取捨とLODを見直す
+const TERRAIN_RECHECK_DIST = 3000;
 
-// 生物相（標高と傾斜で決まる地表の色）。
+// 気候はタイル内で緩やかにしか変わらないので、頂点ごとではなく
+// 粗い格子で拾って補間する（気候の計算は高さ関数と同じくらい重いため）
+const TERRAIN_CLIMATE_GRID = 4;
+
+// --- 地表の色 ---------------------------------------------------------------
 // outputEncoding=sRGB で中間色が持ち上がるぶんを見越して、見た目より一段暗く指定する。
-const TERRAIN_BIOME_STOPS = [
+
+const TERRAIN_SEA_STOPS = [
   { h: -2600, c: 0x040a16 }, // 深海底
   { h: -420, c: 0x08243a }, // 大陸棚
   { h: -70, c: 0x125a68 }, // 浅瀬（半透明の海面越しに水色に見える）
   { h: -8, c: 0x5c6a4e }, // 汀線
-  { h: 9, c: 0x6b6247 }, // 砂浜
-  { h: 45, c: 0x2c5220 }, // 草原
-  { h: 650, c: 0x1b3a16 }, // 森
-  { h: 1550, c: 0x443722 }, // 低木・土
-  { h: 2150, c: 0x48443d }, // 岩
-  { h: 2700, c: 0x63686e }, // 岩と雪の混在
-  { h: 3150, c: 0x8f97a0 }, // 万年雪
 ];
-const TERRAIN_ROCK_COLOR = 0x33312e; // 急斜面は標高によらず岩肌にする
-const TERRAIN_URBAN_COLOR = 0x4a4640; // 市街地。上空から見て街だと分かるようにする
 
-let _terrainTiles = [];
-let _terrainRebuildQueue = [];
-let _terrainLastLodCheck = null;
+const TERRAIN_C = {
+  beach: 0x6b6247,
+  grassCold: 0x35402c,     // 寒帯の草地・ツンドラ
+  grassTemperate: 0x2c5220,
+  grassTropical: 0x1e4a18,
+  steppe: 0x51492c,        // 半乾燥の草原
+  desert: 0x6e5c3a,
+  forestCold: 0x1e3024,    // 針葉樹林
+  forestTemperate: 0x1b3a16,
+  forestTropical: 0x14330f,
+  alpine: 0x443722,        // 森林限界より上の低木・土
+  rock: 0x48443d,
+  snow: 0x8f97a0,
+  steepRock: 0x33312e,     // 急斜面は標高によらず岩肌
+  urban: 0x4a4640,
+};
 
 function terrainHexToRgb(hex) {
   return [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255];
 }
 
-const _TERRAIN_STOP_RGB = TERRAIN_BIOME_STOPS.map((s) => terrainHexToRgb(s.c));
-const _TERRAIN_ROCK_RGB = terrainHexToRgb(TERRAIN_ROCK_COLOR);
-const _TERRAIN_URBAN_RGB = terrainHexToRgb(TERRAIN_URBAN_COLOR);
+const _TC = {};
+for (const k in TERRAIN_C) _TC[k] = terrainHexToRgb(TERRAIN_C[k]);
+const _TERRAIN_SEA_RGB = TERRAIN_SEA_STOPS.map((s) => terrainHexToRgb(s.c));
 
-// 標高・傾斜・ゆらぎから地表色を決めて out[0..2] に書き込む
-function terrainColorAt(h, slope, jitter, urban, out) {
-  const stops = TERRAIN_BIOME_STOPS;
-  let i = 0;
-  while (i < stops.length - 2 && h > stops[i + 1].h) i++;
+// out = a を b へ t だけ寄せる
+function terrainMix(out, b, t) {
+  if (t <= 0) return;
+  if (t > 1) t = 1;
+  out[0] += (b[0] - out[0]) * t;
+  out[1] += (b[1] - out[1]) * t;
+  out[2] += (b[2] - out[2]) * t;
+}
 
-  const a = stops[i], b = stops[i + 1];
-  const t = Math.min(Math.max((h - a.h) / (b.h - a.h), 0), 1);
-  const ca = _TERRAIN_STOP_RGB[i], cb = _TERRAIN_STOP_RGB[i + 1];
-  let r = ca[0] + (cb[0] - ca[0]) * t;
-  let g = ca[1] + (cb[1] - ca[1]) * t;
-  let bl = ca[2] + (cb[2] - ca[2]) * t;
-
-  // 陸の急斜面は草木が付かないので岩肌へ寄せる（雪も付きにくい）
-  if (h > 0 && slope > 0.32) {
-    const k = Math.min((slope - 0.32) / 0.34, 1) * 0.85;
-    r += (_TERRAIN_ROCK_RGB[0] - r) * k;
-    g += (_TERRAIN_ROCK_RGB[1] - g) * k;
-    bl += (_TERRAIN_ROCK_RGB[2] - bl) * k;
+// 標高・傾斜・気候から地表色を決めて out[0..2] に書き込む。
+// 森林限界と雪線は気温から決まるので、北へ行くほど低い標高から岩と雪になる。
+function terrainColorAt(h, slope, jitter, urban, temp, dry, out) {
+  if (h <= 0) {
+    const stops = TERRAIN_SEA_STOPS;
+    let i = 0;
+    while (i < stops.length - 2 && h > stops[i + 1].h) i++;
+    const t = Math.min(Math.max((h - stops[i].h) / (stops[i + 1].h - stops[i].h), 0), 1);
+    const ca = _TERRAIN_SEA_RGB[i], cb = _TERRAIN_SEA_RGB[i + 1];
+    out[0] = ca[0] + (cb[0] - ca[0]) * t;
+    out[1] = ca[1] + (cb[1] - ca[1]) * t;
+    out[2] = ca[2] + (cb[2] - ca[2]) * t;
+    const m0 = 0.86 + jitter * 0.28;
+    out[0] *= m0; out[1] *= m0; out[2] *= m0;
+    return;
   }
 
-  // 市街地は建物と道路で灰色寄りになる（建物メッシュだけだと上空から街に見えないため）
-  if (urban > 0 && h > 0) {
-    const k = urban * 0.72;
-    r += (_TERRAIN_URBAN_RGB[0] - r) * k;
-    g += (_TERRAIN_URBAN_RGB[1] - g) * k;
-    bl += (_TERRAIN_URBAN_RGB[2] - bl) * k;
+  const snowLine = 700 + temp * 3400;
+  const treeLine = snowLine * 0.62;
+
+  // 低地の色：寒帯→温帯→熱帯、そこへ乾燥をかけて草原→砂漠へ寄せる
+  const lowland = [_TC.grassCold[0], _TC.grassCold[1], _TC.grassCold[2]];
+  terrainMix(lowland, _TC.grassTemperate, (temp - 0.15) / 0.3);
+  terrainMix(lowland, _TC.grassTropical, (temp - 0.6) / 0.3);
+  terrainMix(lowland, _TC.steppe, (dry - 0.40) / 0.22);
+  terrainMix(lowland, _TC.desert, (dry - 0.62) / 0.23);
+
+  // 森の色。乾燥地には森が育たないので、乾くほど低地と同じ色へ潰す
+  const forest = [_TC.forestCold[0], _TC.forestCold[1], _TC.forestCold[2]];
+  terrainMix(forest, _TC.forestTemperate, (temp - 0.2) / 0.3);
+  terrainMix(forest, _TC.forestTropical, (temp - 0.6) / 0.3);
+  terrainMix(forest, lowland, (dry - 0.35) / 0.3);
+
+  if (h < 11) {
+    out[0] = _TC.beach[0]; out[1] = _TC.beach[1]; out[2] = _TC.beach[2];
+    terrainMix(out, lowland, (h - 4) / 7);
+  } else if (h < treeLine * 0.34) {
+    out[0] = lowland[0]; out[1] = lowland[1]; out[2] = lowland[2];
+  } else if (h < treeLine) {
+    out[0] = lowland[0]; out[1] = lowland[1]; out[2] = lowland[2];
+    terrainMix(out, forest, (h - treeLine * 0.34) / (treeLine * 0.5));
+  } else if (h < snowLine) {
+    out[0] = forest[0]; out[1] = forest[1]; out[2] = forest[2];
+    const t = (h - treeLine) / (snowLine - treeLine);
+    terrainMix(out, _TC.alpine, t * 2.2);
+    terrainMix(out, _TC.rock, (t - 0.5) * 1.8);
+  } else {
+    out[0] = _TC.rock[0]; out[1] = _TC.rock[1]; out[2] = _TC.rock[2];
+    terrainMix(out, _TC.snow, (h - snowLine) / 420);
   }
+
+  // 陸の急斜面は草木も雪も付かないので岩肌へ寄せる
+  if (slope > 0.32) terrainMix(out, _TC.steepRock, Math.min((slope - 0.32) / 0.34, 1) * 0.85);
+
+  // 市街地は建物と道路で灰色寄りになる（建物メッシュだけだと上空から街に見えない）
+  if (urban > 0) terrainMix(out, _TC.urban, urban * 0.72);
 
   // 一様な色面にならないよう、わずかに明暗をばらつかせる
   const m = 0.86 + jitter * 0.28;
-  out[0] = r * m; out[1] = g * m; out[2] = bl * m;
+  out[0] *= m; out[1] *= m; out[2] *= m;
 }
 
 // --- タイルのジオメトリ生成 -------------------------------------------------
 
-// タイル1枚ぶんのジオメトリを作る。
+// タイル1枚ぶんのジオメトリを作る。頂点はタイル原点からのローカル座標。
 // 法線をタイル境界でも滑らかにつなぐため、高さは外側に1リング広く（n+3角）サンプルし、
 // 実際に描くのは内側の (n+1)^2 頂点だけにしている。
 function buildTerrainTileGeometry(originX, originZ, size, segments) {
@@ -111,6 +167,28 @@ function buildTerrainTileGeometry(originX, originZ, size, segments) {
     }
   }
 
+  // 気候は数百km単位でしか変わらないので粗い格子で拾って双一次補間する
+  const cg = TERRAIN_CLIMATE_GRID;
+  const climT = new Float32Array((cg + 1) * (cg + 1));
+  const climD = new Float32Array((cg + 1) * (cg + 1));
+  for (let j = 0; j <= cg; j++) {
+    for (let i = 0; i <= cg; i++) {
+      const x = originX + (size * i) / cg, z = originZ + (size * j) / cg;
+      const land = worldLandValueAt(x, z);
+      const h = heights[Math.min(Math.round((i * n) / cg) + 1, gw - 1) + gw * Math.min(Math.round((j * n) / cg) + 1, gw - 1)];
+      climT[j * (cg + 1) + i] = worldTemperatureAt(x, z, h);
+      climD[j * (cg + 1) + i] = worldDrynessAt(x, z, land);
+    }
+  }
+  const sampleClimate = (arr, u, v) => {
+    const fu = u * cg, fv = v * cg;
+    const i0 = Math.min(Math.floor(fu), cg - 1), j0 = Math.min(Math.floor(fv), cg - 1);
+    const tu = fu - i0, tv = fv - j0;
+    const a = arr[j0 * (cg + 1) + i0], b = arr[j0 * (cg + 1) + i0 + 1];
+    const c = arr[(j0 + 1) * (cg + 1) + i0], d = arr[(j0 + 1) * (cg + 1) + i0 + 1];
+    return (a + (b - a) * tu) + ((c + (d - c) * tu) - (a + (b - a) * tu)) * tv;
+  };
+
   const vw = n + 1;
   const vertCount = vw * vw;
   const skirtCount = vw * 4;
@@ -124,20 +202,27 @@ function buildTerrainTileGeometry(originX, originZ, size, segments) {
     for (let i = 0; i < vw; i++) {
       const gi = (j + 1) * gw + (i + 1);
       const h = heights[gi];
-      const x = originX + i * step;
-      const z = originZ + j * step;
+      const lx = i * step, lz = j * step;      // タイル原点からのローカル座標
+      const wx = originX + lx, wz = originZ + lz; // 色や気候の判定はワールド座標で
 
       // 中央差分から法線を出す（外側リングがあるので端でも片側差分にならない）
       const dhx = (heights[gi + 1] - heights[gi - 1]) * inv2step;
       const dhz = (heights[gi + gw] - heights[gi - gw]) * inv2step;
       const len = Math.sqrt(dhx * dhx + 1 + dhz * dhz);
-      const nx = -dhx / len, ny = 1 / len, nz = -dhz / len;
+      const ny = 1 / len;
 
       const vi = (j * vw + i) * 3;
-      positions[vi] = x; positions[vi + 1] = h; positions[vi + 2] = z;
-      normals[vi] = nx; normals[vi + 1] = ny; normals[vi + 2] = nz;
+      positions[vi] = lx; positions[vi + 1] = h; positions[vi + 2] = lz;
+      normals[vi] = -dhx / len; normals[vi + 1] = ny; normals[vi + 2] = -dhz / len;
 
-      terrainColorAt(h, 1 - ny, worldValueNoise(x * 0.00042, z * 0.00042), worldUrbanFactorAt(x, z), rgb);
+      terrainColorAt(
+        h, 1 - ny,
+        worldValueNoise(wx * 0.00042, wz * 0.00042),
+        worldUrbanFactorAt(wx, wz),
+        sampleClimate(climT, i / n, j / n),
+        sampleClimate(climD, i / n, j / n),
+        rgb
+      );
       colors[vi] = rgb[0]; colors[vi + 1] = rgb[1]; colors[vi + 2] = rgb[2];
     }
   }
@@ -204,33 +289,13 @@ function buildTerrainTileGeometry(originX, originZ, size, segments) {
   return geo;
 }
 
-// --- 初期化・更新 -----------------------------------------------------------
+// --- タイルの出し入れ -------------------------------------------------------
 
-function initTerrain() {
-  EnvState.terrainGroup = new THREE.Group();
-  EnvState.scene.add(EnvState.terrainGroup);
+const _terrainTiles = new Map();     // "ix,iz" -> { ix, iz, originX, originZ, lod, mesh }
+let _terrainWork = [];               // これから作る／作り直すタイル
+let _terrainLastCheck = null;
 
-  EnvState.terrainMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
-
-  _terrainTiles = [];
-  for (let j = 0; j < TERRAIN_TILE_COUNT; j++) {
-    for (let i = 0; i < TERRAIN_TILE_COUNT; i++) {
-      const originX = -WORLD_HALF + i * TERRAIN_TILE_SIZE;
-      const originZ = -WORLD_HALF + j * TERRAIN_TILE_SIZE;
-      _terrainTiles.push({
-        originX, originZ,
-        centerX: originX + TERRAIN_TILE_SIZE / 2,
-        centerZ: originZ + TERRAIN_TILE_SIZE / 2,
-        lod: -1,
-        mesh: null,
-      });
-    }
-  }
-
-  // 起動時は全タイルを一気に作る。遠いタイルは分割数が小さいので実測で数百ms以内。
-  updateTerrainLod(true);
-  initSea();
-}
+function terrainTileKey(ix, iz) { return ix + ',' + iz; }
 
 function terrainSegmentsForDistance(d) {
   for (let i = 0; i < TERRAIN_LOD_STEPS.length; i++) {
@@ -239,78 +304,135 @@ function terrainSegmentsForDistance(d) {
   return TERRAIN_LOD_STEPS[TERRAIN_LOD_STEPS.length - 1].segments;
 }
 
+function initTerrain() {
+  EnvState.terrainGroup = new THREE.Group();
+  EnvState.scene.add(EnvState.terrainGroup);
+  EnvState.terrainMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+
+  refreshTerrainTiles(true);
+  initSea();
+}
+
+function disposeTerrainTile(tile) {
+  if (!tile.mesh) return;
+  EnvState.terrainGroup.remove(tile.mesh);
+  tile.mesh.geometry.dispose();
+  tile.mesh = null;
+}
+
 function buildTerrainTile(tile) {
-  if (tile.mesh) {
-    EnvState.terrainGroup.remove(tile.mesh);
-    tile.mesh.geometry.dispose();
-    tile.mesh = null;
-  }
+  disposeTerrainTile(tile);
   const geo = buildTerrainTileGeometry(tile.originX, tile.originZ, TERRAIN_TILE_SIZE, tile.pendingLod);
   tile.mesh = new THREE.Mesh(geo, EnvState.terrainMaterial);
+  tile.mesh.position.set(tile.originX, 0, tile.originZ);
   tile.mesh.matrixAutoUpdate = false;
   tile.mesh.updateMatrix();
   tile.lod = tile.pendingLod;
   EnvState.terrainGroup.add(tile.mesh);
 }
 
-// カメラ位置から各タイルの目標LODを決め、変わったものを作り直しキューに積む
-function updateTerrainLod(immediate) {
+// カメラの周りにあるべきタイルを揃える。
+// 圏外のタイルは捨て、足りないタイルとLODが変わったタイルを作業キューへ積む。
+function refreshTerrainTiles(immediate) {
   const cam = EnvState.camera.position;
-  _terrainLastLodCheck = { x: cam.x, z: cam.z };
+  _terrainLastCheck = { x: cam.x, z: cam.z };
 
-  const dirty = [];
-  for (const tile of _terrainTiles) {
-    const dx = cam.x - tile.centerX, dz = cam.z - tile.centerZ;
-    const d = Math.max(Math.sqrt(dx * dx + dz * dz) - TERRAIN_TILE_SIZE * 0.71, 0);
-    const seg = terrainSegmentsForDistance(d);
-    if (seg !== tile.lod) {
-      tile.pendingLod = seg;
-      tile.sortDist = d;
-      dirty.push(tile);
+  const R = TERRAIN_ACTIVE_RADIUS;
+  const i0 = Math.floor((cam.x - R) / TERRAIN_TILE_SIZE), i1 = Math.floor((cam.x + R) / TERRAIN_TILE_SIZE);
+  const j0 = Math.floor((cam.z - R) / TERRAIN_TILE_SIZE), j1 = Math.floor((cam.z + R) / TERRAIN_TILE_SIZE);
+
+  const keep = new Set();
+  const work = [];
+
+  for (let ix = i0; ix <= i1; ix++) {
+    for (let iz = j0; iz <= j1; iz++) {
+      const originX = ix * TERRAIN_TILE_SIZE, originZ = iz * TERRAIN_TILE_SIZE;
+      const centerX = originX + TERRAIN_TILE_SIZE / 2, centerZ = originZ + TERRAIN_TILE_SIZE / 2;
+      const dx = cam.x - centerX, dz = cam.z - centerZ;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist - TERRAIN_TILE_SIZE * 0.71 > R) continue; // 円の外は作らない
+
+      const key = terrainTileKey(ix, iz);
+      keep.add(key);
+
+      let tile = _terrainTiles.get(key);
+      if (!tile) {
+        tile = { ix, iz, originX, originZ, lod: -1, mesh: null };
+        _terrainTiles.set(key, tile);
+      }
+      const seg = terrainSegmentsForDistance(Math.max(dist - TERRAIN_TILE_SIZE * 0.71, 0));
+      if (seg !== tile.lod) {
+        tile.pendingLod = seg;
+        tile.sortDist = dist;
+        work.push(tile);
+      }
     }
   }
 
-  // 近いタイルから作り直す（見えている場所ほど早く差し替わってほしい）
-  dirty.sort((a, b) => a.sortDist - b.sortDist);
+  // 圏外に出たタイルを捨てる
+  for (const [key, tile] of _terrainTiles) {
+    if (!keep.has(key)) {
+      disposeTerrainTile(tile);
+      _terrainTiles.delete(key);
+    }
+  }
+
+  // 街と空港も同じ判断で出し入れする（判定のタイミングを揃えておく）
+  if (typeof refreshCities === 'function') refreshCities();
+  if (typeof refreshAirports === 'function') refreshAirports();
+
+  // 近いタイルから作る（見ている場所ほど早く出てほしい）
+  work.sort((a, b) => a.sortDist - b.sortDist);
 
   if (immediate) {
-    for (const tile of dirty) buildTerrainTile(tile);
-    _terrainRebuildQueue = [];
+    for (const tile of work) buildTerrainTile(tile);
+    _terrainWork = [];
   } else {
-    _terrainRebuildQueue = dirty;
+    _terrainWork = work;
   }
 }
 
-// 毎フレーム呼ぶ。カメラが十分動いたらLODを見直し、キューを少しずつ消化する。
+// 毎フレーム呼ぶ。カメラが十分動いたらタイルを見直し、作業キューを少しずつ消化する。
 function updateTerrain() {
   const cam = EnvState.camera.position;
-  if (_terrainRebuildQueue.length === 0 && _terrainLastLodCheck) {
-    const dx = cam.x - _terrainLastLodCheck.x, dz = cam.z - _terrainLastLodCheck.z;
-    if (dx * dx + dz * dz > TERRAIN_LOD_RECHECK_DIST * TERRAIN_LOD_RECHECK_DIST) {
-      updateTerrainLod(false);
-    }
+  if (_terrainWork.length === 0 && _terrainLastCheck) {
+    const dx = cam.x - _terrainLastCheck.x, dz = cam.z - _terrainLastCheck.z;
+    if (dx * dx + dz * dz > TERRAIN_RECHECK_DIST * TERRAIN_RECHECK_DIST) refreshTerrainTiles(false);
   }
 
   let budget = TERRAIN_REBUILD_BUDGET;
-  while (budget > 0 && _terrainRebuildQueue.length > 0) {
-    buildTerrainTile(_terrainRebuildQueue.shift());
+  while (budget > 0 && _terrainWork.length > 0) {
+    buildTerrainTile(_terrainWork.shift());
     budget--;
   }
 }
 
-// --- 海 ---------------------------------------------------------------------
+// 視点を大きく飛ばしたあとなど、周囲の地形をすぐ作り直したいときに使う
+function terrainRebuildNow() {
+  refreshTerrainTiles(true);
+}
 
-// 海面のメッシュ。
+// 地形を作り直させたい範囲を指示する（空港を足した／消したときなど）
+function terrainInvalidateArea(x, z, radius) {
+  for (const tile of _terrainTiles.values()) {
+    const cx = tile.originX + TERRAIN_TILE_SIZE / 2, cz = tile.originZ + TERRAIN_TILE_SIZE / 2;
+    if (Math.hypot(cx - x, cz - z) < radius + TERRAIN_TILE_SIZE) tile.lod = -1;
+  }
+  refreshTerrainTiles(false);
+}
+
+// --- 海 ---------------------------------------------------------------------
 //
 // r128 は WebGL2 だと対数深度を「頂点で計算して画面上で線形補間する」経路に落ちる。
 // log は上に凸なので、1枚のポリゴンが手前から奥まで大きく伸びていると、
 // 補間された深度が本来より手前に寄り、海面が陸地や滑走路を覆い隠してしまう。
 // そこで海面は「カメラを中心とした同心円メッシュ」にして、
 // 近いところほど細かく分割する（1つの四角形の中で距離が16%しか変わらないようにする）。
+
 const SEA_RING_COUNT = 64;
 const SEA_SECTOR_COUNT = 96;
 const SEA_INNER_R = 30;
-const SEA_OUTER_R = 350000;      // カメラのfar(260km)を全方位で覆える大きさ
+const SEA_OUTER_R = 400000;      // カメラのfarを全方位で覆える大きさ
 const SEA_WAVE_PATTERN_M = 9000; // ノーマルマップ1タイルぶんの実寸
 
 let _seaWaveDrift = { x: 0, y: 0 };
@@ -325,9 +447,7 @@ function buildSeaGeometry() {
   const uvs = new Float32Array(vertCount * 2);
   const P = SEA_WAVE_PATTERN_M;
 
-  positions[0] = 0; positions[1] = 0; positions[2] = 0;
   normals[1] = 1;
-  uvs[0] = 0; uvs[1] = 0;
 
   const growth = Math.pow(SEA_OUTER_R / SEA_INNER_R, 1 / (rings - 1));
   for (let ri = 0; ri < rings; ri++) {
@@ -336,7 +456,7 @@ function buildSeaGeometry() {
       const a = (si / sectors) * Math.PI * 2;
       const vi = 1 + ri * sectors + si;
       const x = Math.cos(a) * r, z = Math.sin(a) * r;
-      positions[vi * 3] = x; positions[vi * 3 + 1] = 0; positions[vi * 3 + 2] = z;
+      positions[vi * 3] = x; positions[vi * 3 + 2] = z;
       normals[vi * 3 + 1] = 1;
       uvs[vi * 2] = x / P; uvs[vi * 2 + 1] = z / P;
     }
@@ -344,14 +464,13 @@ function buildSeaGeometry() {
 
   const indices = [];
   for (let si = 0; si < sectors; si++) {
-    const a = 1 + si, b = 1 + ((si + 1) % sectors);
-    indices.push(0, b, a); // 上から見て反時計回り（法線は+Y）
+    indices.push(0, 1 + ((si + 1) % sectors), 1 + si); // 上から見て反時計回り（法線は+Y）
   }
   for (let ri = 0; ri < rings - 1; ri++) {
     for (let si = 0; si < sectors; si++) {
-      const s0 = si, s1 = (si + 1) % sectors;
-      const a = 1 + ri * sectors + s0, b = 1 + ri * sectors + s1;
-      const c = 1 + (ri + 1) * sectors + s0, d = 1 + (ri + 1) * sectors + s1;
+      const s1 = (si + 1) % sectors;
+      const a = 1 + ri * sectors + si, b = 1 + ri * sectors + s1;
+      const c = 1 + (ri + 1) * sectors + si, d = 1 + (ri + 1) * sectors + s1;
       indices.push(a, d, c, a, b, d);
     }
   }
@@ -372,13 +491,8 @@ function initSea() {
   nmap.wrapS = nmap.wrapT = THREE.RepeatWrapping;
 
   const mat = new THREE.MeshPhongMaterial({
-    color: 0x0b2135,
-    specular: 0x8fb4cf,
-    shininess: 140,
-    transparent: true,
-    opacity: 0.80,
-    side: THREE.DoubleSide,
-    normalMap: nmap,
+    color: 0x0b2135, specular: 0x8fb4cf, shininess: 140,
+    transparent: true, opacity: 0.80, side: THREE.DoubleSide, normalMap: nmap,
   });
   mat.normalScale.set(0.32, 0.32);
 
@@ -389,16 +503,15 @@ function initSea() {
   EnvState.seaNormalMap = nmap;
 }
 
-// うねり用のノーマルマップ。円形の膨らみをランダムに重ねて、継ぎ目なくタイルさせる。
+// うねり用のノーマルマップ。サイン波の重ね合わせだけで作ると継ぎ目なくタイルできる。
 function buildSeaNormalTexture() {
   const size = 256;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d');
   const img = ctx.createImageData(size, size);
-
   const height = new Float32Array(size * size);
-  // 端でつながるよう、サイン波の重ね合わせだけで作る（整数周期にすればタイルが合う）
+
   const waves = [
     { fx: 1, fz: 2, a: 1.0, p: 0.0 },
     { fx: 3, fz: -1, a: 0.55, p: 1.1 },
@@ -419,9 +532,9 @@ function buildSeaNormalTexture() {
     for (let i = 0; i < size; i++) {
       const il = (i - 1 + size) % size, ir = (i + 1) % size;
       const jl = (j - 1 + size) % size, jr = (j + 1) % size;
-      const dx = height[j * size + ir] - height[j * size + il];
-      const dz = height[jr * size + i] - height[jl * size + i];
-      const nx = -dx, nz = -dz, ny = 2.6;
+      const nx = -(height[j * size + ir] - height[j * size + il]);
+      const nz = -(height[jr * size + i] - height[jl * size + i]);
+      const ny = 2.6;
       const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
       const o = (j * size + i) * 4;
       img.data[o] = ((nx / len) * 0.5 + 0.5) * 255;

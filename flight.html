@@ -75,6 +75,14 @@
     #envCenter{grid-column:1;grid-row:2;}
     #right{grid-column:1;grid-row:3;border-left:none;border-top:1px solid var(--line);}
   }
+
+  /* ミニマップのズーム切り替え */
+  #envMinimapZoom button {
+    flex: 1; padding: 3px 0; font-size: 11px; margin: 0;
+  }
+  #envMinimapZoom button.active {
+    background: #2f6fb5; border-color: #3d84cf; color: #fff;
+  }
 </style>
 </head>
 <body>
@@ -97,6 +105,7 @@
     <div class="env-group">
       <canvas id="envMinimap"
               style="width:100%;max-width:232px;display:block;margin:0 auto 8px;border-radius:6px;border:1px solid #2a3340;background:#0a1017;"></canvas>
+      <div id="envMinimapZoom" style="display:flex;gap:6px;justify-content:center;margin-bottom:6px;"></div>
       <div class="env-note" style="margin-top:0;">クリックした地点へ視点が移動します。</div>
       <div class="env-row" style="margin-top:10px;"><label>現在地</label><span id="envRegionReadout" class="val">--</span></div>
       <div class="env-row" style="margin-top:6px;"><label>地表の標高</label><span id="envGroundReadout" class="val">-- m</span></div>
@@ -139,6 +148,8 @@
     <div class="env-group">
       <div class="env-row"><label>空港</label></div>
       <select id="envAirportSelect"></select>
+      <div class="env-note" style="margin-top:6px;"><span id="envAirportInfoReadout">--</span></div>
+      <button id="envBtnNearestAirport">現在地の最寄りを選ぶ</button>
       <div class="env-row" style="margin-top:10px;"><label>滑走路</label><span id="envAirportDesignatorReadout" class="val">09/27</span></div>
       <button id="envBtnToggleAirport">空港を隠す</button>
       <div class="env-row" style="margin-top:10px;"><label>滑走路の方位</label><span id="envRunwayHeadingReadout" class="val">090°</span></div>

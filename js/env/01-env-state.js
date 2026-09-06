@@ -1,7 +1,7 @@
 // 01-env-state.js — 環境シーン（空・雲・昼夜サイクル）のグローバル状態
 // 番号プレフィックス方式：flight.html 専用。Builder側(index.html)の State とは別の名前空間。
 
-const ENV_VERSION = 'env-v2';
+const ENV_VERSION = 'env-v3';
 
 const EnvState = {
   // Three.js 中枢
@@ -31,23 +31,21 @@ const EnvState = {
   sea: null,
   seaNormalMap: null,
 
-  // 都市（建物・夜景の灯り）と地名ラベル
+  // 都市。世界には130あるので、カメラの周りだけを建てて離れたら片付ける。
   cityGroup: null,
-  cityBuildings: null,
-  cityLights: null,
+  builtCities: null,   // Map(都市id -> { city, buildings, lights })
+
+  // 地名ラベル。一覧だけ先に持ち、スプライトは近づいたときに作る。
   labelGroup: null,
   labels: [],
 
-  // 空港。js/env/03b-world.js の WORLD_AIRPORTS からマップ上の固定位置に建てる。
-  // 各要素は { def, id, name, group, lights, windsockYaw, windsockPitch,
-  //            runwayLengthM, runwayWidthM, headingDeg, lightsMode, visible }。
-  airports: [],
-  selectedAirportIndex: 0, // 右パネルの操作対象になっている空港
+  // 空港。世界には82あるので、都市と同じくカメラの周りだけを建てる。
+  builtAirports: null,     // Map(空港id -> { def, group, lights, windsockYaw, windsockPitch })
+  selectedAirportId: null, // 右パネルの操作対象になっている空港
 
-  // 単一の空港を触っていたころの名残。選択中の空港を指す読み取り専用の別名。
-  get airport() {
-    return this.airports[this.selectedAirportIndex] || null;
-  },
+  // 空港idごとの設定（マップ定義からの変更ぶん）。保存/読込の対象でもある。
+  // { runwayLengthM, runwayWidthM, headingDeg, lightsMode, visible }
+  airportSettings: {},
 
   // ミニマップ（2Dの世界地図）
   minimap: null,

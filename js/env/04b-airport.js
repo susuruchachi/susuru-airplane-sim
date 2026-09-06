@@ -378,106 +378,159 @@ function buildWindsock(x, z) {
 
 // 世界に定義されたすべての空港（js/env/03b-world.js の WORLD_AIRPORTS）を建てる。
 // 位置・標高・滑走路の向きはマップ側で固定されており、地形はその標高へならされている。
-function initAirport() {
-  EnvState.airports = WORLD_AIRPORTS.map((def) => ({
-    def,
-    id: def.id,
-    name: def.name,
-    runwayLengthM: def.runwayLengthM,
-    runwayWidthM: def.runwayWidthM,
-    headingDeg: def.headingDeg,
-    lightsMode: 'auto',
-    visible: true,
-    group: null,
-    lights: null,
-    windsockYaw: null,
-    windsockPitch: null,
-  }));
-  EnvState.selectedAirportIndex = 0;
-  for (let i = 0; i < EnvState.airports.length; i++) rebuildAirportAt(i);
-}
+// 世界に定義された空港（js/env/03b-world.js の WORLD_AIRPORTS）は82か所ある。
+// 全部を建てっぱなしにすると重いので、地形と同じく **カメラの周りだけ** 建てて、
+// 離れたら片付ける。滑走路の長さなどの変更は空港IDごとの設定として残るので、
+// いったん圏外へ出て戻ってきても設定は失われない。
+const AIRPORT_ACTIVE_RADIUS = 120000;
 
-// 現在UIで選ばれている空港を作り直す
-function rebuildAirport() {
-  rebuildAirportAt(EnvState.selectedAirportIndex);
-}
-
-// 指定した空港をパラメータ（長さ・幅・方位）から作り直す。
-// グループはワールド上の空港位置＋標高に置くので、中身は原点まわりのローカル座標のままでよい。
-function rebuildAirportAt(index) {
-  const a = EnvState.airports[index];
-  if (!a) return;
-
-  if (!a.group) {
-    a.group = new THREE.Group();
-    a.group.position.set(a.def.x, a.def.elevationM, a.def.z);
-    EnvState.scene.add(a.group);
+// 空港IDごとの設定。マップ定義からの変更ぶんだけをここに持つ（保存/読込の対象でもある）。
+function getAirportSettings(id) {
+  let s = EnvState.airportSettings[id];
+  if (!s) {
+    const def = worldAirportById(id);
+    if (!def) return null;
+    s = EnvState.airportSettings[id] = {
+      runwayLengthM: def.runwayLengthM,
+      runwayWidthM: def.runwayWidthM,
+      headingDeg: def.headingDeg,
+      lightsMode: 'auto',
+      visible: true,
+    };
   }
+  return s;
+}
 
-  const group = a.group;
+// この設定はマップの定義から変更されているか（保存すべきか）を判定する
+function airportSettingsChanged(id) {
+  const def = worldAirportById(id);
+  const s = EnvState.airportSettings[id];
+  if (!def || !s) return false;
+  return s.runwayLengthM !== def.runwayLengthM || s.runwayWidthM !== def.runwayWidthM
+    || s.headingDeg !== def.headingDeg || s.lightsMode !== 'auto' || s.visible !== true;
+}
+
+function selectedAirportDef() { return worldAirportById(EnvState.selectedAirportId); }
+function selectedAirportSettings() { return getAirportSettings(EnvState.selectedAirportId); }
+
+function initAirport() {
+  EnvState.airportSettings = EnvState.airportSettings || {};
+  EnvState.builtAirports = new Map();
+  // 起動時は原点にいちばん近い空港を選んでおく
+  EnvState.selectedAirportId = worldNearestAirport(0, 0).airport.id;
+  refreshAirports(true);
+}
+
+// カメラの周りにあるべき空港を揃える。選択中の空港は距離に関わらず必ず建てておく
+// （UIで選んだ直後、まだカメラが着いていない間も見えるように）。
+function refreshAirports() {
+  if (!EnvState.builtAirports) return; // 地形の初期化のほうが先に走るため
+  const cam = EnvState.camera.position;
+
+  for (const def of WORLD_AIRPORTS) {
+    const near = Math.hypot(def.x - cam.x, def.z - cam.z) < AIRPORT_ACTIVE_RADIUS;
+    const wanted = near || def.id === EnvState.selectedAirportId;
+    const built = EnvState.builtAirports.has(def.id);
+    if (wanted && !built) buildAirportInstance(def);
+    else if (!wanted && built) disposeAirportInstance(def.id);
+  }
+}
+
+// 空港一式を組み立ててシーンへ入れる。
+// 中身は原点まわりのローカル座標で作り、グループをワールド上の位置＋標高に置く。
+function buildAirportInstance(def) {
+  const st = getAirportSettings(def.id);
+  const group = new THREE.Group();
+  group.position.set(def.x, def.elevationM, def.z);
+  EnvState.scene.add(group);
+
+  const entry = { def, group, lights: null, windsockYaw: null, windsockPitch: null };
+  EnvState.builtAirports.set(def.id, entry);
+  populateAirportGroup(entry, st);
+  return entry;
+}
+
+function populateAirportGroup(entry, st) {
+  const group = entry.group;
   while (group.children.length > 0) {
     const child = group.children[0];
     group.remove(child);
     disposeAirportObject(child);
   }
 
-  const L = a.runwayLengthM;
-  const W = a.runwayWidthM;
+  const L = st.runwayLengthM, W = st.runwayWidthM;
 
   group.add(buildAirfieldGround(L, W));
   group.add(buildRunwaySurface(L, W));
   group.add(buildRunwayMarkings(L, W));
-  group.add(buildRunwayNumbers(L, a.headingDeg));
+  group.add(buildRunwayNumbers(L, st.headingDeg));
 
   const taxi = buildTaxiwayAndApron(L, W);
   group.add(taxi.group);
   group.add(buildControlTower(taxi.taxiX - 110, taxi.apronZ - 40));
 
-  a.lights = buildAirportLights(L, W, taxi);
-  group.add(a.lights);
+  entry.lights = buildAirportLights(L, W, taxi);
+  group.add(entry.lights);
 
   const sock = buildWindsock(-L / 2 + 60, W / 2 + 45);
-  a.windsockYaw = sock.yaw;
-  a.windsockPitch = sock.pitch;
+  entry.windsockYaw = sock.yaw;
+  entry.windsockPitch = sock.pitch;
   group.add(sock.root);
 
-  applyAirportHeading();
-  group.visible = a.visible;
+  group.rotation.y = THREE.MathUtils.degToRad(90 - st.headingDeg);
+  group.visible = st.visible;
 }
 
-// 方位はグループ全体の回転だけで表す（数字の描き直しだけ別途必要）
+function disposeAirportInstance(id) {
+  const entry = EnvState.builtAirports.get(id);
+  if (!entry) return;
+  while (entry.group.children.length > 0) {
+    const child = entry.group.children[0];
+    entry.group.remove(child);
+    disposeAirportObject(child);
+  }
+  EnvState.scene.remove(entry.group);
+  EnvState.builtAirports.delete(id);
+}
+
+// 選択中の空港を、いまの設定で作り直す（滑走路の長さ・幅を変えたとき）
+function rebuildSelectedAirport() {
+  const entry = EnvState.builtAirports.get(EnvState.selectedAirportId);
+  if (entry) populateAirportGroup(entry, selectedAirportSettings());
+}
+
+// 方位はグループ全体の回転だけで表す（端の数字だけ描き直しが要る）
 function applyAirportHeading() {
-  const a = EnvState.airport;
-  if (!a || !a.group) return;
-  a.group.rotation.y = THREE.MathUtils.degToRad(90 - a.headingDeg);
+  const entry = EnvState.builtAirports.get(EnvState.selectedAirportId);
+  if (!entry) return;
+  entry.group.rotation.y = THREE.MathUtils.degToRad(90 - selectedAirportSettings().headingDeg);
 }
 
-// 方位変更時：回転はそのまま、滑走路端の数字だけ描き直す
 function refreshRunwayNumbers() {
-  const a = EnvState.airport;
-  if (!a || !a.group) return;
-  const old = a.group.children.find((c) => c.userData.isRunwayNumbers);
+  const entry = EnvState.builtAirports.get(EnvState.selectedAirportId);
+  if (!entry) return;
+  const st = selectedAirportSettings();
+  const old = entry.group.children.find((c) => c.userData.isRunwayNumbers);
   if (old) {
-    a.group.remove(old);
+    entry.group.remove(old);
     disposeAirportObject(old);
   }
-  a.group.add(buildRunwayNumbers(a.runwayLengthM, a.headingDeg));
+  entry.group.add(buildRunwayNumbers(st.runwayLengthM, st.headingDeg));
 }
 
 // 昼夜に合わせて灯火を点灯/消灯する（03-sky.jsのupdateSkyForSunDirectionから呼ばれる）
 function updateAirportForDaylight(dayFactor) {
-  for (const a of EnvState.airports) {
-    if (!a.lights) continue;
-    let target;
-    if (a.lightsMode === 'on') target = 1;
-    else if (a.lightsMode === 'off') target = 0;
-    else target = 1 - THREE.MathUtils.clamp(dayFactor, 0, 1); // auto：暗くなるほど明るく
-    a.lights.material.opacity = target;
-    a.lights.visible = target > 0.01;
+  const night = 1 - THREE.MathUtils.clamp(dayFactor, 0, 1);
+  for (const entry of EnvState.builtAirports.values()) {
+    if (!entry.lights) continue;
+    const mode = getAirportSettings(entry.def.id).lightsMode;
+    const target = mode === 'on' ? 1 : (mode === 'off' ? 0 : night);
+    entry.lights.material.opacity = target;
+    entry.lights.visible = target > 0.01;
   }
 }
 
-// 吹き流しを風向へ向け、風速に応じて水平まで持ち上げる（全空港ぶん）
+// 吹き流しを風向へ向け、風速に応じて水平まで持ち上げる（建っている空港すべて）
 function updateWindsock() {
   // 風のベクトルは04-clouds.jsと同じ定義（windDirectionDegは「風が流れていく向き」）
   const d = THREE.MathUtils.degToRad(EnvState.env.windDirectionDeg);
@@ -485,32 +538,36 @@ function updateWindsock() {
   const windFactor = THREE.MathUtils.clamp(EnvState.env.windSpeedKmh / 30, 0, 1);
   const pitch = -(1 - windFactor) * THREE.MathUtils.degToRad(78);
 
-  for (const a of EnvState.airports) {
-    if (!a.windsockYaw) continue;
+  for (const entry of EnvState.builtAirports.values()) {
+    if (!entry.windsockYaw) continue;
     // +X を (cos d, 0, sin d) に向ける回転は rotation.y = -d。空港ごと回っているぶんを差し引く
-    a.windsockYaw.rotation.y = -d - a.group.rotation.y;
-    a.windsockPitch.rotation.z = pitch;
+    entry.windsockYaw.rotation.y = -d - entry.group.rotation.y;
+    entry.windsockPitch.rotation.z = pitch;
   }
 }
 
-// 空港全体が視界に入る位置へカメラを戻す。
-// 滑走路の全長が入るよう斜め手前から見下ろす（真上すぎても遠すぎても滑走路が線にしか見えないため）
+// 選択中の空港へ視点を移す。
+// 滑走路の全長が入るよう、進入方向の斜め手前から見下ろす。
 function focusCameraOnAirport() {
-  const a = EnvState.airport;
-  if (!a) return;
-  const L = a.runwayLengthM;
-  const ox = a.def.x, oy = a.def.elevationM, oz = a.def.z;
+  const def = selectedAirportDef();
+  if (!def) return;
+  const st = getAirportSettings(def.id);
+  const L = st.runwayLengthM;
 
   // 滑走路の伸びる向き（方位θ）と、その直交方向
-  const hd = THREE.MathUtils.degToRad(a.headingDeg);
+  const hd = THREE.MathUtils.degToRad(st.headingDeg);
   const fx = Math.sin(hd), fz = -Math.cos(hd);
   const sx = -fz, sz = fx;
 
-  EnvState.orbitControls.target.set(ox, oy, oz);
+  EnvState.orbitControls.target.set(def.x, def.elevationM, def.z);
   EnvState.camera.position.set(
-    ox - fx * L * 0.60 + sx * L * 0.22,
-    oy + L * 0.17,
-    oz - fz * L * 0.60 + sz * L * 0.22
+    def.x - fx * L * 0.60 + sx * L * 0.22,
+    def.elevationM + L * 0.17,
+    def.z - fz * L * 0.60 + sz * L * 0.22
   );
   EnvState.orbitControls.update();
+
+  // 飛んだ先の地形・街・空港はまだ無いので、その場で揃える
+  // （terrainRebuildNow の中で街と空港の出し入れも行われる）
+  if (typeof terrainRebuildNow === 'function') terrainRebuildNow();
 }

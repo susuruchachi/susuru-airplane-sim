@@ -32,7 +32,7 @@ function initEnvScene() {
   EnvState.orbitControls.dampingFactor = 0.08;
   EnvState.orbitControls.target.set(0, 40, 0);
   EnvState.orbitControls.minDistance = 5;
-  EnvState.orbitControls.maxDistance = 120000;
+  EnvState.orbitControls.maxDistance = 400000;
   EnvState.orbitControls.maxPolarAngle = Math.PI * 0.495; // 地面の下を覗き込みにくくする
   EnvState.orbitControls.update();
 
