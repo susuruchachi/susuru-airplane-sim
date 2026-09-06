@@ -32,17 +32,53 @@ const AERO_DEFAULTS = {
 
 function acVec(o) { return new THREE.Vector3(o.x || 0, o.y || 0, o.z || 0); }
 
-// パーツのローカル座標を機体座標へ移す行列（位置・回転・拡縮）
+// パーツのローカル座標を機体座標へ移す行列（位置・回転・拡縮）。
+// **Builderのパーツ回転は「度」で保存されている**（applyPartToGizmo が degToRad してから
+// gizmo に入れている）。ラジアンとして読むと 180 が 28回転になり、脚も翼も明後日を向く。
 function acPartMatrix(part) {
+  const r = part.rotation || {};
   return new THREE.Matrix4().compose(
     acVec(part.position || {}),
     new THREE.Quaternion().setFromEuler(new THREE.Euler(
-      (part.rotation && part.rotation.x) || 0,
-      (part.rotation && part.rotation.y) || 0,
-      (part.rotation && part.rotation.z) || 0
+      THREE.MathUtils.degToRad(r.x || 0),
+      THREE.MathUtils.degToRad(r.y || 0),
+      THREE.MathUtils.degToRad(r.z || 0)
     )),
     part.scale ? acVec(part.scale) : new THREE.Vector3(1, 1, 1)
   );
+}
+
+// 着陸脚の先端（車輪）が、脚の付け根からどこにあるか。
+// Builderの脚は「関節→伸縮節→関節→伸縮節…」を交互につないだ鎖で、
+// 伸縮節は必ず -Y 方向へ伸びる（js/05-part-system.js の buildLandingGearHierarchy と同じ組み方）。
+// ここを「モデル座標のY=0が接地面」と決め打ちしていたせいで、
+// 地面合わせをしていない機体が地面に埋もれていた。
+function acGearTipLocal(props) {
+  const joints = (props && props.joints) || [];
+  const struts = (props && props.struts) || [];
+  // 接地に使うのは脚を出しきった状態（deployState=1）のときの先端
+  const t = props && props.retractedAtZero === false ? 0 : 1;
+
+  const m = new THREE.Matrix4();
+  const tmp = new THREE.Matrix4();
+  const n = Math.max(joints.length, struts.length);
+  for (let i = 0; i < n; i++) {
+    const j = joints[i];
+    if (j) {
+      const rad = THREE.MathUtils.degToRad(
+        THREE.MathUtils.lerp(j.minDeg || 0, j.maxDeg || 0, t));
+      if (j.axis === 'x') tmp.makeRotationX(rad);
+      else if (j.axis === 'y') tmp.makeRotationY(rad);
+      else tmp.makeRotationZ(rad);
+      m.multiply(tmp);
+    }
+    const s = struts[i];
+    if (s) {
+      const len = Math.max(THREE.MathUtils.lerp(s.minLength || 0, s.maxLength || 0, t), 0.05);
+      m.multiply(tmp.makeTranslation(0, -len, 0));
+    }
+  }
+  return new THREE.Vector3().setFromMatrixPosition(m);
 }
 
 // 三角形2枚に割って四角形の面積を出す（4頂点は平面上にあるとは限らないため）
@@ -215,30 +251,39 @@ function buildAircraftModel(config) {
   applyGroupAspect(surfaces);
 
   // 4) エンジン
-  const engines = parts.filter((p) => p.type === 'engine').map((p) => ({
-    name: p.name || 'エンジン',
-    position: acVec(p.position || {}).applyQuaternion(qFix).sub(cg),
-    // 推力は機首方向。Builderは推力の向きを持っていないので機体の前方に出す。
-    axis: new THREE.Vector3(0, 0, -1),
-    thrustN: Math.max((p.props && p.props.thrustKgf) || 0, 0) * 9.80665,
-  })).filter((e) => e.thrustN > 0);
+  // 推力の向きは Builder の spinAxis（プロペラ/ファンの回転軸）から決める。
+  // z＝前向き（ふつうの推進）、y＝上向き（垂直離陸用のリフトエンジン）、x＝横向き。
+  const engines = parts.filter((p) => p.type === 'engine').map((p) => {
+    const spin = (p.props && p.props.spinAxis) || 'z';
+    const axis = spin === 'y' ? new THREE.Vector3(0, 1, 0)
+      : (spin === 'x' ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, -1));
+    return {
+      name: p.name || 'エンジン',
+      spinAxis: spin,
+      position: acVec(p.position || {}).applyQuaternion(qFix).sub(cg),
+      // 回転軸そのものは機体に固定なので、向きの正規化ぶんだけ回しておく
+      axis: axis.applyQuaternion(qFix).normalize(),
+      thrustN: Math.max((p.props && p.props.thrustKgf) || 0, 0) * 9.80665,
+    };
+  }).filter((e) => e.thrustN > 0);
 
   // 5) 着陸脚の接地点。
   //    Builderの「地面にフィット」は脚の先端がモデル座標のY=0に来るように作るので、
   //    脚パーツの真下のY=0が接地点になる。脚が無い機体は境界箱の底から3点を作る。
   const gearParts = parts.filter((p) => p.type === 'landing_gear');
   let contacts = gearParts.map((p) => {
-    const pos = acVec(p.position || {}).applyQuaternion(qFix);
     const kind = (p.props && p.props.gearPosition) || 'other';
+    // 脚を出しきったときの車輪の位置を、関節と伸縮節をたどって実際に求める
+    const tip = acGearTipLocal(p.props).applyMatrix4(acPartMatrix(p));
     return {
       name: p.name || kind,
-      // 脚の付け根の真下、モデル座標のY=0
-      position: new THREE.Vector3(pos.x, 0, pos.z).sub(cg),
-      steer: kind === 'nose',
-      brake: kind === 'main_left' || kind === 'main_right',
+      kind,
+      position: tip.applyQuaternion(qFix).sub(cg),
+      steer: false, brake: false,
     };
   });
   if (!contacts.length) contacts = fallbackContacts(surfaces, cg);
+  assignGearRoles(contacts);
 
   // 6) 慣性モーメント。部品の広がりを箱と見なして概算する。
   const extent = aircraftExtent(surfaces, engines, contacts);
@@ -315,6 +360,29 @@ function ensureDefaultControls(surfaces) {
   }
 }
 
+// どの車輪が「操向する1輪」でどれが「ブレーキの効く主脚」かを、**名前ではなく配置**から決める。
+// gearPosition は人が付ける札なので、後ろの車輪に「前脚」と付いていることもある
+// （実際そういう機体が来た）。左右に開いている対を主脚、中心線上に1つだけあるものを
+// 操向輪と見なせば、札が何であっても正しく振る舞う。
+function assignGearRoles(contacts) {
+  if (!contacts.length) return;
+  const spread = Math.max(...contacts.map((c) => Math.abs(c.position.x)));
+  const isPair = (c) => Math.abs(c.position.x) > Math.max(spread * 0.35, 0.2);
+  const mains = contacts.filter(isPair);
+  const singles = contacts.filter((c) => !isPair(c));
+
+  for (const c of contacts) { c.brake = false; c.steer = false; }
+  if (mains.length >= 2) {
+    for (const c of mains) c.brake = true;
+    for (const c of singles) c.steer = true;
+  } else {
+    // 対が見つからない（自転車のような配置）ときは前後で振り分ける
+    const sorted = contacts.slice().sort((a, b) => a.position.z - b.position.z);
+    sorted[0].steer = true;
+    for (const c of sorted.slice(1)) c.brake = true;
+  }
+}
+
 // 脚が無い機体のための接地点（機首・左右）。境界から3点を作って三脚にする。
 function fallbackContacts(surfaces, cg) {
   let minZ = 0, maxX = 1;
@@ -346,6 +414,119 @@ function aircraftExtent(surfaces, engines, contacts) {
   box.getSize(size);
   return new THREE.Vector3(Math.max(size.x, 1), Math.max(size.y, 1), Math.max(size.z, 1));
 }
+
+// --- 機体が成立しているかを調べる ---------------------------------------------
+//
+// Builderは「その機体が飛べるか」を何も教えてくれない。組み上げて飛行モードに入って、
+// 滑走路の端まで走っても浮かない——それでは何を直せばいいのか分からない。
+// 翼面荷重・推力重量比・静安定・地上での引き起こし能力を出して、
+// 引っかかっているところを名指しする。
+
+const AC_CLMAX = 1.5;          // 失速時の最大揚力係数の目安
+const AC_LIFTOFF_MARGIN = 1.15; // 浮上速度は失速速度の何倍か
+
+function analyzeAircraftPerformance(model) {
+  const W = model.massKg * FLIGHT_GRAVITY_APPROX;
+  const S = Math.max(model.wingArea, 0.01);
+  const rho = 1.225;
+
+  const wingLoading = model.massKg / S;
+  const stallMps = Math.sqrt((2 * W) / (rho * S * AC_CLMAX));
+  const liftoffMps = stallMps * AC_LIFTOFF_MARGIN;
+  const thrustToWeight = model.totalThrustN / W;
+
+  // 前向きの推力だけを数える（垂直離陸用のリフトエンジンは滑走の役に立たない）
+  let fwdThrust = 0, liftThrust = 0;
+  for (const e of model.engines) {
+    fwdThrust += e.thrustN * Math.max(-e.axis.z, 0);
+    liftThrust += e.thrustN * Math.max(e.axis.y, 0);
+  }
+
+  // 滑走距離。浮上速度の7割あたりでの加速度から見積もる。
+  const v = liftoffMps * 0.7;
+  const q = 0.5 * rho * v * v;
+  const cl = Math.min(W / Math.max(q * S, 1e-6), AC_CLMAX);
+  const ar = model.surfaces.length
+    ? Math.max(...model.surfaces.filter((x) => x.role === 'main').map((x) => x.aspect), 1) : 6;
+  const cd = AERO_DEFAULTS.cd0Wing + (cl * cl) / (Math.PI * ar * AERO_DEFAULTS.oswald)
+    + (model.fuselageFrontArea * AERO_DEFAULTS.fuselageCd) / S;
+  const drag = q * S * cd;
+  const propFactor = Math.max(1 - AERO_DEFAULTS.propDecay * (v / Math.max(model.vMaxMps, 1)), 0.05);
+  const roll = 0.025 * Math.max(W - q * S * cl, 0);
+  const accel = (fwdThrust * propFactor - drag - roll) / model.massKg;
+  const takeoffM = accel > 0.05 ? (liftoffMps * liftoffMps) / (2 * accel) : null;
+
+  // 静安定。水平の翼を面積で重み付けした位置（中立点）が重心より後ろなら安定。
+  let num = 0, den = 0, mac = 1;
+  for (const s of model.surfaces) {
+    if (s.role !== 'main' && s.role !== 'htail') continue;
+    num += s.area * s.center.z;
+    den += s.area;
+    if (s.role === 'main') mac = Math.max(mac, s.chord);
+  }
+  const neutralZ = den > 0 ? num / den : 0;
+  const staticMarginPct = (neutralZ / mac) * 100;
+
+  // 地上で引き起こせるか。後ろの車輪を支点に、尾翼の下向きの力が重心の重さに勝てるか。
+  const rear = model.contacts.length
+    ? model.contacts.reduce((a, b) => (a.position.z > b.position.z ? a : b)) : null;
+  let rotateRatio = null;
+  if (rear) {
+    const qL = 0.5 * rho * liftoffMps * liftoffMps;
+    let elevatorMoment = 0;
+    for (const s of model.surfaces) {
+      if (Math.abs(s.pitch) < 1e-6) continue;
+      const dCl = 2 * Math.PI * Math.abs(s.pitch);
+      elevatorMoment += qL * s.area * dCl * Math.abs(s.center.z - rear.position.z);
+    }
+    const weightMoment = W * Math.abs(0 - rear.position.z);
+    rotateRatio = weightMoment > 1e-6 ? elevatorMoment / weightMoment : null;
+  }
+
+  const notes = [];
+  const kt = (mps) => Math.round(mps * 1.94384);
+  if (wingLoading > 900) {
+    notes.push({ level: 'error', text:
+      `翼面荷重が ${Math.round(wingLoading)} kg/m² と非常に高く、浮くのに ${kt(liftoffMps)} kt 必要です。`
+      + `翼を大きくするか重量を減らしてください。` });
+  }
+  if (takeoffM === null) {
+    notes.push({ level: 'error', text: '推力が抗力に負けていて、滑走しても浮上速度に届きません。' });
+  } else if (takeoffM > 3000) {
+    notes.push({ level: 'error', text:
+      `離陸に約 ${(takeoffM / 1000).toFixed(1)} km の滑走が要ります（滑走路は最長4.2km）。`
+      + `推力を上げるか、翼を大きくしてください。` });
+  }
+  if (rotateRatio !== null && rotateRatio < 1) {
+    notes.push({ level: 'error', text:
+      '地上で機首を上げられません。水平尾翼が後ろの車輪の真上にあると、'
+      + '舵を切っても機体を回すてこが働きません。尾翼を後ろへ、または車輪を前へ。' });
+  }
+  if (staticMarginPct < 0) {
+    notes.push({ level: 'warn', text:
+      `重心が翼より後ろにあり、ピッチが不安定です（静安定 ${staticMarginPct.toFixed(0)}% MAC）。`
+      + `重心を前へ出すか、水平尾翼を大きくしてください。` });
+  }
+  const anyIncidence = model.surfaces.some((s) => s.role === 'main' && Math.abs(s.incidenceRad) > 0.005);
+  if (!anyIncidence) {
+    notes.push({ level: 'info', text:
+      '主翼に取付角がありません。機体が水平のままだと揚力が出ないので、'
+      + '離陸時にしっかり引き起こす必要があります。' });
+  }
+  if (liftThrust > 0 && liftThrust < W * 0.9) {
+    notes.push({ level: 'info', text:
+      `垂直離陸用の推力は重量の ${Math.round((liftThrust / W) * 100)}% です（浮くには100%必要）。` });
+  }
+
+  return {
+    wingLoading, stallMps, liftoffMps, thrustToWeight,
+    fwdThrust, liftThrust, takeoffM, staticMarginPct, rotateRatio, notes,
+    flyable: !notes.some((n) => n.level === 'error'),
+  };
+}
+
+// 10-flight.js の定数をここでも使いたいが、読み込み順が先なので同じ値を持つ
+const FLIGHT_GRAVITY_APPROX = 9.80665;
 
 // --- 内蔵の既定機 -------------------------------------------------------------
 //
@@ -424,5 +605,7 @@ function defaultAircraftConfig() {
 
 // Node（tools/verify-flight.js）からモデルの組み立てだけを検査できるようにする
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { buildAircraftModel, defaultAircraftConfig, AERO_DEFAULTS };
+  module.exports = {
+    buildAircraftModel, defaultAircraftConfig, analyzeAircraftPerformance, AERO_DEFAULTS,
+  };
 }

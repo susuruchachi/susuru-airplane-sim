@@ -115,6 +115,14 @@ body.flying #versionTag { display:none; }
 #hudHelp { position:absolute; bottom:8px; left:0; right:0; text-align:center;
   font-size:10.5px; color:rgba(180,205,230,0.55); padding:0 12px; }
 @media (max-width:820px){ #flightHud .hud-tile b{font-size:16px;} #hudHelp{display:none;} }
+
+/* --- 機体が飛べるかどうかの指摘 --- */
+#envFlightNotes { margin-top:6px; display:flex; flex-direction:column; gap:4px; }
+#envFlightNotes div { font-size:11px; line-height:1.5; padding:5px 7px; border-radius:5px;
+  border-left:3px solid; background:rgba(255,255,255,0.03); }
+#envFlightNotes div.error { border-color:#ff5d5d; color:#ffc4c4; }
+#envFlightNotes div.warn  { border-color:#ff9f40; color:#ffdcb8; }
+#envFlightNotes div.info  { border-color:#3fa9ff; color:#bcd9f2; }
 </style>
 </head>
 <body>
@@ -211,6 +219,8 @@ body.flying #versionTag { display:none; }
       <div class="env-row" style="margin-top:10px;"><label>機体</label></div>
       <select id="envFlightAircraft"></select>
       <div class="env-note" style="margin-top:6px;"><span id="envFlightSpecReadout">—</span></div>
+      <div class="env-note" style="margin-top:4px;"><span id="envFlightPerfReadout"></span></div>
+      <div id="envFlightNotes"></div>
       <div class="env-row" style="margin-top:10px;"><label>視点</label></div>
       <select id="envFlightCamera"></select>
       <button id="envBtnFlightReset" style="margin-top:8px;">滑走路へ戻る（R）</button>

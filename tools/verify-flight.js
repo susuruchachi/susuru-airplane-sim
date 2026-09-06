@@ -38,7 +38,7 @@ for (const f of ['09-aircraft.js', '10-flight.js']) {
   vm.runInContext(src, ctx, { filename: f });
 }
 const {
-  buildAircraftModel, defaultAircraftConfig,
+  buildAircraftModel, defaultAircraftConfig, analyzeAircraftPerformance,
   createFlightState, createFlightControls, advanceFlight, placeAircraftOnGround,
   airDensityAt,
 } = ctx;
@@ -101,6 +101,83 @@ note('慣性モーメント', `ロール${model.inertia.x.toFixed(0)} ピッチ$
   const fwd2 = m2.surfaces.find((s) => s.role === 'main').fwd;
   check(fwd2.z < -0.9, '+Zを向いた機体でも機首を読み取って直せる',
     `fwd=(${fwd2.toArray().map((v) => v.toFixed(2)).join(',')})`);
+}
+
+// --- 着陸脚（Builderの定義から車輪の位置を組み立てられているか）-------------------
+{
+  // 関節と伸縮節を持つ脚。伸縮節は-Y方向へ伸びるので、先端は付け根の 2.5m 下。
+  const gearCfg = defaultAircraftConfig();
+  gearCfg.parts = gearCfg.parts.filter((p) => p.type !== 'landing_gear').concat([
+    { id: 'g1', type: 'landing_gear', name: '主脚右', position: { x: 2, y: 1, z: 0.5 },
+      rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+      props: { gearPosition: 'main_right', deployState: 1, retractedAtZero: true,
+        joints: [{ id: 'j', axis: 'x', minDeg: -90, maxDeg: 0 }],
+        struts: [{ id: 's', minLength: 1, maxLength: 2.5 }] } },
+    { id: 'g2', type: 'landing_gear', name: '主脚左', position: { x: -2, y: 1, z: 0.5 },
+      rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+      props: { gearPosition: 'main_left', deployState: 1, retractedAtZero: true,
+        joints: [{ id: 'j2', axis: 'x', minDeg: -90, maxDeg: 0 }],
+        struts: [{ id: 's2', minLength: 1, maxLength: 2.5 }] } },
+    // 札は「前脚」だが実際は後ろ。役割は配置から決まるべき。
+    { id: 'g3', type: 'landing_gear', name: '後輪（札は前脚）', position: { x: 0, y: 1, z: 4 },
+      rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+      props: { gearPosition: 'nose', deployState: 1, retractedAtZero: true,
+        joints: [], struts: [{ id: 's3', minLength: 1, maxLength: 2.5 }] } },
+  ]);
+  gearCfg.cg = { x: 0, y: 1, z: 0 };
+  const gm = buildAircraftModel(gearCfg);
+  const ys = gm.contacts.map((c) => c.position.y);
+  check(Math.abs(Math.min(...ys) + 2.5) < 0.01, '車輪が伸縮節の長さぶん下に来る',
+    `最下点 ${Math.min(...ys).toFixed(2)}m（伸縮節2.5m）`);
+  check(Math.abs(gm.gearHeight - 2.5) < 0.01, '車輪の高さが伸縮節から決まる', gm.gearHeight.toFixed(2) + 'm');
+  const steer = gm.contacts.filter((c) => c.steer), brake = gm.contacts.filter((c) => c.brake);
+  check(steer.length === 1 && Math.abs(steer[0].position.x) < 0.1,
+    '操向輪は中心線上の1輪（札ではなく配置で決まる）', steer.map((c) => c.name).join('/'));
+  check(brake.length === 2, 'ブレーキは左右に開いた対', brake.map((c) => c.name).join('/'));
+
+  // パーツの回転は「度」。180°回すと伸縮節は上向きになる。
+  const flipCfg = JSON.parse(JSON.stringify(gearCfg));
+  flipCfg.parts.find((p) => p.id === 'g1').rotation = { x: 180, y: 0, z: 0 };
+  const fm = buildAircraftModel(flipCfg);
+  const g1 = fm.contacts.find((c) => c.name === '主脚右');
+  check(g1 && Math.abs(g1.position.y - 2.5) < 0.01, 'パーツの回転を「度」として読む',
+    g1 ? `180°回した脚の先端 y=${g1.position.y.toFixed(2)}m` : '—');
+}
+
+// --- エンジンの向き（spinAxis）------------------------------------------------
+{
+  const cfg = defaultAircraftConfig();
+  cfg.parts = cfg.parts.concat([{
+    id: 'lift', type: 'engine', name: 'リフトエンジン',
+    position: { x: 0, y: 1.05, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: { thrustKgf: 500, spinAxis: 'y' },
+  }]);
+  const m2 = buildAircraftModel(cfg);
+  const lift = m2.engines.find((e) => e.name === 'リフトエンジン');
+  check(lift && lift.axis.y > 0.99, 'spinAxis=y のエンジンは上向きに押す',
+    lift ? `軸=(${lift.axis.toArray().map((v) => v.toFixed(2)).join(',')})` : '—');
+  const fwd = m2.engines.find((e) => e.spinAxis === 'z');
+  check(fwd && fwd.axis.z < -0.99, 'spinAxis=z のエンジンは機首方向に押す');
+}
+
+// --- 機体が成立しているかの診断 -------------------------------------------------
+{
+  const a = analyzeAircraftPerformance(model);
+  note('内蔵機の成立性', `翼面荷重${Math.round(a.wingLoading)}kg/m² / 失速${(a.stallMps * KT).toFixed(0)}kt`
+    + ` / 離陸滑走${a.takeoffM ? Math.round(a.takeoffM) + 'm' : '不可'} / 静安定${a.staticMarginPct.toFixed(0)}%MAC`
+    + ` / 引き起こし余力${a.rotateRatio.toFixed(2)}`);
+  check(a.flyable, '内蔵機は「飛べる」と判定される', a.notes.map((n) => n.text).join(' / ') || '指摘なし');
+  check(Math.abs(a.stallMps * KT - 58) < 10, '診断の失速速度が実測と合う',
+    `診断${(a.stallMps * KT).toFixed(0)}kt / 実測58kt`);
+  check(a.takeoffM && Math.abs(a.takeoffM - 287) < 120, '診断の滑走距離が実測と合う',
+    `診断${Math.round(a.takeoffM)}m / 実測287m`);
+
+  // 重すぎる機体はきちんと「飛べない」と言えること
+  const heavy = defaultAircraftConfig();
+  heavy.modelWeightKg = 90000;
+  const ha = analyzeAircraftPerformance(buildAircraftModel(heavy));
+  check(!ha.flyable && ha.notes.some((n) => n.level === 'error'), '飛べない機体は理由を挙げる',
+    ha.notes.filter((n) => n.level === 'error').length + '件の指摘');
 }
 
 // --- 大気 -------------------------------------------------------------------

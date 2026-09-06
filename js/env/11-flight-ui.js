@@ -298,8 +298,31 @@ function updateFlightPanelReadout() {
   const btn = document.getElementById('envBtnFly');
   if (btn) btn.textContent = f.active ? '✈ 飛行をやめる' : '✈ この空港から飛ぶ';
 
-  if (!f.aircraft) { set('envFlightSpecReadout', '—'); return; }
+  const notes = document.getElementById('envFlightNotes');
+  if (!f.aircraft) {
+    set('envFlightSpecReadout', '—');
+    set('envFlightPerfReadout', '');
+    if (notes) notes.innerHTML = '';
+    return;
+  }
   const m = f.aircraft.model;
   set('envFlightSpecReadout',
     `${m.massKg.toLocaleString()}kg ／ 翼${m.wingArea.toFixed(1)}m² ／ 翼幅${m.wingSpan.toFixed(1)}m ／ 推力${(m.totalThrustN / 9.80665).toFixed(0)}kgf`);
+
+  // その機体が飛べるかどうかを出す。Builderは教えてくれないので、ここで名指しする。
+  const a = analyzeAircraftPerformance(m);
+  const kt = (v) => Math.round(v * 1.94384);
+  set('envFlightPerfReadout',
+    `失速 ${kt(a.stallMps)}kt ／ 離陸滑走 ${a.takeoffM ? Math.round(a.takeoffM).toLocaleString() + 'm' : '不可'}`
+    + ` ／ 翼面荷重 ${Math.round(a.wingLoading)}kg/m²`);
+
+  if (notes) {
+    notes.innerHTML = '';
+    for (const n of a.notes) {
+      const d = document.createElement('div');
+      d.className = n.level;
+      d.textContent = n.text;
+      notes.appendChild(d);
+    }
+  }
 }
