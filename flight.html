@@ -61,12 +61,15 @@
   }
   .env-group select{font-family:var(--sans);}
   .env-note{font-size:11px;color:var(--text-dim);line-height:1.5;margin-top:4px;}
-  #envBtnToggleTime, #envBtnReset, #envBtnToggleAirport, #envBtnFocusAirport{
+  #envBtnToggleTime, #envBtnReset, #envBtnToggleAirport, #envBtnFocusAirport,
+  #envBtnFly, #envBtnFlightReset{
     width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
     padding:8px 10px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:var(--sans);margin-top:6px;
   }
-  #envBtnToggleTime:hover, #envBtnReset:hover,
+  #envBtnToggleTime:hover, #envBtnReset:hover, #envBtnFly:hover, #envBtnFlightReset:hover,
   #envBtnToggleAirport:hover, #envBtnFocusAirport:hover{border-color:var(--accent-dim);}
+  #envBtnFly.primary{background:var(--accent-dim);border-color:#2f6fb5;color:#eaf4ff;font-weight:600;}
+  #envBtnFly.primary:hover{background:#2f6fb5;}
   #envBtnToggleTime.active{background:var(--accent-dim);border-color:var(--accent-dim);}
   #envTimeReadout, #envSunElevationReadout{font-family:var(--mono);color:var(--accent);}
 
@@ -83,6 +86,35 @@
   #envMinimapZoom button.active {
     background: #2f6fb5; border-color: #3d84cf; color: #fff;
   }
+
+/* --- 飛行の計器（画面の上下に重ねる） --- */
+#flightHud { position:absolute; inset:0; pointer-events:none; display:none;
+  font-family:'SF Mono',Menlo,Consolas,monospace; color:#e8f0f8; }
+body.flying #flightHud { display:block; }
+body.flying #versionTag { display:none; }
+#flightHud .hud-row { position:absolute; left:0; right:0; display:flex; gap:8px;
+  justify-content:center; flex-wrap:wrap; padding:0 12px; }
+#flightHud .hud-top { top:12px; }
+#flightHud .hud-bottom { bottom:36px; }
+#flightHud .hud-tile { background:rgba(8,14,22,0.62); border:1px solid rgba(120,170,220,0.22);
+  border-radius:6px; padding:5px 10px; min-width:86px; text-align:center;
+  backdrop-filter:blur(3px); }
+#flightHud .hud-tile.sm { min-width:62px; padding:4px 8px; }
+#flightHud .hud-tile .k { display:block; font-size:10px; color:#8fa8c0; letter-spacing:.04em; }
+#flightHud .hud-tile b { font-size:20px; font-weight:600; letter-spacing:.01em; }
+#flightHud .hud-tile.sm b { font-size:15px; }
+#flightHud .hud-tile .u { font-size:10px; color:#8fa8c0; margin-left:2px; }
+#hudWarn { position:absolute; top:50%; left:0; right:0; text-align:center;
+  font-size:22px; font-weight:700; letter-spacing:.14em; text-shadow:0 2px 10px rgba(0,0,0,.8); }
+#hudWarn.stall { color:#ffb020; animation:hudBlink .55s steps(2,end) infinite; }
+#hudWarn.crash { color:#ff5555; }
+#hudWarn.note  { color:#8fa8c0; font-size:14px; letter-spacing:.08em; }
+@keyframes hudBlink { 50% { opacity:.25; } }
+#hudMsg { position:absolute; top:88px; left:0; right:0; text-align:center; font-size:14px;
+  color:#cfe3ff; text-shadow:0 1px 6px rgba(0,0,0,.9); transition:opacity .5s; opacity:0; }
+#hudHelp { position:absolute; bottom:8px; left:0; right:0; text-align:center;
+  font-size:10.5px; color:rgba(180,205,230,0.55); padding:0 12px; }
+@media (max-width:820px){ #flightHud .hud-tile b{font-size:16px;} #hudHelp{display:none;} }
 </style>
 </head>
 <body>
@@ -170,6 +202,20 @@
       <input type="range" id="envWindDirection" min="0" max="360" step="1">
     </div>
 
+    <div class="section-title">飛行</div>
+    <div class="env-group">
+      <button id="envBtnFly" class="primary">✈ この空港から飛ぶ</button>
+      <div class="env-note" style="margin-top:6px;">
+        選んでいる空港の滑走路に出ます。<b>Shift</b>で出力を上げ、<b>S</b>／<b>↓</b>で機首を上げてください。
+      </div>
+      <div class="env-row" style="margin-top:10px;"><label>機体</label></div>
+      <select id="envFlightAircraft"></select>
+      <div class="env-note" style="margin-top:6px;"><span id="envFlightSpecReadout">—</span></div>
+      <div class="env-row" style="margin-top:10px;"><label>視点</label></div>
+      <select id="envFlightCamera"></select>
+      <button id="envBtnFlightReset" style="margin-top:8px;">滑走路へ戻る（R）</button>
+    </div>
+
     <div class="section-title">空港</div>
     <div class="env-group">
       <div class="env-row"><label>空港</label></div>
@@ -244,6 +290,7 @@
 </script>
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js" onerror="_markFailed('three.min.js (CDN)')"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js" onerror="_markFailed('GLTFLoader.js (CDN)')"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js" onerror="_markFailed('OrbitControls.js (CDN)')"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/objects/Sky.js" onerror="_markFailed('Sky.js (CDN)')"></script>
 <script>
@@ -268,6 +315,11 @@
 <script src="js/env/04b-airport.js" onerror="_markFailed('js/env/04b-airport.js')"></script>
 <script src="js/env/05-daynight.js" onerror="_markFailed('js/env/05-daynight.js')"></script>
 <script src="js/env/05b-weather.js" onerror="_markFailed('js/env/05b-weather.js')"></script>
+<script src="js/env/09-aircraft.js" onerror="_markFailed('js/env/09-aircraft.js')"></script>
+<script src="js/env/09b-aircraft-visual.js" onerror="_markFailed('js/env/09b-aircraft-visual.js')"></script>
+<script src="js/env/10-flight.js" onerror="_markFailed('js/env/10-flight.js')"></script>
+<script src="js/env/11-flight-ui.js" onerror="_markFailed('js/env/11-flight-ui.js')"></script>
+<script src="js/env/12-flight-mode.js" onerror="_markFailed('js/env/12-flight-mode.js')"></script>
 <script src="js/env/06-env-ui.js" onerror="_markFailed('js/env/06-env-ui.js')"></script>
 <script src="js/env/08-env-storage.js" onerror="_markFailed('js/env/08-env-storage.js')"></script>
 <script src="js/env/07-env-main.js" onerror="_markFailed('js/env/07-env-main.js')"></script>

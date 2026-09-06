@@ -18,7 +18,10 @@
 // （tools/verify-flight.js が離陸・上昇・旋回・失速をブラウザ抜きで確かめる）。
 
 const FLIGHT_SUBSTEP = 1 / 240;   // 物理の刻み。接地のばねが硬いので細かく回す
-const FLIGHT_MAX_SUBSTEPS = 12;   // 1フレームで進める上限（重いフレームで暴れないように）
+// 1フレームで進める上限。描画ループが dt を0.1秒で頭打ちにしているので、
+// そこまでは必ず追いつけるだけの数を持たせる。ここが足りないと、
+// 描画が重い環境で**飛行機だけスローモーションになる**（実際そうなった）。
+const FLIGHT_MAX_SUBSTEPS = 24;
 
 const FLIGHT_GRAVITY = 9.80665;
 const FLIGHT_RHO0 = 1.225;
@@ -201,9 +204,13 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
 
   state.thrustN = thrustTotal;
   state.airspeed = airspeed;
-  state.alphaDeg = THREE.MathUtils.radToDeg(Math.atan2(-vAirBody.y, -vAirBody.z));
-  state.betaDeg = THREE.MathUtils.radToDeg(Math.atan2(vAirBody.x, -vAirBody.z));
-  state.stallRatio = mainArea > 0 ? stalledArea / mainArea : 0;
+  // 迎角と横滑り角も、止まっているうちは意味を持たない
+  const flying = airspeed > 8;
+  state.alphaDeg = flying ? THREE.MathUtils.radToDeg(Math.atan2(-vAirBody.y, -vAirBody.z)) : 0;
+  state.betaDeg = flying ? THREE.MathUtils.radToDeg(Math.atan2(vAirBody.x, -vAirBody.z)) : 0;
+  // 止まっているときは迎角に意味が無い（わずかな風で±180°まで振れる）。
+  // そのまま出すと駐機中の機体に「失速」の警告が点きっぱなしになる。
+  state.stallRatio = (mainArea > 0 && airspeed > 8) ? stalledArea / mainArea : 0;
   return rho;
 }
 

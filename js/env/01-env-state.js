@@ -1,7 +1,7 @@
 // 01-env-state.js — 環境シーン（空・雲・昼夜サイクル）のグローバル状態
 // 番号プレフィックス方式：flight.html 専用。Builder側(index.html)の State とは別の名前空間。
 
-const ENV_VERSION = 'env-v4';
+const ENV_VERSION = 'env-v5';
 
 const EnvState = {
   // Three.js 中枢
@@ -74,6 +74,18 @@ const EnvState = {
   // 空港idごとの設定（マップ定義からの変更ぶん）。保存/読込の対象でもある。
   // { runwayLengthM, runwayWidthM, headingDeg, lightsMode, visible }
   airportSettings: {},
+
+  // 飛行。機体・物理の状態・操縦入力をまとめて持つ。
+  // active が false のあいだは環境プレビュー（カメラだけが飛ぶ）のまま。
+  flight: {
+    active: false,
+    aircraft: null,       // { model, group, visual, lights, ... }（09b-aircraft-visual.js）
+    state: null,          // 物理の状態（10-flight.js）
+    controls: null,       // 操縦入力
+    configs: [],          // 飛べる機体の一覧（Builderの保存＋内蔵機）
+    configName: null,
+    cameraMode: 'chase',  // chase / cockpit / orbit / free
+  },
 
   // ミニマップ（2Dの世界地図）
   minimap: null,

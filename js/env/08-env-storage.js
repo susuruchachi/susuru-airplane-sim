@@ -46,6 +46,10 @@ function collectEnvSnapshot() {
       presetId: EnvState.weather.presetId,
       manual: { ...EnvState.weather.manual },
     },
+    flight: {
+      configName: EnvState.flight.configName,
+      cameraMode: EnvState.flight.cameraMode,
+    },
     selectedAirportId: EnvState.selectedAirportId,
     airports,
   };
@@ -89,6 +93,8 @@ function applyEnvSnapshot(data) {
     }
   }
 
+  if (data.flight) applyFlightSnapshot(data.flight);
+
   let applied = 0, skipped = 0;
   if (data.airports) {
     for (const id in data.airports) {
@@ -120,6 +126,32 @@ function applyEnvSnapshot(data) {
   }
 
   return { applied, skipped, notes };
+}
+
+// 飛行の設定を戻す。機体の候補は IndexedDB を読んでからでないと揃わないので、
+// ここだけは initFlight のあとからもう一度呼べるように切り出してある
+// （読み込みは起動処理より先に走るため、1回目では機体名が捨てられてしまう）。
+function applyFlightSnapshot(flight) {
+  if (!flight) return;
+  // 機体は「今そこにある候補」の中にあるときだけ戻す（Builderで消された機体を掴まないため）
+  if (typeof flight.configName === 'string'
+      && EnvState.flight.configs.some((c) => c.name === flight.configName)) {
+    EnvState.flight.configName = flight.configName;
+  }
+  if (typeof FLIGHT_CAMERA_MODES !== 'undefined'
+      && FLIGHT_CAMERA_MODES.some((m) => m.id === flight.cameraMode)) {
+    EnvState.flight.cameraMode = flight.cameraMode;
+  }
+}
+
+// 保存されている飛行の設定だけを読み直す（機体の一覧が揃ったあとに呼ぶ）
+function reapplyStoredFlightSelection() {
+  try {
+    const raw = localStorage.getItem(ENV_STORAGE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data && data.flight) applyFlightSnapshot(data.flight);
+  } catch (err) { /* 読めなくても既定の機体で飛べる */ }
 }
 
 // --- localStorage ------------------------------------------------------------

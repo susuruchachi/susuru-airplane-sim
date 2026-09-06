@@ -15,6 +15,7 @@ function bootstrapEnv() {
     initAirport();
     initVegetation(); // 空港の敷地を避けて生やすので、空港のあとに作る
     initMinimap();
+    initFlight();    // 機体の一覧を読む（IndexedDBなので非同期。飛ぶのはボタンを押してから）
     setupEnvUI();
 
     // 前回この端末で触った設定があれば復元する（無ければ何も起きない）

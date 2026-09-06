@@ -61,6 +61,7 @@ function setupEnvUI() {
 
   setupWorldUI();
   setupWeatherUI();
+  setupFlightPanelUI();
   setupAirportUI();
 
   btnReset.addEventListener('click', () => {
