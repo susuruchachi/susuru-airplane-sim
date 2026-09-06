@@ -408,6 +408,33 @@ function updateTerrain() {
   }
 }
 
+// **描かれている地形メッシュの上の高さ** を返す。
+//
+// worldHeightAt() は「真の高さ」だが、地形メッシュは格子点の間を三角形で結んだ
+// 折れ面なので、格子点以外では両者が数十mずれる（尾根では地形が下がり、谷では上がる）。
+// 木や建物を worldHeightAt() の値に置くと、その差のぶんだけ宙に浮いたり地面に埋まったりする。
+// ここは地形と同じ格子・同じ三角形分割で補間するので、必ず地面に接する。
+//
+// 木も建物も、いちばん細かいLODで描かれる距離でしか見えないので、常にその分割数で計算する。
+function terrainSurfaceHeightAt(x, z) {
+  const seg = TERRAIN_LOD_STEPS[0].segments;
+  const step = TERRAIN_TILE_SIZE / seg;
+  const ox = Math.floor(x / step) * step;
+  const oz = Math.floor(z / step) * step;
+  const tu = (x - ox) / step, tv = (z - oz) / step;
+
+  const h00 = worldHeightAt(ox, oz);
+  const h10 = worldHeightAt(ox + step, oz);
+  const h01 = worldHeightAt(ox, oz + step);
+
+  // 地形の四角形は (i,j)-(i,j+1)-(i+1,j) と (i+1,j)-(i,j+1)-(i+1,j+1) の2枚に割ってある
+  if (tu + tv <= 1) {
+    return h00 + (h10 - h00) * tu + (h01 - h00) * tv;
+  }
+  const h11 = worldHeightAt(ox + step, oz + step);
+  return h11 + (h01 - h11) * (1 - tu) + (h10 - h11) * (1 - tv);
+}
+
 // 視点を大きく飛ばしたあとなど、周囲の地形をすぐ作り直したいときに使う
 function terrainRebuildNow() {
   refreshTerrainTiles(true);

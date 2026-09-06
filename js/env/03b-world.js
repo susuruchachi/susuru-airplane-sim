@@ -1037,6 +1037,35 @@ function worldRiverAt(x, z) {
   return null;
 }
 
+// その地点の水面の高さ（湖か川の中なら）。陸なら null。
+// 植生を水に生やさないためと、現在地表示のために使う。
+function worldWaterSurfaceAt(x, z) {
+  if (!_worldWaterReady) return null;
+
+  const lakes = _worldLakeGrid.at(x, z);
+  if (lakes) {
+    for (let i = 0; i < lakes.length; i++) {
+      const l = lakes[i];
+      const d = Math.hypot(x - l.x, z - l.z) / worldLakeWobble(l, x, z);
+      if (d < l.outerR) return l.level;
+    }
+  }
+
+  const segs = _worldRiverGrid.at(x, z);
+  if (segs) {
+    const bank = RIVER_WATER_DEPTH_M / RIVER_VALLEY_SLOPE;
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      const w = s.halfWidth + bank;
+      const d2 = worldPointSegDist2(x, z, s.ax, s.az, s.bx, s.bz);
+      if (d2 < w * w) {
+        return s.ah + (s.bh - s.ah) * _worldSegT.t + RIVER_WATER_DEPTH_M;
+      }
+    }
+  }
+  return null;
+}
+
 // ============================================================================
 // 10. 検索ヘルパー
 // ============================================================================
@@ -1161,7 +1190,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     WORLD_SEED, WORLD_SIZE, WORLD_HALF,
     WORLD_LANDMASSES, WORLD_RANGES, WORLD_COUNTRIES, WORLD_CITIES, WORLD_AIRPORTS,
-    WORLD_LAKES, WORLD_RIVERS, worldLakeAt, worldRiverAt,
+    WORLD_LAKES, WORLD_RIVERS, worldLakeAt, worldRiverAt, worldWaterSurfaceAt,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
     initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt,
     worldTemperatureAt, worldDrynessAt, worldLocalReliefAt,

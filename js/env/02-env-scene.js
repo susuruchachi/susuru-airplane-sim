@@ -57,6 +57,7 @@ function animateEnv() {
   EnvState.orbitControls.update();
   updateDayNightCycle(dt);
   updateTerrain();      // カメラが動いたぶんだけ地形タイルのLODを入れ替える
+  updateVegetation();
   updateSea(dt);
   updateClouds(dt);
   updateWindsock();

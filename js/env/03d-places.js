@@ -105,7 +105,9 @@ function buildCityInstance(city) {
     const dist = t * radius;
     const ox = Math.cos(ang) * dist, oz = Math.sin(ang) * dist;
 
-    const ground = worldHeightAt(city.x + ox, city.z + oz);
+    // 地形メッシュの上の高さを使う。worldHeightAt の値だと、
+    // 地形が格子点の間を三角形で結んでいるぶんだけ建物が浮いたり埋まったりする。
+    const ground = terrainSurfaceHeightAt(city.x + ox, city.z + oz);
     if (ground <= 0.5) continue; // 海にはみ出したぶんは建てない
     const localY = ground - city.groundY;
 
@@ -131,7 +133,7 @@ function buildCityInstance(city) {
     const ang = rand() * Math.PI * 2;
     const dist = radius * (1 + rand() * 0.9);
     const ox = Math.cos(ang) * dist, oz = Math.sin(ang) * dist;
-    const ground = worldHeightAt(city.x + ox, city.z + oz);
+    const ground = terrainSurfaceHeightAt(city.x + ox, city.z + oz);
     if (ground <= 0.5) continue;
     const warm = 0.5 + rand() * 0.3;
     lightPositions.push(ox, ground - city.groundY + CITY_LIGHT_Y, oz);

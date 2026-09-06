@@ -88,6 +88,8 @@ function setupEnvUI() {
     altitudeSlider.value = 0; altitudeReadout.textContent = '0 m';
     setLabelsVisible(true);
     document.getElementById('envShowLabels').checked = true;
+    setTreesVisible(true);
+    document.getElementById('envShowTrees').checked = true;
     resetSelectedAirport();
   });
 }
@@ -98,6 +100,11 @@ function setupWorldUI() {
   const showLabels = document.getElementById('envShowLabels');
   showLabels.checked = EnvState.env.labelsVisible !== false;
   showLabels.addEventListener('change', () => setLabelsVisible(showLabels.checked));
+
+  const showTrees = document.getElementById('envShowTrees');
+  showTrees.checked = EnvState.env.treesVisible !== false;
+  showTrees.addEventListener('change', () => setTreesVisible(showTrees.checked));
+
   setupMinimapUI();
 }
 

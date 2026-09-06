@@ -12,6 +12,7 @@ function bootstrapEnv() {
     initPlaces();    // 都市と地名ラベル
     initClouds();
     initAirport();
+    initVegetation(); // 空港の敷地を避けて生やすので、空港のあとに作る
     initMinimap();
     setupEnvUI();
     focusCameraOnAirport(); // 起動時は空港全体が見える位置から始める

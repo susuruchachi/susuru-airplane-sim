@@ -36,6 +36,10 @@ const EnvState = {
   builtWater: null,     // Map(川/湖のid -> Mesh)
   waterMaterial: null,
 
+  // 植生。カメラの手前だけにインスタンス描画で生やす。
+  treeGroup: null,
+  treeMaterial: null,
+
   // 都市。世界には130あるので、カメラの周りだけを建てて離れたら片付ける。
   cityGroup: null,
   builtCities: null,   // Map(都市id -> { city, buildings, lights })
@@ -71,5 +75,6 @@ const EnvState = {
     windDirectionDeg: 90,
     previewAltitudeM: 0,     // 「高度による空の色の変化」のプレビュー用（機体が無いのでスライダーで代用）
     labelsVisible: true,     // 国名・都市名・空港コードのラベル表示
+    treesVisible: true,      // 樹木の表示
   },
 };
