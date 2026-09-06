@@ -84,6 +84,10 @@ const EnvState = {
     controls: null,       // 操縦入力
     configs: [],          // 飛べる機体の一覧（Builderの保存＋内蔵機）
     configName: null,
+    // 重心の微調整。Builderで決めた重心からのずれを機体ごとに持つ。
+    // 設計そのものはBuilder側が正とし、こちらは「積み方を変える」ぶんとして扱う。
+    // { 機体名: {x, y, z} }（機体座標。-Zが前・+Yが上・+Xが右）
+    cgOffsets: {},
     cameraMode: 'chase',  // chase / cockpit / orbit / free
   },
 

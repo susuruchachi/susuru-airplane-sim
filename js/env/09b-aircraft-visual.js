@@ -179,8 +179,11 @@ function parseAircraftGLB(buffer) {
 }
 
 // 飛行モデル（09-aircraft.js）と、それに対応する見た目をまとめて作る
-async function createAircraft(config) {
-  const model = buildAircraftModel(config);
+// cgOverride を渡すと、その重心で飛行モデルと見た目を組む
+// （飛行中に重心を動かせるようにするため。渡さなければ config のとおり）
+async function createAircraft(config, cgOverride) {
+  const cg = cgOverride || config.cg || { x: 0, y: 0, z: 0 };
+  const model = buildAircraftModel(cgOverride ? Object.assign({}, config, { cg }) : config);
 
   const group = new THREE.Group();          // 機体座標。物理の位置と姿勢がここに入る
   group.name = 'aircraft';
@@ -193,7 +196,7 @@ async function createAircraft(config) {
 
   // 重心が原点に来るように、モデル全体を重心ぶん戻す
   const modelRoot = new THREE.Group();
-  modelRoot.position.copy(config.cg ? new THREE.Vector3(-config.cg.x, -config.cg.y, -config.cg.z) : new THREE.Vector3());
+  modelRoot.position.set(-(cg.x || 0), -(cg.y || 0), -(cg.z || 0));
   orient.add(modelRoot);
 
   let visual = null;

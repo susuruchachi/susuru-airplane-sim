@@ -180,6 +180,37 @@ note('慣性モーメント', `ロール${model.inertia.x.toFixed(0)} ピッチ$
     ha.notes.filter((n) => n.level === 'error').length + '件の指摘');
 }
 
+// --- 重心を動かしたときの効き ---------------------------------------------------
+// 飛行画面から重心を前後上下に動かせるようにしてあるので、動かしたぶんが
+// ちゃんと安定と接地に効くことを確かめる。
+{
+  const withCg = (dz, dy) => {
+    const c = defaultAircraftConfig();
+    c.cg = { x: c.cg.x, y: c.cg.y + dy, z: c.cg.z + dz };
+    return buildAircraftModel(c);
+  };
+  const base = analyzeAircraftPerformance(withCg(0, 0));
+  const fwd = analyzeAircraftPerformance(withCg(-1.0, 0));
+  const aft = analyzeAircraftPerformance(withCg(1.0, 0));
+  note('重心と静安定', `前へ1m ${fwd.staticMarginPct.toFixed(0)}%`
+    + ` / 設計どおり ${base.staticMarginPct.toFixed(0)}%`
+    + ` / 後ろへ1m ${aft.staticMarginPct.toFixed(0)}% MAC`);
+  check(fwd.staticMarginPct > base.staticMarginPct, '重心を前へ出すと静安定が増える');
+  check(aft.staticMarginPct < base.staticMarginPct, '重心を後ろへ下げると静安定が減る');
+
+  // 上下に動かすと車輪までの距離が変わる（＝地面に置く高さが変わる）
+  const up = withCg(0, 0.5), down = withCg(0, -0.5);
+  check(Math.abs(up.gearHeight - (model.gearHeight + 0.5)) < 0.01,
+    '重心を上げると車輪までの距離が伸びる', up.gearHeight.toFixed(2) + 'm');
+  check(Math.abs(down.gearHeight - (model.gearHeight - 0.5)) < 0.01,
+    '重心を下げると車輪までの距離が縮む', down.gearHeight.toFixed(2) + 'm');
+
+  // 重心を後ろへ下げすぎた機体は不安定だと言えること
+  const unstable = analyzeAircraftPerformance(withCg(3.0, 0));
+  check(unstable.staticMarginPct < 0 && unstable.notes.some((n) => /不安定/.test(n.text)),
+    '重心が後ろすぎる機体は不安定だと指摘する', unstable.staticMarginPct.toFixed(0) + '% MAC');
+}
+
 // --- 大気 -------------------------------------------------------------------
 {
   check(Math.abs(airDensityAt(0) - 1.225) < 0.001, '海面の空気密度が1.225');

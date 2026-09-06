@@ -49,6 +49,7 @@ function collectEnvSnapshot() {
     flight: {
       configName: EnvState.flight.configName,
       cameraMode: EnvState.flight.cameraMode,
+      cgOffsets: EnvState.flight.cgOffsets,
     },
     selectedAirportId: EnvState.selectedAirportId,
     airports,
@@ -141,6 +142,18 @@ function applyFlightSnapshot(flight) {
   if (typeof FLIGHT_CAMERA_MODES !== 'undefined'
       && FLIGHT_CAMERA_MODES.some((m) => m.id === flight.cameraMode)) {
     EnvState.flight.cameraMode = flight.cameraMode;
+  }
+  // 重心のずれ。数値以外や無限大が入っていたら捨てる（保存が壊れても飛べるように）
+  if (flight.cgOffsets && typeof flight.cgOffsets === 'object') {
+    for (const name in flight.cgOffsets) {
+      const o = flight.cgOffsets[name];
+      if (!o || typeof o !== 'object') continue;
+      const clean = {};
+      for (const k of ['x', 'y', 'z']) {
+        clean[k] = Number.isFinite(o[k]) ? Math.min(Math.max(o[k], -500), 500) : 0;
+      }
+      EnvState.flight.cgOffsets[name] = clean;
+    }
   }
 }
 

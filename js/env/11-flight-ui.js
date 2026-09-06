@@ -276,6 +276,81 @@ function setupFlightPanelUI() {
 
   const reset = document.getElementById('envBtnFlightReset');
   if (reset) reset.addEventListener('click', () => resetFlightToRunway());
+
+  setupCgUI();
+}
+
+// --- 重心の調整 ---------------------------------------------------------------
+//
+// Builderで決めた重心からの「ずれ」を動かす。設計はBuilder側が正で、
+// こちらは積み方を変えるようなもの——なので0に戻せば必ず設計どおりに戻る。
+// スライダーは -100〜100 の整数で、機体の大きさに合わせた実寸へ変換する。
+// 機体が10mでも100mでも同じ操作感になるように。
+
+const CG_AXES = [
+  // 前後は「前へ出すと安定」なので、スライダー右＝前（-Z）になるよう符号を反転する
+  { id: 'Z', key: 'z', sign: -1, label: '前後', extent: 'z', frac: 0.30 },
+  { id: 'Y', key: 'y', sign: 1, label: '上下', extent: 'y', frac: 0.40 },
+  { id: 'X', key: 'x', sign: 1, label: '左右', extent: 'x', frac: 0.15 },
+];
+
+// スライダー1目盛ぶんの実寸。機体の広がりから決める。
+function cgAxisRange(axis) {
+  const ac = EnvState.flight.aircraft;
+  if (!ac) return 1;
+  return Math.max(ac.model.extent[axis.extent] * axis.frac, 0.5);
+}
+
+function setupCgUI() {
+  for (const axis of CG_AXES) {
+    const el = document.getElementById('envCg' + axis.id);
+    if (!el) continue;
+    el.addEventListener('input', () => {
+      const f = EnvState.flight;
+      if (!f.aircraft) return;
+      const off = f.cgOffsets[f.configName] || (f.cgOffsets[f.configName] = { x: 0, y: 0, z: 0 });
+      off[axis.key] = (parseFloat(el.value) / 100) * cgAxisRange(axis) * axis.sign;
+      applyCgOffset();
+    });
+    el.addEventListener('change', onEnvSettingsChanged);
+  }
+  const reset = document.getElementById('envBtnCgReset');
+  if (reset) {
+    reset.addEventListener('click', () => {
+      const f = EnvState.flight;
+      f.cgOffsets[f.configName] = { x: 0, y: 0, z: 0 };
+      syncCgUI();
+      applyCgOffset();
+      onEnvSettingsChanged();
+    });
+  }
+}
+
+// 状態 → スライダー
+function syncCgUI() {
+  const f = EnvState.flight;
+  const off = (f.cgOffsets && f.cgOffsets[f.configName]) || { x: 0, y: 0, z: 0 };
+  for (const axis of CG_AXES) {
+    const el = document.getElementById('envCg' + axis.id);
+    if (!el) continue;
+    const range = cgAxisRange(axis);
+    el.value = Math.round(THREE.MathUtils.clamp(
+      ((off[axis.key] || 0) / range) * axis.sign * 100, -100, 100));
+  }
+  updateCgReadout();
+}
+
+function updateCgReadout() {
+  const f = EnvState.flight;
+  const off = (f.cgOffsets && f.cgOffsets[f.configName]) || { x: 0, y: 0, z: 0 };
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  for (const axis of CG_AXES) {
+    const v = (off[axis.key] || 0) * axis.sign;
+    // 前後は「前へ+」として読ませる（スライダーを右へ倒すと前へ出る、と一致させる）
+    set('envCg' + axis.id + 'Readout', (v >= 0 ? '+' : '') + v.toFixed(2) + ' m');
+  }
+  const total = Math.hypot(off.x || 0, off.y || 0, off.z || 0);
+  set('envCgReadout', (total < 0.005 ? '設計どおり' : '±' + total.toFixed(2) + ' m'));
 }
 
 // 機体の一覧をセレクトに流し込む
@@ -314,7 +389,9 @@ function updateFlightPanelReadout() {
   const kt = (v) => Math.round(v * 1.94384);
   set('envFlightPerfReadout',
     `失速 ${kt(a.stallMps)}kt ／ 離陸滑走 ${a.takeoffM ? Math.round(a.takeoffM).toLocaleString() + 'm' : '不可'}`
-    + ` ／ 翼面荷重 ${Math.round(a.wingLoading)}kg/m²`);
+    + ` ／ 翼面荷重 ${Math.round(a.wingLoading)}kg/m²`
+    + ` ／ 静安定 ${a.staticMarginPct >= 0 ? '+' : ''}${a.staticMarginPct.toFixed(0)}%MAC`);
+  updateCgReadout(); // 重心を動かすたびここを通るので、表示もここで合わせる
 
   if (notes) {
     notes.innerHTML = '';

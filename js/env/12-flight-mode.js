@@ -37,6 +37,18 @@ async function initFlight() {
   initFlightHUD();
 }
 
+// いま選んでいる機体の重心のずれ（無ければゼロ）
+function currentCgOffset() {
+  const o = EnvState.flight.cgOffsets[EnvState.flight.configName];
+  return o ? { x: o.x || 0, y: o.y || 0, z: o.z || 0 } : { x: 0, y: 0, z: 0 };
+}
+
+// 設計の重心にずれを足したものを返す
+function cgWithOffset(config, offset) {
+  const base = config.cg || { x: 0, y: 0, z: 0 };
+  return { x: (base.x || 0) + offset.x, y: (base.y || 0) + offset.y, z: (base.z || 0) + offset.z };
+}
+
 // 選んだ機体を組み立てる（まだシーンには置かない）
 async function buildSelectedAircraft() {
   const f = EnvState.flight;
@@ -45,9 +57,11 @@ async function buildSelectedAircraft() {
     EnvState.scene.remove(f.aircraft.group);
     disposeFlightObject(f.aircraft.group);
   }
-  f.aircraft = await createAircraft(config);
+  f.aircraft = await createAircraft(config, cgWithOffset(config, currentCgOffset()));
+  f.aircraft.config = config;
   EnvState.scene.add(f.aircraft.group);
   f.aircraft.group.visible = f.active;
+  if (typeof syncCgUI === 'function') syncCgUI(); // 目盛の実寸は機体の大きさで変わる
   updateFlightPanelReadout();
   return f.aircraft;
 }
@@ -89,6 +103,27 @@ async function toggleFlightMode() {
   document.body.classList.add('flying');
   setFlightCamera(f.cameraMode === 'free' ? 'chase' : f.cameraMode);
   resetFlightToRunway();
+  updateFlightPanelReadout();
+}
+
+// 重心のずれを変えたときに呼ぶ。**機体を作り直さない**——GLBの読み直しは重く、
+// スライダーを動かすたびに数百ミリ秒止まってしまう。飛行モデルだけを組み直し、
+// 見た目は「重心ぶん戻す」位置をずらすだけで済ませる。
+function applyCgOffset() {
+  const f = EnvState.flight;
+  const ac = f.aircraft;
+  if (!ac || !ac.config) return;
+
+  const cg = cgWithOffset(ac.config, currentCgOffset());
+  ac.model = buildAircraftModel(Object.assign({}, ac.config, { cg }));
+  ac.modelRoot.position.set(-cg.x, -cg.y, -cg.z);
+
+  // 重心を上下に動かすと車輪までの距離も変わるので、接地しているなら置き直す
+  if (f.active && f.state.onGround) {
+    placeAircraftOnGround(ac.model, f.state,
+      f.state.position.x, f.state.position.z, f.state.headingDeg, flightGroundHeightAt);
+    syncAircraftVisual();
+  }
   updateFlightPanelReadout();
 }
 

@@ -62,11 +62,11 @@
   .env-group select{font-family:var(--sans);}
   .env-note{font-size:11px;color:var(--text-dim);line-height:1.5;margin-top:4px;}
   #envBtnToggleTime, #envBtnReset, #envBtnToggleAirport, #envBtnFocusAirport,
-  #envBtnFly, #envBtnFlightReset{
+  #envBtnFly, #envBtnFlightReset, #envBtnCgReset{
     width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
     padding:8px 10px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:var(--sans);margin-top:6px;
   }
-  #envBtnToggleTime:hover, #envBtnReset:hover, #envBtnFly:hover, #envBtnFlightReset:hover,
+  #envBtnToggleTime:hover, #envBtnReset:hover, #envBtnFly:hover, #envBtnFlightReset:hover, #envBtnCgReset:hover,
   #envBtnToggleAirport:hover, #envBtnFocusAirport:hover{border-color:var(--accent-dim);}
   #envBtnFly.primary{background:var(--accent-dim);border-color:#2f6fb5;color:#eaf4ff;font-weight:600;}
   #envBtnFly.primary:hover{background:#2f6fb5;}
@@ -221,7 +221,19 @@ body.flying #versionTag { display:none; }
       <div class="env-note" style="margin-top:6px;"><span id="envFlightSpecReadout">—</span></div>
       <div class="env-note" style="margin-top:4px;"><span id="envFlightPerfReadout"></span></div>
       <div id="envFlightNotes"></div>
-      <div class="env-row" style="margin-top:10px;"><label>視点</label></div>
+      <div class="env-row" style="margin-top:12px;">
+        <label>重心の調整</label><span id="envCgReadout" class="val">±0.00 m</span>
+      </div>
+      <div class="env-note" style="margin-top:0;">Builderで決めた重心からのずれです。前へ出すとピッチが安定し、後ろへ下げると軽く動きます。</div>
+      <div class="env-row" style="margin-top:8px;"><label>前後</label><span id="envCgZReadout" class="val">0.00 m</span></div>
+      <input type="range" id="envCgZ" min="-100" max="100" step="1" value="0">
+      <div class="env-row" style="margin-top:6px;"><label>上下</label><span id="envCgYReadout" class="val">0.00 m</span></div>
+      <input type="range" id="envCgY" min="-100" max="100" step="1" value="0">
+      <div class="env-row" style="margin-top:6px;"><label>左右</label><span id="envCgXReadout" class="val">0.00 m</span></div>
+      <input type="range" id="envCgX" min="-100" max="100" step="1" value="0">
+      <button id="envBtnCgReset" style="margin-top:6px;">重心を元に戻す</button>
+
+      <div class="env-row" style="margin-top:12px;"><label>視点</label></div>
       <select id="envFlightCamera"></select>
       <button id="envBtnFlightReset" style="margin-top:8px;">滑走路へ戻る（R）</button>
     </div>
