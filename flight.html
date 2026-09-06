@@ -116,6 +116,65 @@ body.flying #versionTag { display:none; }
   font-size:10.5px; color:rgba(180,205,230,0.55); padding:0 12px; }
 @media (max-width:820px){ #flightHud .hud-tile b{font-size:16px;} #hudHelp{display:none;} }
 
+/* --- 画面の上の操縦装置（指で飛ばすため） --- */
+#flightTouch { position:absolute; inset:0; display:none; pointer-events:none;
+  font-family:'SF Mono',Menlo,Consolas,monospace; color:#e8f0f8;
+  touch-action:none; -webkit-user-select:none; user-select:none; }
+body.flying.touch-controls #flightTouch { display:block; }
+/* 操縦装置を出したぶん、下の計器を持ち上げて重ならないようにする */
+body.touch-controls #flightHud .hud-bottom { bottom:150px; }
+/* 指で飛ばしているあいだはキーの一覧を出さない（ボタンと重なるうえに読む相手がいない） */
+body.touch-controls #hudHelp { display:none; }
+/* 操縦桿は親指が届く画面の隅に置き、ラダーはその上に重ねる */
+#flightTouch .ft-left { position:absolute; left:14px; bottom:16px;
+  display:flex; flex-direction:column-reverse; align-items:center; gap:8px; pointer-events:auto; }
+#flightTouch .ft-stick { position:relative; width:132px; height:132px; border-radius:50%;
+  background:rgba(8,14,22,0.55); border:1px solid rgba(120,170,220,0.28);
+  backdrop-filter:blur(3px); }
+#flightTouch .ft-cross { position:absolute; inset:14px; border-radius:50%;
+  border:1px dashed rgba(120,170,220,0.18); }
+#flightTouch .ft-knob { position:absolute; left:50%; top:50%; width:52px; height:52px;
+  margin:0; border-radius:50%; background:rgba(63,140,220,0.55);
+  border:1px solid rgba(160,205,245,0.7); transform:translate(-50%,-50%);
+  box-shadow:0 2px 10px rgba(0,0,0,.45); }
+#flightTouch .ft-rudder { display:flex; gap:6px; }
+#flightTouch .ft-right { position:absolute; right:14px; bottom:16px;
+  display:flex; gap:8px; pointer-events:auto; }
+#flightTouch .ft-lever { position:relative; width:56px; height:172px; border-radius:8px;
+  overflow:hidden; background:rgba(8,14,22,0.55); border:1px solid rgba(120,170,220,0.28);
+  backdrop-filter:blur(3px); }
+#flightTouch .ft-fill { position:absolute; left:0; right:0; bottom:0; height:0%;
+  background:linear-gradient(180deg,rgba(63,140,220,0.75),rgba(63,140,220,0.35)); }
+#flightTouch .ft-vtol .ft-fill { background:linear-gradient(180deg,rgba(90,200,140,0.75),rgba(90,200,140,0.35)); }
+#flightTouch .ft-lever-label { position:absolute; inset:0; display:flex; flex-direction:column;
+  align-items:center; justify-content:space-between; padding:6px 0; pointer-events:none; }
+#flightTouch .ft-lever-label span { font-size:10px; color:#cfe0f0; letter-spacing:.06em; }
+#flightTouch .ft-lever-label b { font-size:13px; }
+#flightTouch .ft-actions { position:absolute; left:50%; bottom:16px; transform:translateX(-50%);
+  display:flex; gap:6px; flex-wrap:wrap; justify-content:center; max-width:min(46vw,420px);
+  pointer-events:auto; }
+#flightTouch .ft-btn { font:inherit; font-size:11px; color:#dce9f6; padding:9px 11px;
+  border-radius:7px; background:rgba(8,14,22,0.62); border:1px solid rgba(120,170,220,0.28);
+  backdrop-filter:blur(3px); cursor:pointer; touch-action:none; }
+#flightTouch .ft-btn.on { background:rgba(63,140,220,0.6); border-color:rgba(160,205,245,0.7); }
+@media (max-width:640px){
+  #flightTouch .ft-stick { width:112px; height:112px; }
+  #flightTouch .ft-knob { width:44px; height:44px; }
+  #flightTouch .ft-lever { width:46px; height:140px; }
+  #flightTouch .ft-actions { max-width:38vw; }
+  body.touch-controls #flightHud .hud-bottom { bottom:126px; }
+}
+/* 横向きのスマホは縦が足りない。下段の計器は上段の下へ移し、操縦装置に場所を譲る */
+@media (max-height:560px){
+  body.touch-controls #flightHud .hud-bottom { top:60px; bottom:auto; }
+  #flightTouch .ft-stick { width:104px; height:104px; }
+  #flightTouch .ft-knob { width:40px; height:40px; }
+  #flightTouch .ft-lever { width:44px; height:118px; }
+  #flightTouch .ft-btn { padding:7px 9px; font-size:10.5px; }
+  #flightTouch .ft-actions { max-width:min(40vw,300px); bottom:10px; }
+  #flightTouch .ft-left, #flightTouch .ft-right { bottom:10px; }
+}
+
 /* --- 機体が飛べるかどうかの指摘 --- */
 #envFlightNotes { margin-top:6px; display:flex; flex-direction:column; gap:4px; }
 #envFlightNotes div { font-size:11px; line-height:1.5; padding:5px 7px; border-radius:5px;
@@ -233,7 +292,13 @@ body.flying #versionTag { display:none; }
       <input type="range" id="envCgX" min="-100" max="100" step="1" value="0">
       <button id="envBtnCgReset" style="margin-top:6px;">重心を元に戻す</button>
 
-      <div class="env-row" style="margin-top:12px;"><label>視点</label></div>
+      <div class="env-row" style="margin-top:12px;">
+        <label for="envFlightTouch">画面に操縦装置</label>
+        <input type="checkbox" id="envFlightTouch">
+      </div>
+      <div class="hint" style="margin:2px 0 8px;">キーボードが無くても指で飛ばせます（タッチ画面では自動で入ります）。</div>
+
+      <div class="env-row"><label>視点</label></div>
       <select id="envFlightCamera"></select>
       <button id="envBtnFlightReset" style="margin-top:8px;">滑走路へ戻る（R）</button>
     </div>
@@ -341,6 +406,7 @@ body.flying #versionTag { display:none; }
 <script src="js/env/09b-aircraft-visual.js" onerror="_markFailed('js/env/09b-aircraft-visual.js')"></script>
 <script src="js/env/10-flight.js" onerror="_markFailed('js/env/10-flight.js')"></script>
 <script src="js/env/11-flight-ui.js" onerror="_markFailed('js/env/11-flight-ui.js')"></script>
+<script src="js/env/11b-flight-touch.js" onerror="_markFailed('js/env/11b-flight-touch.js')"></script>
 <script src="js/env/12-flight-mode.js" onerror="_markFailed('js/env/12-flight-mode.js')"></script>
 <script src="js/env/06-env-ui.js" onerror="_markFailed('js/env/06-env-ui.js')"></script>
 <script src="js/env/08-env-storage.js" onerror="_markFailed('js/env/08-env-storage.js')"></script>

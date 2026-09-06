@@ -50,6 +50,7 @@ function collectEnvSnapshot() {
       configName: EnvState.flight.configName,
       cameraMode: EnvState.flight.cameraMode,
       cgOffsets: EnvState.flight.cgOffsets,
+      touchControls: document.body.classList.contains('touch-controls'),
     },
     selectedAirportId: EnvState.selectedAirportId,
     airports,
@@ -154,6 +155,11 @@ function applyFlightSnapshot(flight) {
       }
       EnvState.flight.cgOffsets[name] = clean;
     }
+  }
+  // 画面の操縦装置は、一度でも自分で切り替えたならその選択を尊重する
+  // （タッチ画面でも消せるし、マウスしか無い端末でも出せる）
+  if (typeof flight.touchControls === 'boolean' && typeof setFlightTouchEnabled === 'function') {
+    setFlightTouchEnabled(flight.touchControls);
   }
 }
 

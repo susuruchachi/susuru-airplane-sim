@@ -494,6 +494,65 @@ function stallSpeedLevel(flap) {
     `${clean ? clean.toFixed(0) : '—'}kt → ${full ? full.toFixed(0) : '—'}kt`);
 }
 
+// --- 垂直離陸 -----------------------------------------------------------------
+// 上を向いたエンジンは前へ進むエンジンとは別のレバーで出す。同じレバーにすると、
+// 浮かせようとしただけで前へ走り出してしまい、ホバリングも垂直着陸もできない。
+{
+  const cfg = defaultAircraftConfig();
+  cfg.parts = cfg.parts.concat([{
+    id: 'e_lift', type: 'engine', name: '垂直離陸用',
+    position: { x: 0, y: 1.05, z: -0.35 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: { thrustKgf: 1500, spinAxis: 'y' },
+  }]);
+  const vm = buildAircraftModel(cfg);
+  check(vm.hasVtol, '上を向いたエンジンを垂直離陸用として見分ける');
+  check(Math.round(vm.totalThrustN / 9.80665) === 380 && Math.round(vm.vtolThrustN / 9.80665) === 1500,
+    '前へ進む推力と持ち上げる推力を分けて数える',
+    `前${(vm.totalThrustN / 9.80665).toFixed(0)}kgf / 上${(vm.vtolThrustN / 9.80665).toFixed(0)}kgf`);
+
+  const run = (drive, secs) => {
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(vm, st, 0, 0, 0, flatGround);
+    c.parkingBrake = false;
+    let peakTilt = 0;
+    for (let i = 0; i < 60 * secs; i++) {
+      drive(c, st, i / 60);
+      advanceFlight(vm, st, c, noWind, flatGround, 1 / 60);
+      if (st.altitudeAglM > 3) peakTilt = Math.max(peakTilt, Math.abs(st.pitchDeg), Math.abs(st.rollDeg));
+    }
+    return { st, peakTilt };
+  };
+
+  // レバーの取り違えが無いこと
+  const fwdOnly = run((c) => { c.throttle = 1; c.vtolThrottle = 0; }, 1).st;
+  check(fwdOnly.thrustN > 0 && fwdOnly.vtolThrustN === 0, '出力を上げても垂直エンジンは動かない');
+  const upOnly = run((c) => { c.throttle = 0; c.vtolThrottle = 1; }, 1).st;
+  check(upOnly.thrustN === 0 && upOnly.vtolThrustN > 0, '垂直レバーを上げても前へは押さない');
+
+  // ホバリング。舵は触らず、高度30mを保つ操作だけをする。
+  const hov = run((c, s) => {
+    c.vtolThrottle = Math.max(0, Math.min(1, 0.72 + (30 - s.altitudeAglM) * 0.02 - s.velocity.y * 0.05));
+  }, 30);
+  check(Math.abs(hov.st.altitudeAglM - 30) < 6, '垂直エンジンだけでホバリングできる',
+    hov.st.altitudeAglM.toFixed(1) + 'm');
+  check(hov.peakTilt < 45, 'ホバリング中に引っくり返らない', peakLabel(hov.peakTilt));
+  check(Math.abs(hov.st.pitchDeg) < 6 && Math.abs(hov.st.rollDeg) < 6,
+    '舵から手を離すと水平に戻る',
+    `ピッチ${hov.st.pitchDeg.toFixed(1)}° ロール${hov.st.rollDeg.toFixed(1)}°`);
+
+  // 垂直で浮いてから、前のエンジンへ渡して普通の飛行へ移る
+  const tr = run((c, s) => {
+    c.vtolThrottle = s.altitudeAglM < 40 ? 0.85 : Math.max(0, 1 - s.airspeed / 45);
+    c.throttle = s.altitudeAglM > 35 ? 1 : 0;
+    c.pitch = Math.max(-1, Math.min(1, (3 - s.pitchDeg) * 0.05 - s.angularVelocity.x * 0.6));
+  }, 50);
+  note('垂直離陸から巡航へ', `${(tr.st.airspeed * KT).toFixed(0)}kt / 高度${tr.st.altitudeAglM.toFixed(0)}m`);
+  check(tr.st.airspeed * KT > 80 && !tr.st.onGround && tr.st.altitudeAglM > 20,
+    '垂直で浮いてから通常の飛行へ移れる',
+    `${(tr.st.airspeed * KT).toFixed(0)}kt 高度${tr.st.altitudeAglM.toFixed(0)}m`);
+}
+function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
+
 // --- 計算の速さ ---------------------------------------------------------------
 {
   const st = createFlightState();

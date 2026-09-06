@@ -260,6 +260,8 @@ function buildAircraftModel(config) {
     return {
       name: p.name || 'エンジン',
       spinAxis: spin,
+      // 上を向いているエンジンは垂直離陸用。前へ進むためのエンジンとは別のレバーで動かす。
+      lift: spin === 'y',
       position: acVec(p.position || {}).applyQuaternion(qFix).sub(cg),
       // 回転軸そのものは機体に固定なので、向きの正規化ぶんだけ回しておく
       axis: axis.applyQuaternion(qFix).normalize(),
@@ -312,7 +314,9 @@ function buildAircraftModel(config) {
     // 前面 0.022×翼面積（Cd=1.0）で、翼面積基準の有害抗力係数が 0.02 前後になる。
     fuselageFrontArea: Math.max(0.022 * wingArea, 0.15),
     fuselageSideArea: Math.max(0.10 * wingArea, 0.6),
-    totalThrustN: engines.reduce((a, e) => a + e.thrustN, 0),
+    totalThrustN: engines.reduce((a, e) => a + (e.lift ? 0 : e.thrustN), 0),
+    vtolThrustN: engines.reduce((a, e) => a + (e.lift ? e.thrustN : 0), 0),
+    hasVtol: engines.some((e) => e.lift),
     // 車輪の高さ（接地点が重心からどれだけ下か）
     gearHeight: contacts.length ? -Math.min(...contacts.map((c) => c.position.y)) : 1,
   };

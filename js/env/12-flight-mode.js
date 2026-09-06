@@ -35,6 +35,16 @@ async function initFlight() {
   updateFlightPanelReadout();
   setupFlightControls();
   initFlightHUD();
+  initFlightTouch();
+
+  const touchChk = document.getElementById('envFlightTouch');
+  if (touchChk) {
+    touchChk.checked = document.body.classList.contains('touch-controls');
+    touchChk.addEventListener('change', () => {
+      setFlightTouchEnabled(touchChk.checked);
+      if (typeof saveAirportSettings === 'function') saveAirportSettings();
+    });
+  }
 }
 
 // いま選んでいる機体の重心のずれ（無ければゼロ）
@@ -91,6 +101,7 @@ async function toggleFlightMode() {
     if (f.aircraft) f.aircraft.group.visible = false;
     EnvState.orbitControls.enabled = true;
     document.body.classList.remove('flying');
+    releaseFlightTouch(); // 指を置いたまま飛行を抜けても舵が残らないように
     updateFlightPanelReadout();
     updateFlightHUD();
     focusCameraOnAirport();
@@ -161,6 +172,7 @@ function resetFlightToRunway() {
   placeAircraftOnGround(f.aircraft.model, f.state, x, z, heading, flightGroundHeightAt);
   f.state.crashed = false;
   f.controls.throttle = 0;
+  f.controls.vtolThrottle = 0;
   f.controls.pitch = f.controls.roll = f.controls.yaw = 0;
   f.controls.flap = 0;
   f.controls.brake = 0;

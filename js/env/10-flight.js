@@ -85,6 +85,7 @@ function createFlightState() {
     loadFactor: 1,      // G
     stallRatio: 0,      // 主翼のうち失速している面積の割合 0〜1
     thrustN: 0,
+    vtolThrustN: 0,
     machLike: 0,
   };
 }
@@ -92,7 +93,8 @@ function createFlightState() {
 function createFlightControls() {
   return {
     pitch: 0, roll: 0, yaw: 0,   // -1〜1
-    throttle: 0,                 // 0〜1
+    throttle: 0,                 // 0〜1（前へ進むエンジン）
+    vtolThrottle: 0,             // 0〜1（垂直離陸用のリフトエンジン。別のレバー）
     flap: 0,                     // 0〜1
     brake: 0,                    // 0〜1
     gearDown: true,
@@ -197,16 +199,22 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
   const speedRatio = THREE.MathUtils.clamp(airspeed / Math.max(model.vMaxMps, 1), 0, 1.4);
   const propFactor = Math.max(1 - AERO_DEFAULTS.propDecay * speedRatio, 0.05);
   // 空気が薄いと出力も落ちる
-  const thrustScale = controls.throttle * propFactor * (rho / FLIGHT_RHO0);
-  let thrustTotal = 0;
+  const envScale = propFactor * (rho / FLIGHT_RHO0);
+  // 垂直離陸用（回転軸が上向き）のエンジンは別のレバーで出す。
+  // 前へ進むためのエンジンと同じレバーにすると、離陸のために出力を上げた瞬間に
+  // 前へも押されてしまい、ホバリングも垂直着陸もできない。
+  const vtolScale = (controls.vtolThrottle || 0) * envScale;
+  const mainScale = controls.throttle * envScale;
+  let thrustTotal = 0, vtolTotal = 0;
   for (const e of model.engines) {
-    const t = e.thrustN * thrustScale;
-    thrustTotal += t;
+    const t = e.thrustN * (e.lift ? vtolScale : mainScale);
+    if (e.lift) vtolTotal += t; else thrustTotal += t;
     out.force.addScaledVector(e.axis, t);
     out.torque.add(_fv.tmp.crossVectors(e.position, _fv.f.copy(e.axis).multiplyScalar(t)));
   }
 
   state.thrustN = thrustTotal;
+  state.vtolThrustN = vtolTotal;
   state.airspeed = airspeed;
   // 迎角と横滑り角も、止まっているうちは意味を持たない
   const flying = airspeed > 8;
@@ -216,6 +224,50 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
   // そのまま出すと駐機中の機体に「失速」の警告が点きっぱなしになる。
   state.stallRatio = (mainArea > 0 && airspeed > 8) ? stalledArea / mainArea : 0;
   return rho;
+}
+
+// --- 垂直離陸中の姿勢制御 -------------------------------------------------------
+
+// 舵は風が当たっていないと効かない。だから垂直に上がっている機体は、
+// リフトエンジンだけでは姿勢を保てない——尾翼が「進んでいる向き」へ機首を向けようとして、
+// 真上へ上がるほど機首も真上を向き、そのまま引っくり返る。
+// 実機（ハリアーなど）はエンジンの空気を機首・尾部・翼端のノズルへ回してこれを押さえる。
+// ここでも同じものを持たせる。リフトの出力に比例して効き、速度が出たら舵へ譲る。
+// 角速度を戻すだけでは足りない。上昇が速くなるほど尾翼の起こす力も強くなるので、
+// 舵を中立にしていると機首が少しずつ上を向いたまま止まらない。
+// 舵から手を離しているあいだは**水平に戻す**ところまで面倒を見る。
+// 実機でもホバリング中の姿勢は自動で保たれている（F-35Bはまさにこれ）。
+const VTOL_RCS_DEG = { pitch: 14, roll: 34, yaw: 10 }; // 舵一杯のときの角加速度（°/s²）
+const VTOL_RCS_DAMP = 1.3;      // 角速度を戻す強さ（1/s）
+const VTOL_RCS_LEVEL = 0.7;     // 水平へ戻す強さ（rad/s² / 傾きのsin）
+const VTOL_RCS_FADE_MPS = 60;   // この速度まででノズルの効きを0にし、舵に任せる
+
+const _vtolUp = new THREE.Vector3();
+
+function accumulateVtolControl(model, state, controls, out) {
+  if (!model.hasVtol) return;
+  const power = controls.vtolThrottle || 0;
+  if (power < 0.02) return;
+  const fade = THREE.MathUtils.clamp(1 - state.airspeed / VTOL_RCS_FADE_MPS, 0, 1);
+  const auth = power * fade;
+  if (auth <= 1e-4) return;
+
+  const I = model.inertia;
+  const w = state.angularVelocity;
+  const rad = THREE.MathUtils.degToRad;
+
+  // ワールドの真上を機体座標で見る。機首が上がっていれば z が負、
+  // 右へ傾いていれば x が負になる（そのぶんだけ戻せばいい）。
+  const up = _vtolUp.set(0, 1, 0).applyQuaternion(_fv.qInv.copy(state.quaternion).invert());
+  const hold = (1 - Math.min(Math.abs(controls.pitch), 1)) * VTOL_RCS_LEVEL;
+  const holdR = (1 - Math.min(Math.abs(controls.roll), 1)) * VTOL_RCS_LEVEL;
+
+  // 符号は舵と同じ向きにそろえる（引く＝機首上げ／右へ倒す＝右ロール／右ラダー＝右ヨー）
+  out.torque.x += I.x * (rad(VTOL_RCS_DEG.pitch) * controls.pitch
+    + hold * up.z - VTOL_RCS_DAMP * w.x) * auth;
+  out.torque.z += I.z * (-rad(VTOL_RCS_DEG.roll) * controls.roll
+    - holdR * up.x - VTOL_RCS_DAMP * w.z) * auth;
+  out.torque.y += I.y * (-rad(VTOL_RCS_DEG.yaw) * controls.yaw - VTOL_RCS_DAMP * w.y) * auth;
 }
 
 // --- 接地 -------------------------------------------------------------------
@@ -301,6 +353,7 @@ function flightStep(model, state, controls, windWorld, groundHeightAt, dt) {
   const acc = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
 
   accumulateAeroForces(model, state, controls, windWorld, acc);
+  accumulateVtolControl(model, state, controls, acc);
   accumulateGroundForces(model, state, controls, groundHeightAt, acc);
 
   // 力（機体）→ワールドに直し、重力を足して加速度にする

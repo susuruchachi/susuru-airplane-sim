@@ -29,6 +29,10 @@ const FLIGHT_KEYMAP = {
   yawRight: ['KeyE', 'Period'],
   throttleUp: ['ShiftLeft', 'ShiftRight'],
   throttleDown: ['ControlLeft', 'ControlRight'],
+  // 垂直離陸用のエンジンは別のレバー。前へ進むエンジンと同じにすると、
+  // 浮かせようとしただけで前へ走り出してしまう。
+  vtolUp: ['KeyX'],
+  vtolDown: ['KeyZ'],
   brake: ['KeyB', 'Space'],
 };
 
@@ -89,17 +93,28 @@ function updateFlightInput(dt) {
     return THREE.MathUtils.clamp(cur + want * FLIGHT_CONTROL_RATE * dt, -1, 1);
   };
 
-  c.pitch = axis(c.pitch, FLIGHT_KEYMAP.pitchDown, FLIGHT_KEYMAP.pitchUp);
-  c.roll = axis(c.roll, FLIGHT_KEYMAP.rollLeft, FLIGHT_KEYMAP.rollRight);
-  c.yaw = axis(c.yaw, FLIGHT_KEYMAP.yawLeft, FLIGHT_KEYMAP.yawRight);
+  // 画面の操縦装置を触っている舵は、そちらの値をそのまま使う。
+  // 指を離せば null が返り、下のばね戻りに戻る。
+  const touch = (name) => (typeof flightTouchOverride === 'function' ? flightTouchOverride(name) : null);
+  const tp = touch('pitch'), tr = touch('roll'), ty = touch('yaw');
 
+  c.pitch = tp !== null ? tp : axis(c.pitch, FLIGHT_KEYMAP.pitchDown, FLIGHT_KEYMAP.pitchUp);
+  c.roll = tr !== null ? tr : axis(c.roll, FLIGHT_KEYMAP.rollLeft, FLIGHT_KEYMAP.rollRight);
+  c.yaw = ty !== null ? ty : axis(c.yaw, FLIGHT_KEYMAP.yawLeft, FLIGHT_KEYMAP.yawRight);
+
+  // 出力レバーは画面側が controls を直接書くので、ここではキーぶんを足すだけでいい
   const dThrottle = (_keyDown(FLIGHT_KEYMAP.throttleUp) ? 1 : 0) - (_keyDown(FLIGHT_KEYMAP.throttleDown) ? 1 : 0);
   if (dThrottle !== 0) {
     c.throttle = THREE.MathUtils.clamp(c.throttle + dThrottle * FLIGHT_THROTTLE_RATE * dt, 0, 1);
     if (c.throttle > 0.02) c.parkingBrake = false; // 出力を入れたら駐機ブレーキは外す
   }
+  const dVtol = (_keyDown(FLIGHT_KEYMAP.vtolUp) ? 1 : 0) - (_keyDown(FLIGHT_KEYMAP.vtolDown) ? 1 : 0);
+  if (dVtol !== 0) {
+    c.vtolThrottle = THREE.MathUtils.clamp((c.vtolThrottle || 0) + dVtol * FLIGHT_THROTTLE_RATE * dt, 0, 1);
+    if (c.vtolThrottle > 0.02) c.parkingBrake = false;
+  }
 
-  c.brake = _keyDown(FLIGHT_KEYMAP.brake) ? 1 : 0;
+  c.brake = touch('brake') !== null ? 1 : (_keyDown(FLIGHT_KEYMAP.brake) ? 1 : 0);
   if (c.brake > 0) c.parkingBrake = false;
 }
 
@@ -190,6 +205,7 @@ function initFlightHUD() {
     </div>
     <div class="hud-row hud-bottom">
       <div class="hud-tile sm"><span class="k">出力</span><b id="hudThr">0</b><span class="u">%</span></div>
+      <div class="hud-tile sm" id="hudVtolTile" hidden><span class="k">垂直</span><b id="hudVtol">0</b><span class="u">%</span></div>
       <div class="hud-tile sm"><span class="k">フラップ</span><b id="hudFlap">0</b><span class="u">%</span></div>
       <div class="hud-tile sm"><span class="k">脚</span><b id="hudGear">下</b></div>
       <div class="hud-tile sm"><span class="k">迎角</span><b id="hudAoa">0</b><span class="u">°</span></div>
@@ -199,7 +215,7 @@ function initFlightHUD() {
     <div id="hudWarn"></div>
     <div id="hudMsg"></div>
     <div id="hudHelp">
-      W/S・↑↓ ピッチ ／ A/D・←→ ロール ／ Q/E ラダー ／ Shift・Ctrl 出力 ／
+      W/S・↑↓ ピッチ ／ A/D・←→ ロール ／ Q/E ラダー ／ Shift・Ctrl 出力 ／ X/Z 垂直エンジン ／
       B・Space ブレーキ ／ G 脚 ／ V・C フラップ ／ P 駐機 ／ Tab 視点 ／ R 滑走路へ戻る ／ F 飛行終了
     </div>`;
   host.appendChild(el);
@@ -235,6 +251,10 @@ function updateFlightHUD() {
   set('hudHdg', String(Math.round(s.headingDeg)).padStart(3, '0'));
   set('hudVs', Math.round(s.verticalSpeed * 196.85).toLocaleString());
   set('hudThr', Math.round(c.throttle * 100));
+  const vtolTile = document.getElementById('hudVtolTile');
+  const hasVtol = !!(f.aircraft && f.aircraft.model && f.aircraft.model.hasVtol);
+  if (vtolTile) vtolTile.hidden = !hasVtol;
+  if (hasVtol) set('hudVtol', Math.round((c.vtolThrottle || 0) * 100));
   set('hudFlap', Math.round(c.flap * 100));
   set('hudGear', c.gearDown ? '下' : '上');
   set('hudAoa', s.alphaDeg.toFixed(1));
@@ -252,6 +272,8 @@ function updateFlightHUD() {
     warn.textContent = text;
     warn.className = cls;
   }
+
+  if (typeof updateFlightTouchReadout === 'function') updateFlightTouchReadout();
 }
 
 // --- 右パネルの飛行セクション ---------------------------------------------------
@@ -381,8 +403,12 @@ function updateFlightPanelReadout() {
     return;
   }
   const m = f.aircraft.model;
+  const kgf = (n) => Number((n / 9.80665).toFixed(0)).toLocaleString();
   set('envFlightSpecReadout',
-    `${m.massKg.toLocaleString()}kg ／ 翼${m.wingArea.toFixed(1)}m² ／ 翼幅${m.wingSpan.toFixed(1)}m ／ 推力${(m.totalThrustN / 9.80665).toFixed(0)}kgf`);
+    `${m.massKg.toLocaleString()}kg ／ 翼${m.wingArea.toFixed(1)}m² ／ 翼幅${m.wingSpan.toFixed(1)}m`
+    + ` ／ 推力${kgf(m.totalThrustN)}kgf`
+    // 垂直離陸用は前へ進む推力とは別のレバーなので、数字も分けて出す
+    + (m.hasVtol ? ` ／ 垂直${kgf(m.vtolThrustN)}kgf` : ''));
 
   // その機体が飛べるかどうかを出す。Builderは教えてくれないので、ここで名指しする。
   const a = analyzeAircraftPerformance(m);
