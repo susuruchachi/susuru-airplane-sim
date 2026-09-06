@@ -178,6 +178,19 @@
       <div class="env-note">空の色・霧の変化を確認するための仮スライダー。実際の機体高度と連動させるのは飛行シーン本体の実装後。</div>
     </div>
 
+    <div class="section-title">保存</div>
+    <div class="env-group">
+      <div class="env-note" style="margin-top:0;">
+        時刻・雲・風・空港の変更は、この端末に自動で保存されます。
+        地形や空港の位置は種から決まる固定のものなので保存されません。
+      </div>
+      <button id="envBtnExport">設定を書き出す（.json）</button>
+      <button id="envBtnImport">設定を読み込む</button>
+      <input type="file" id="envImportFile" accept="application/json,.json" style="display:none;">
+      <button id="envBtnClearStorage">この端末の保存を消す</button>
+      <div class="env-note" id="envStorageStatus">--</div>
+    </div>
+
     <div class="env-group" style="border-bottom:none;">
       <button id="envBtnReset">初期値に戻す</button>
     </div>
@@ -233,6 +246,7 @@
 <script src="js/env/04b-airport.js" onerror="_markFailed('js/env/04b-airport.js')"></script>
 <script src="js/env/05-daynight.js" onerror="_markFailed('js/env/05-daynight.js')"></script>
 <script src="js/env/06-env-ui.js" onerror="_markFailed('js/env/06-env-ui.js')"></script>
+<script src="js/env/08-env-storage.js" onerror="_markFailed('js/env/08-env-storage.js')"></script>
 <script src="js/env/07-env-main.js" onerror="_markFailed('js/env/07-env-main.js')"></script>
 <script>
   window.addEventListener('DOMContentLoaded', () => {

@@ -15,6 +15,15 @@ function bootstrapEnv() {
     initVegetation(); // 空港の敷地を避けて生やすので、空港のあとに作る
     initMinimap();
     setupEnvUI();
+
+    // 前回この端末で触った設定があれば復元する（無ければ何も起きない）
+    if (loadEnvFromStorage()) {
+      syncEnvUIToState();
+      applyCloudCoverage();
+      setLabelsVisible(EnvState.env.labelsVisible !== false);
+      setTreesVisible(EnvState.env.treesVisible !== false);
+    }
+
     focusCameraOnAirport(); // 起動時は空港全体が見える位置から始める
     animateEnv();
     envBootstrapOk = true;

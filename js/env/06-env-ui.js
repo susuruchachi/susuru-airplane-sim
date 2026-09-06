@@ -17,7 +17,6 @@ function setupEnvUI() {
   const altitudeReadout = document.getElementById('envAltitudeReadout');
   const btnReset = document.getElementById('envBtnReset');
 
-  timeSlider.value = EnvState.time.hours;
   timeSlider.addEventListener('pointerdown', () => { _envScrubbingTime = true; });
   window.addEventListener('pointerup', () => { _envScrubbingTime = false; });
   timeSlider.addEventListener('input', () => {
@@ -31,37 +30,28 @@ function setupEnvUI() {
     btnToggle.classList.toggle('active', EnvState.time.paused);
   });
 
-  cycleInput.value = EnvState.time.cycleMinutes;
   cycleInput.addEventListener('change', () => {
     const v = parseFloat(cycleInput.value);
     EnvState.time.cycleMinutes = Number.isFinite(v) && v > 0 ? v : 15;
     cycleInput.value = EnvState.time.cycleMinutes;
   });
 
-  cloudSlider.value = Math.round(EnvState.env.cloudCoverage * 100);
-  cloudReadout.textContent = cloudSlider.value + '%';
   cloudSlider.addEventListener('input', () => {
     EnvState.env.cloudCoverage = parseFloat(cloudSlider.value) / 100;
     cloudReadout.textContent = cloudSlider.value + '%';
     applyCloudCoverage();
   });
 
-  windSpeedSlider.value = EnvState.env.windSpeedKmh;
-  windSpeedReadout.textContent = EnvState.env.windSpeedKmh + ' km/h';
   windSpeedSlider.addEventListener('input', () => {
     EnvState.env.windSpeedKmh = parseFloat(windSpeedSlider.value);
     windSpeedReadout.textContent = windSpeedSlider.value + ' km/h';
   });
 
-  windDirSlider.value = EnvState.env.windDirectionDeg;
-  windDirReadout.textContent = EnvState.env.windDirectionDeg + '°';
   windDirSlider.addEventListener('input', () => {
     EnvState.env.windDirectionDeg = parseFloat(windDirSlider.value);
     windDirReadout.textContent = windDirSlider.value + '°';
   });
 
-  altitudeSlider.value = EnvState.env.previewAltitudeM;
-  altitudeReadout.textContent = EnvState.env.previewAltitudeM + ' m';
   altitudeSlider.addEventListener('input', () => {
     EnvState.env.previewAltitudeM = parseFloat(altitudeSlider.value);
     altitudeReadout.textContent = altitudeSlider.value + ' m';
@@ -78,19 +68,58 @@ function setupEnvUI() {
     EnvState.env.windSpeedKmh = 20;
     EnvState.env.windDirectionDeg = 90;
     EnvState.env.previewAltitudeM = 0;
-    applyCloudCoverage();
-    btnToggle.textContent = '❚❚ 一時停止';
-    btnToggle.classList.remove('active');
-    cycleInput.value = EnvState.time.cycleMinutes;
-    cloudSlider.value = 45; cloudReadout.textContent = '45%';
-    windSpeedSlider.value = 20; windSpeedReadout.textContent = '20 km/h';
-    windDirSlider.value = 90; windDirReadout.textContent = '90°';
-    altitudeSlider.value = 0; altitudeReadout.textContent = '0 m';
     setLabelsVisible(true);
-    document.getElementById('envShowLabels').checked = true;
     setTreesVisible(true);
-    document.getElementById('envShowTrees').checked = true;
     resetSelectedAirport();
+    applyCloudCoverage();
+    syncEnvUIToState();
+  });
+
+  setupStorageUI();
+  syncEnvUIToState();
+}
+
+// EnvState の中身をUIの各コントロールへ流し込む。
+// 起動時・「初期値に戻す」・設定ファイルの読み込み後に呼ぶ（3か所で同じ処理を書かないため）。
+function syncEnvUIToState() {
+  const set = (id, value) => { const el = document.getElementById(id); if (el) el.value = value; };
+  const text = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+
+  set('envTimeSlider', EnvState.time.hours);
+  text('envTimeReadout', formatHoursAsClock(EnvState.time.hours));
+  set('envCycleMinutes', EnvState.time.cycleMinutes);
+  const btnToggle = document.getElementById('envBtnToggleTime');
+  btnToggle.textContent = EnvState.time.paused ? '▶ 再生' : '❚❚ 一時停止';
+  btnToggle.classList.toggle('active', EnvState.time.paused);
+
+  set('envCloudCoverage', Math.round(EnvState.env.cloudCoverage * 100));
+  text('envCloudCoverageReadout', Math.round(EnvState.env.cloudCoverage * 100) + '%');
+  set('envWindSpeed', EnvState.env.windSpeedKmh);
+  text('envWindSpeedReadout', EnvState.env.windSpeedKmh + ' km/h');
+  set('envWindDirection', EnvState.env.windDirectionDeg);
+  text('envWindDirectionReadout', EnvState.env.windDirectionDeg + '°');
+  set('envAltitude', EnvState.env.previewAltitudeM);
+  text('envAltitudeReadout', EnvState.env.previewAltitudeM + ' m');
+
+  document.getElementById('envShowLabels').checked = EnvState.env.labelsVisible !== false;
+  document.getElementById('envShowTrees').checked = EnvState.env.treesVisible !== false;
+
+  syncAirportUIToSelection();
+}
+
+// --- 保存と読み込み ---------------------------------------------------------
+
+function setupStorageUI() {
+  const fileInput = document.getElementById('envImportFile');
+  document.getElementById('envBtnExport').addEventListener('click', exportEnvJSON);
+  document.getElementById('envBtnImport').addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files && fileInput.files[0]) importEnvJSONFile(fileInput.files[0]);
+    fileInput.value = '';
+  });
+  document.getElementById('envBtnClearStorage').addEventListener('click', () => {
+    clearEnvStorage();
+    syncEnvUIToState();
   });
 }
 
