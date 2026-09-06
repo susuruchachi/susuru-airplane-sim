@@ -357,10 +357,12 @@ function worldWeatherFieldAt(x, z, hours) {
   const sx = (x - drift) * WEATHER_FIELD_SCALE;
   const sz = (z - drift * 0.4) * WEATHER_FIELD_SCALE;
 
-  // しきい値0.34は当てずっぽうではなく、陸ぜんぶを何時刻ぶんか分類して決めた値。
-  // 高くすると世界じゅうが快晴になり、低くするとどこもかしこも雨になる。
-  // いまの内訳は tools/verify-world.js が「陸の天気」として毎回出す。
-  const wetness = worldSmooth01((worldFbm(sx, sz, 4) - 0.34) / 0.34);
+  // この2つの数は当てずっぽうではなく、陸と海のぜんぶを何時刻ぶんか分類して決めた値。
+  // 0.24を上げると世界じゅうが快晴になり、下げるとどこもかしこも雨になる。
+  // 0.58は傾き。ここを狭くすると smooth01 が上に張り付いて、
+  // 「強い雨」が世界の2割を占めるようなことになる（レーダーが一面まっ赤になって気付いた）。
+  // いまの内訳は tools/verify-world.js が「陸の天気」「海の天気」として毎回出す。
+  const wetness = worldSmooth01((worldFbm(sx, sz, 4) - 0.24) / 0.58);
   // 荒れるのは湿っているところだけ（乾いた晴天が荒れることはない）
   const storminess = worldSmooth01((worldFbm(sx * 1.7 + 51.3, sz * 1.7 + 17.9, 3) - 0.52) / 0.24) * wetness;
   // 霧は別のチャンネル。荒れていると立たないので、風の弱い湿った所にだけ出る

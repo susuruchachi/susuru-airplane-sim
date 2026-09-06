@@ -72,6 +72,7 @@ function setupEnvUI() {
     EnvState.env.windFromWeather = true;
     EnvState.weather.presetId = 'auto';
     EnvState.weather.manual = { wetness: 0.35, storminess: 0, fogginess: 0 };
+    EnvState.env.radarVisible = false;
     setLabelsVisible(true);
     setTreesVisible(true);
     resetSelectedAirport();
@@ -113,6 +114,7 @@ function syncEnvUIToState() {
 
   document.getElementById('envShowLabels').checked = EnvState.env.labelsVisible !== false;
   document.getElementById('envShowTrees').checked = EnvState.env.treesVisible !== false;
+  document.getElementById('envShowRadar').checked = EnvState.env.radarVisible === true;
 
   syncAirportUIToSelection();
 }
@@ -143,6 +145,13 @@ function setupWorldUI() {
   const showTrees = document.getElementById('envShowTrees');
   showTrees.checked = EnvState.env.treesVisible !== false;
   showTrees.addEventListener('change', () => setTreesVisible(showTrees.checked));
+
+  const showRadar = document.getElementById('envShowRadar');
+  showRadar.checked = EnvState.env.radarVisible === true;
+  showRadar.addEventListener('change', () => {
+    EnvState.env.radarVisible = showRadar.checked;
+    onEnvSettingsChanged();
+  });
 
   setupMinimapUI();
 }

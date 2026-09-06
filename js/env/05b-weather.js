@@ -65,12 +65,17 @@ function weatherPresetById(id) {
 // opts.climate が真のときだけ、その土地の乾燥で湿り・荒れを弱める（＝自動のとき）。
 // プリセットや手動は「選んだ天気をそのまま出す」ほうが分かりやすいので気候を掛けない。
 // opts.forcePrecip は 'rain' / 'snow' / null。null のときは気温で雨か雪かが決まる。
+// opts.climateAt に { temp, dry } を渡すと、その土地の気候を求め直さない。
+// 気温は標高が要る＝worldHeightAt が要るので、ここがいちばん重い。
+// 何百点も一度に評価するミニマップのレーダーは、地図を焼くときの標高を使い回す。
 function deriveWeather(field, x, z, groundH, opts) {
   opts = opts || {};
   const forcePrecip = opts.forcePrecip || null;
-  const land = worldLandValueAt(x, z);
-  const temp = worldTemperatureAt(x, z, Math.max(groundH, 0));
-  const dry = opts.climate ? worldDrynessAt(x, z, land) : 0;
+  const temp = opts.climateAt
+    ? opts.climateAt.temp
+    : worldTemperatureAt(x, z, Math.max(groundH, 0));
+  const dry = !opts.climate ? 0
+    : (opts.climateAt ? opts.climateAt.dry : worldDrynessAt(x, z, worldLandValueAt(x, z)));
 
   // 乾いた土地では、雨雲が来ても雲が薄く雨になりにくい。
   // 0.75まで効かせると大陸の内側がほぼ快晴で固定されてしまうので0.55にしてある。

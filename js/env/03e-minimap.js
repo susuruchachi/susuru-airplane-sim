@@ -11,6 +11,13 @@
 const MINIMAP_SIZE = 232;
 const MINIMAP_BAKE_ROWS_PER_FRAME = 12;
 
+// 気象レーダー。地図の4画素にひとつの粗さで降水を塗り、拡大して重ねる。
+// 重いのは標高（＝気温）なので、地図を焼くときに一緒に採っておいて使い回す。
+// 時間で変わるのは気象の場のほうだけなので、そこだけを塗り直す。
+const MINIMAP_RADAR_STRIDE = 4;
+const MINIMAP_RADAR_CELLS = MINIMAP_SIZE / MINIMAP_RADAR_STRIDE; // 58
+const MINIMAP_RADAR_REFRESH_MS = 300;
+
 // 表示範囲。世界全体は原点固定、それ以外はカメラを中心にする。
 const MINIMAP_ZOOMS = [
   { id: 'world', label: '世界', span: 0 },       // span=0 は「世界全体」の意味
@@ -25,6 +32,13 @@ let _minimapBaseView = null;    // その地形がどの範囲を表している
 let _minimapWorldCache = null;  // 「世界」ズームは一度焼いたら使い回す
 let _minimapBakeJob = null;
 let _minimapZoom = 0;
+
+let _radarClimate = null;       // { view, temp, dry }（地図と同じ範囲の気候。時間では変わらない）
+let _radarCanvas = null;        // 58×58 のオフスクリーン
+let _radarCtx = null;
+let _radarImg = null;
+let _radarAt = 0;               // 最後に塗り直した時刻
+let _radarSnowShare = 0;        // いま映っている降水のうち雪の割合（凡例の表示に使う）
 
 // 標高から地図の色を決める（3Dの地表色とは別に、地図として読みやすい配色にする）
 function minimapColorFor(h) {
@@ -64,10 +78,13 @@ function startMinimapBake(view) {
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = MINIMAP_SIZE;
   const ctx = canvas.getContext('2d');
+  const cells = MINIMAP_RADAR_CELLS * MINIMAP_RADAR_CELLS;
   _minimapBakeJob = {
     view, canvas, ctx,
     img: ctx.createImageData(MINIMAP_SIZE, MINIMAP_SIZE),
     row: 0,
+    // レーダー用の気候。標高を採るついでに埋めるので、余分な worldHeightAt は増えない
+    climate: { view, temp: new Float32Array(cells), dry: new Float32Array(cells) },
   };
 }
 
@@ -100,6 +117,13 @@ function stepMinimapBake() {
       img.data[o + 1] = Math.max(0, Math.min(255, c[1] * shade));
       img.data[o + 2] = Math.max(0, Math.min(255, c[2] * shade));
       img.data[o + 3] = 255;
+
+      // レーダーの粗い格子に当たる画素では、いま採った標高から気候も控えておく
+      if ((i % MINIMAP_RADAR_STRIDE) === 0 && (j % MINIMAP_RADAR_STRIDE) === 0) {
+        const ci = (j / MINIMAP_RADAR_STRIDE) * MINIMAP_RADAR_CELLS + (i / MINIMAP_RADAR_STRIDE);
+        job.climate.temp[ci] = worldTemperatureAt(x, z, Math.max(h, 0));
+        job.climate.dry[ci] = worldDrynessAt(x, z, worldLandValueAt(x, z));
+      }
     }
   }
   job.row = end;
@@ -108,10 +132,143 @@ function stepMinimapBake() {
     job.ctx.putImageData(img, 0, 0);
     _minimapBase = job.canvas;
     _minimapBaseView = job.view;
+    _radarClimate = job.climate;
+    _radarAt = 0; // 範囲が変わったので次のフレームで塗り直す
     if (view.span === WORLD_SIZE && view.cx === 0 && view.cz === 0) {
-      _minimapWorldCache = { canvas: job.canvas, view: job.view };
+      _minimapWorldCache = { canvas: job.canvas, view: job.view, climate: job.climate };
     }
     _minimapBakeJob = null;
+  }
+}
+
+// --- 気象レーダー -----------------------------------------------------------
+//
+// 本物のレーダーと同じく、映すのは降水だけ。雲や霧は映らない
+// （霧の中を飛ぶことになっても、レーダーには何も出ない）。
+// 弱い雨は青、強くなるほど緑→黄→橙→赤。雪は寒色でひとまとめ。
+// 雷が鳴っているところは紫に寄せる。
+
+const RADAR_RAIN_STOPS = [
+  [0.00, [80, 170, 240]], [0.22, [40, 120, 235]], [0.42, [70, 195, 120]],
+  [0.62, [240, 220, 70]], [0.80, [245, 150, 50]], [1.00, [235, 70, 60]],
+];
+const RADAR_SNOW_STOPS = [
+  [0.00, [205, 228, 246]], [0.35, [150, 200, 240]], [0.70, [110, 165, 230]], [1.00, [78, 118, 214]],
+];
+
+function radarRamp(stops, t) {
+  for (let i = 1; i < stops.length; i++) {
+    if (t <= stops[i][0] || i === stops.length - 1) {
+      const [a, ca] = stops[i - 1], [b, cb] = stops[i];
+      const u = b === a ? 0 : Math.max(0, Math.min(1, (t - a) / (b - a)));
+      return [ca[0] + (cb[0] - ca[0]) * u, ca[1] + (cb[1] - ca[1]) * u, ca[2] + (cb[2] - ca[2]) * u];
+    }
+  }
+  return stops[0][1];
+}
+
+// 粗い格子ぶんの降水を塗り直す。気候は焼き付け済みのものを使うので、
+// ここで呼ぶのは気象の場（fBm 3本）と deriveWeather だけ＝1面あたり数ミリ秒。
+function bakeMinimapRadar(view) {
+  if (!_radarCanvas) {
+    _radarCanvas = document.createElement('canvas');
+    _radarCanvas.width = _radarCanvas.height = MINIMAP_RADAR_CELLS;
+    _radarCtx = _radarCanvas.getContext('2d');
+    _radarImg = _radarCtx.createImageData(MINIMAP_RADAR_CELLS, MINIMAP_RADAR_CELLS);
+  }
+
+  const preset = weatherPresetById(EnvState.weather.presetId);
+  const hours = EnvState.weather.clockHours;
+  const opts = { forcePrecip: preset.forcePrecip || null, climate: preset.id === 'auto', climateAt: null };
+  const climateAt = { temp: 0, dry: 0 };
+  opts.climateAt = climateAt;
+
+  const half = view.span / 2;
+  const step = view.span / MINIMAP_RADAR_CELLS;
+  const data = _radarImg.data;
+  let wet = 0, snowy = 0;
+
+  for (let j = 0; j < MINIMAP_RADAR_CELLS; j++) {
+    const z = view.cz - half + (j + 0.5) * step;
+    for (let i = 0; i < MINIMAP_RADAR_CELLS; i++) {
+      const x = view.cx - half + (i + 0.5) * step;
+      const ci = j * MINIMAP_RADAR_CELLS + i;
+      climateAt.temp = _radarClimate.temp[ci];
+      climateAt.dry = _radarClimate.dry[ci];
+
+      const field = preset.id === 'auto' ? worldWeatherFieldAt(x, z, hours)
+        : (preset.id === 'manual' ? EnvState.weather.manual : preset);
+      const w = deriveWeather(field, x, z, 0, opts);
+
+      const o = ci * 4;
+      if (w.precipRate < 0.04) { data[o + 3] = 0; continue; }
+      wet++;
+      if (w.precipIsSnow > 0.5) snowy++;
+
+      const c = w.precipIsSnow > 0.5
+        ? radarRamp(RADAR_SNOW_STOPS, w.precipRate)
+        : radarRamp(RADAR_RAIN_STOPS, w.precipRate);
+      // 雷が鳴っているところは紫へ寄せる
+      if (w.storminess > 0.45) {
+        const u = ((w.storminess - 0.45) / 0.55) * 0.7;
+        c[0] += (196 - c[0]) * u; c[1] += (84 - c[1]) * u; c[2] += (220 - c[2]) * u;
+      }
+      data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2];
+      // 濃くしすぎると全域が降っているとき地図が読めなくなる
+      data[o + 3] = Math.round((0.28 + Math.min(w.precipRate, 1) * 0.38) * 255);
+    }
+  }
+  _radarCtx.putImageData(_radarImg, 0, 0);
+  _radarSnowShare = wet ? snowy / wet : 0;
+}
+
+function drawMinimapRadar(ctx, view) {
+  if (!EnvState.env.radarVisible) return;
+  if (!_radarClimate || _radarClimate.view !== view) return;
+  if (typeof deriveWeather !== 'function' || !EnvState.weather.current) return;
+
+  const now = performance.now();
+  if (now - _radarAt > MINIMAP_RADAR_REFRESH_MS) {
+    _radarAt = now;
+    bakeMinimapRadar(view);
+  }
+  if (!_radarCanvas) return;
+
+  // 粗い格子のまま拡大すると四角が並ぶので、なめらかに伸ばす
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(_radarCanvas, 0, 0, MINIMAP_SIZE, MINIMAP_SIZE);
+}
+
+// レーダーの凡例。色が何を意味するかは見ただけでは分からないので出しておく。
+function drawMinimapRadarLegend(ctx) {
+  if (!EnvState.env.radarVisible) return;
+  const w = 76, h = 6, x = MINIMAP_SIZE - w - 8, y = MINIMAP_SIZE - 16;
+
+  // 色の意味は、いま映っているものに合わせる（雪だけのときに雨の色を出しても仕方ない）
+  const stops = _radarSnowShare > 0.5 ? RADAR_SNOW_STOPS : RADAR_RAIN_STOPS;
+  const kind = _radarSnowShare > 0.85 ? '雪' : (_radarSnowShare > 0.15 ? '雨雪' : '雨');
+
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(x - 4, y - 11, w + 8, h + 15);
+  for (let i = 0; i < w; i++) {
+    const c = radarRamp(stops, i / (w - 1));
+    ctx.fillStyle = `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+    ctx.fillRect(x + i, y, 1, h);
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.font = '9px system-ui, sans-serif';
+  ctx.fillText(kind + ' 弱', x, y - 3);
+  ctx.textAlign = 'right';
+  ctx.fillText('強', x + w, y - 3);
+  ctx.textAlign = 'left';
+
+  // 固定プリセットのときは全域おなじ天気になる。何も出ない/一面が塗られる理由を書いておく。
+  // 縮尺と重ならないよう上の隅に出す（焼き付け中の表示とは入れ替わりで出るので衝突しない）。
+  if (EnvState.weather.presetId !== 'auto' && !_minimapBakeJob) {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, 138, 14);
+    ctx.fillStyle = '#cfe3ff';
+    ctx.fillText('天候を固定中：全域おなじ', 5, 10);
   }
 }
 
@@ -136,6 +293,8 @@ function updateMinimap() {
       if (want.span === WORLD_SIZE && _minimapWorldCache) {
         _minimapBase = _minimapWorldCache.canvas;
         _minimapBaseView = _minimapWorldCache.view;
+        _radarClimate = _minimapWorldCache.climate;
+        _radarAt = 0;
       } else {
         startMinimapBake(want);
       }
@@ -146,6 +305,9 @@ function updateMinimap() {
   const view = _minimapBaseView;
   const ctx = _minimapCtx;
   ctx.drawImage(_minimapBase, 0, 0);
+
+  // 降水は地形の上・記号の下に重ねる（街や空港がレーダーで隠れないように）
+  drawMinimapRadar(ctx, view);
 
   const zoomedIn = view.span < WORLD_SIZE * 0.5;
   const margin = view.span * 0.55;
@@ -212,6 +374,8 @@ function updateMinimap() {
   ctx.fillStyle = 'rgba(255,255,255,0.9)';
   ctx.font = '10px system-ui, sans-serif';
   ctx.fillText(`${Math.round(barM / 1000).toLocaleString()} km`, 10, MINIMAP_SIZE - 14);
+
+  drawMinimapRadarLegend(ctx);
 
   // 焼き付け中はその旨を出す（固まったように見えないように）
   if (_minimapBakeJob) {

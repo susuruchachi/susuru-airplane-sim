@@ -272,32 +272,48 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
     return WX.deriveWeather(W.worldWeatherFieldAt(x, z, hours), x, z, h, { climate: true });
   };
 
-  // 1) 陸の上での天気の内訳。
-  //    ある一瞬だけを見ると偏るので、1日ぶんの何時刻かをまとめて数える。
+  // 1) 天気の内訳。ある一瞬だけを見ると偏るので、1日ぶんの何時刻かをまとめて数える。
+  //    陸と海を分けて見るのが大事。陸は乾燥で雨が抑えられるが海は抑えが効かないので、
+  //    陸だけ見て調整すると、海の上だけ土砂降りだらけになる（ミニマップのレーダーで発覚した）。
   const N = 120;
   const HOURS = [0, 7, 15, 23];
-  const bins = {};
-  let land = 0;
+  const bins = { land: {}, sea: {} };
+  const total = { land: 0, sea: 0 };
+  const heavy = { land: 0, sea: 0 };
   for (let i = 0; i < N; i++) {
     for (let j = 0; j < N; j++) {
       const x = -W.WORLD_HALF + (i + 0.5) * (W.WORLD_SIZE / N);
       const z = -W.WORLD_HALF + (j + 0.5) * (W.WORLD_SIZE / N);
-      if (W.worldHeightAt(x, z) <= 0) continue;
+      const kind = W.worldHeightAt(x, z) > 0 ? 'land' : 'sea';
       for (const hr of HOURS) {
-        land++;
-        const label = WX.weatherLabel(auto(x, z, hr));
-        bins[label] = (bins[label] || 0) + 1;
+        const w = auto(x, z, hr);
+        total[kind]++;
+        if (w.precipRate > 0.7) heavy[kind]++;
+        const label = WX.weatherLabel(w);
+        bins[kind][label] = (bins[kind][label] || 0) + 1;
       }
     }
   }
-  const pct = (k) => (((bins[k] || 0) / land) * 100).toFixed(0) + '%';
-  console.log('[  --  ] 陸の天気: ' + Object.keys(bins).map((k) => `${k}${pct(k)}`).join(' '));
-  const fine = ((bins['快晴'] || 0) + (bins['晴れ'] || 0)) / land;
-  const wet = ((bins['雨'] || 0) + (bins['小雨'] || 0) + (bins['雷雨'] || 0)
-             + (bins['雪'] || 0) + (bins['小雪'] || 0) + (bins['吹雪'] || 0)) / land;
-  check(fine > 0.35 && fine < 0.85, '晴れている土地がほどよくある', (fine * 100).toFixed(0) + '%');
-  check(wet > 0.05 && wet < 0.40, '降っている土地がほどよくある', (wet * 100).toFixed(0) + '%');
-  check(Object.keys(bins).length >= 4, '天気の種類が出そろっている', Object.keys(bins).join('/'));
+  const WET_LABELS = ['雨', '小雨', '雷雨', '雪', '小雪', '吹雪'];
+  for (const kind of ['land', 'sea']) {
+    const b = bins[kind], n = total[kind];
+    const pct = (k) => (((b[k] || 0) / n) * 100).toFixed(0) + '%';
+    const name = kind === 'land' ? '陸' : '海';
+    console.log(`[  --  ] ${name}の天気: ` + Object.keys(b).sort().map((k) => `${k}${pct(k)}`).join(' ')
+      + `  強い雨${((heavy[kind] / n) * 100).toFixed(0)}%`);
+
+    const fine = ((b['快晴'] || 0) + (b['晴れ'] || 0)) / n;
+    const wet = WET_LABELS.reduce((s, k) => s + (b[k] || 0), 0) / n;
+    check(fine > 0.25 && fine < 0.85, `${name}に晴れている所がほどよくある`, (fine * 100).toFixed(0) + '%');
+    check(wet > 0.05 && wet < 0.40, `${name}に降っている所がほどよくある`, (wet * 100).toFixed(0) + '%');
+    // 強い雨は「たまにある」もの。ここが2割にもなると、レーダーが一面まっ赤になる。
+    check(heavy[kind] / n < 0.10, `${name}の強い雨がまれである`, ((heavy[kind] / n) * 100).toFixed(0) + '%');
+    check(Object.keys(b).length >= 4, `${name}の天気の種類が出そろっている`, Object.keys(b).join('/'));
+  }
+  // 海のほうが陸より湿っている（乾燥した内陸ほど降りにくい、が効いているか）
+  const wetOf = (k) => WET_LABELS.reduce((s, l) => s + (bins[k][l] || 0), 0) / total[k];
+  check(wetOf('sea') > wetOf('land'), '海のほうが陸より降っている',
+    `海${(wetOf('sea') * 100).toFixed(0)}% > 陸${(wetOf('land') * 100).toFixed(0)}%`);
 
   // 2) 場所で変わること：1,500km離れた2点の天気が、そこそこの割合で食い違う
   let differ = 0, pairs = 0;

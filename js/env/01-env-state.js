@@ -95,6 +95,7 @@ const EnvState = {
     previewAltitudeM: 0,     // 「高度による空の色の変化」のプレビュー用（機体が無いのでスライダーで代用）
     labelsVisible: true,     // 国名・都市名・空港コードのラベル表示
     treesVisible: true,      // 樹木の表示
+    radarVisible: false,     // ミニマップに気象レーダー（降水）を重ねるか
     windFromWeather: true,   // 風速を天候に任せるか（風向はいつでも手動）
   },
 };
