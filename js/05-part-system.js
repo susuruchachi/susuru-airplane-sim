@@ -529,6 +529,8 @@ function selectPart(id) {
   State.selectedPartId = id;
   if (id !== null) deselectCg();
   const part = getSelectedPart();
+  // ミラー連動の相方は「動かす前の位置」でしか正しく判定できないので、選択したこの時点で覚えておく
+  if (typeof rememberMirrorTwin === 'function') rememberMirrorTwin(part);
   if (part && part.gizmo) {
     State.transformControls.attach(part.gizmo);
     document.getElementById('gizmoModeBar').style.display = 'flex';
@@ -556,6 +558,8 @@ function syncPartFromGizmo(part) {
   part.scale.x = part.gizmo.scale.x;
   part.scale.y = part.gizmo.scale.y;
   part.scale.z = part.gizmo.scale.z;
+  // 左右ミラー連動（エンジンのみ）。ギズモでドラッグしたときも相方が付いてくるようにする
+  if (typeof syncMirrorTwinIfLinked === 'function') syncMirrorTwinIfLinked(part);
 }
 
 function applyPartToGizmo(part) {

@@ -278,6 +278,8 @@ function renderInspector() {
     <div class="row3">
       ${xyzFieldsHtml('pos', part.position)}
     </div>
+    ${foreAftSliderHtml(part)}
+    ${mirrorLinkRowHtml(part)}
 
     <div class="subgroup-title" style="margin-top:14px;">回転（度）</div>
     <div class="row3">
@@ -301,13 +303,202 @@ function renderInspector() {
     renderPartList();
   });
 
-  bindXyzFields('pos', part.position, () => applyPartToGizmo(part));
-  bindXyzFields('rot', part.rotation, () => applyPartToGizmo(part));
-  bindXyzFields('scl', part.scale, () => applyPartToGizmo(part));
+  bindXyzFields('pos', part.position, () => {
+    applyPartToGizmo(part);
+    syncMirrorTwinIfLinked(part);
+    refreshForeAftSlider(part);
+    refreshVtolReadout();
+  });
+  bindXyzFields('rot', part.rotation, () => { applyPartToGizmo(part); syncMirrorTwinIfLinked(part); });
+  bindXyzFields('scl', part.scale, () => { applyPartToGizmo(part); syncMirrorTwinIfLinked(part); });
+  bindForeAftSlider(part);
+  bindMirrorLinkRow(part);
 
   renderTypeSpecificFields(part);
 
   document.getElementById('btnDeletePart').addEventListener('click', () => removePart(part.id));
+}
+
+// ── 前後（Z）スライダー ────────────────────────────────
+// 位置のXYZ数値欄は step=0.05 なので、数十mある機体では前後位置を大きく動かすのに
+// スピナーを何百回も押すことになる。機体の前後範囲いっぱいを一発で掴めるスライダーを
+// 併設して、粗い位置決めはスライダー、詰めは数値欄、という使い分けができるようにする。
+function foreAftSliderHtml(part) {
+  const range = modelZRange();
+  if (!range) return '';
+  const step = modelZStep();
+  return `
+    <div class="field" style="margin-top:10px;">
+      <label>前後位置（Z）— 機首 ◀ ▶ 機尾</label>
+      <input type="range" id="f_posz_slider"
+             min="${range.min.toFixed(3)}" max="${range.max.toFixed(3)}" step="${step}"
+             value="${part.position.z.toFixed(3)}" style="width:100%;">
+    </div>
+  `;
+}
+
+function bindForeAftSlider(part) {
+  const slider = document.getElementById('f_posz_slider');
+  if (!slider) return;
+  // input（ドラッグ中も連続）で反映する。フォーム全体は再描画せず、
+  // 数値欄とバランス表示だけを書き換える（入力フォーカスを奪わないため）
+  slider.addEventListener('input', () => {
+    const v = parseFloat(slider.value);
+    if (isNaN(v)) return;
+    part.position.z = v;
+    applyPartToGizmo(part);
+    syncMirrorTwinIfLinked(part);
+    const zInput = document.getElementById('f_pos_z');
+    if (zInput && document.activeElement !== zInput) zInput.value = v.toFixed(3);
+    refreshVtolReadout();
+  });
+}
+
+// スライダーのつまみを現在のZに合わせ直す（数値欄やボタンで動かしたとき用）
+function refreshForeAftSlider(part) {
+  const slider = document.getElementById('f_posz_slider');
+  if (!slider || document.activeElement === slider) return;
+  slider.value = part.position.z.toFixed(3);
+}
+
+// ── 左右ミラー連動 ────────────────────────────────
+// ミラーで複製したエンジンは独立したパーツなので、片方を動かしても相方は残る。
+// VTOLエンジンの前後合わせでは左右を必ず揃えたいので、連動のON/OFFをここに出す。
+// 対象はエンジンのみ（翼は4頂点の形状編集が別経路のため、位置だけ連動させると
+// かえって形が食い違う）。
+function mirrorLinkRowHtml(part) {
+  if (!part || part.type !== 'engine') return '';
+  const twin = findMirrorTwinEngine(part);
+  const loose = twin ? null : findLooseMirrorCandidateEngine(part);
+
+  const status = twin
+    ? `<span style="color:var(--accent);">連動中: ${escapeHtml(twin.name)}</span>`
+    : loose
+      ? `<span style="color:var(--warn);">左右がズレています（${escapeHtml(loose.name)}）</span>`
+      : `<span class="hint" style="margin:0;">左右対称の相方なし</span>`;
+
+  return `
+    <div class="field" style="margin-top:10px;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="fMirrorLink" ${State.mirrorLinkEnabled ? 'checked' : ''} style="width:auto;margin:0;">
+        <span>左右ミラー連動</span>
+      </label>
+      <div class="hint" style="margin-top:4px;">${status}</div>
+      ${loose ? '<button class="btn-danger-outline" id="btnSymmetrizePair" style="margin-top:8px;color:var(--accent);border-color:var(--accent-dim);">左右対称に揃える</button>' : ''}
+    </div>
+  `;
+}
+
+function bindMirrorLinkRow(part) {
+  const cb = document.getElementById('fMirrorLink');
+  if (cb) {
+    cb.addEventListener('change', (e) => {
+      State.mirrorLinkEnabled = e.target.checked;
+      // ONに戻したときは、今の位置で相方を取り直す
+      rememberMirrorTwin(part);
+      renderInspector();
+    });
+  }
+  const btn = document.getElementById('btnSymmetrizePair');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      if (symmetrizeEnginePair(part.id)) renderInspector();
+    });
+  }
+}
+
+// ── VTOL（垂直推力）バランス欄 ────────────────────────
+// 回転軸をY（＝上向き推力）にしたエンジンを選んでいるときだけ出す。
+// 「今どれだけズレているか」と「合わせるボタン」を一箇所にまとめ、
+// 前後位置合わせを数値を見ながら決められるようにする。
+function vtolSectionHtml(part) {
+  const solvedZ = solveBalanceZForEnginePair(part);
+  const range = modelZRange();
+  const outOfRange = solvedZ !== null && isFinite(solvedZ) && range && (solvedZ < range.min || solvedZ > range.max);
+  const twin = findMirrorTwinEngineBefore(part);
+
+  const pairLabel = twin ? 'この左右ペア（2基）' : 'このエンジン（1基）';
+  const solvedLine = (solvedZ === null || !isFinite(solvedZ))
+    ? '<div class="hint" style="color:var(--warn);">このエンジンの推力が0のため、前後位置では釣り合わせられません。</div>'
+    : `<div class="hint">${pairLabel}を <b>Z = ${solvedZ.toFixed(3)}</b> に置くと、全体の推力重心が重心に一致します。`
+      + `${outOfRange ? ' <span style="color:var(--warn);">（機体の外側です）</span>' : ''}</div>`;
+
+  return `
+      <div class="divider"></div>
+      <div class="subgroup-title">VTOL（垂直推力）バランス</div>
+      <div class="hint" style="margin-bottom:8px;">
+        垂直離陸中に機体が前後に傾かないためには、リフトエンジンの推力を重みにした
+        前後位置の平均（推力重心）が、重心の真下に来ている必要があります。
+      </div>
+      <div id="vtolReadout">${vtolReadoutHtml()}</div>
+      <div class="divider"></div>
+      ${solvedLine}
+      <button class="btn-danger-outline" id="btnVtolBalancePair"
+              style="margin-top:8px;color:var(--accent);border-color:var(--accent-dim);"
+              ${(solvedZ === null || !isFinite(solvedZ)) ? 'disabled' : ''}>
+        ${pairLabel}を動かして釣り合わせる
+      </button>
+      <div class="hint" style="margin-top:10px;">他のリフトエンジンは動かさず、選択中のペアだけを前後に移動します。</div>
+      <button class="btn-danger-outline" id="btnVtolBalanceAll"
+              style="margin-top:8px;color:var(--accent);border-color:var(--accent-dim);">
+        リフトエンジン全体を前後に寄せて釣り合わせる
+      </button>
+      <div class="hint" style="margin-top:10px;">前後の間隔は保ったまま、全リフトエンジンをズレの分だけまとめてスライドします。</div>
+  `;
+}
+
+function bindVtolSection(part) {
+  const btnPair = document.getElementById('btnVtolBalancePair');
+  if (btnPair) {
+    btnPair.addEventListener('click', () => {
+      if (balanceVtolWithSelectedPair(part.id)) renderInspector();
+    });
+  }
+  const btnAll = document.getElementById('btnVtolBalanceAll');
+  if (btnAll) {
+    btnAll.addEventListener('click', () => {
+      if (balanceVtolByShiftingAll()) renderInspector();
+    });
+  }
+}
+
+// ── VTOLバランス表示 ────────────────────────────────
+// リフトエンジンの推力重心が重心からどれだけ前後にズレているかを常時表示する。
+// 数値が見えないと「前後の調整」が当てずっぽうになるため、これが調整の要になる。
+function vtolReadoutHtml() {
+  const b = computeVtolBalance();
+  if (b.count === 0) {
+    return '<div class="hint">回転軸をYにしたエンジンがまだありません。</div>';
+  }
+  if (b.centroidZ === null) {
+    return '<div class="hint" style="color:var(--warn);">リフトエンジンの推力が全て0です。最大推力を設定してください。</div>';
+  }
+
+  const tol = vtolBalanceTolerance();
+  const balanced = Math.abs(b.offsetZ) <= tol;
+  const dirLabel = b.offsetZ > 0 ? '機尾寄り（ホバリング時に機首下げ）' : '機首寄り（ホバリング時に機首上げ）';
+  const offsetColor = balanced ? 'var(--accent)' : 'var(--warn)';
+
+  const hoverLine = b.hoverRatio === null
+    ? '<div class="hint">機体重量が未設定のため、ホバリング余裕は計算できません。</div>'
+    : `<div class="hint">ホバリング余裕：<b style="color:${b.hoverRatio < 1 ? 'var(--warn)' : 'var(--accent)'}">${b.hoverRatio.toFixed(2)} 倍</b>`
+      + `（合計推力 ${Math.round(b.totalThrust).toLocaleString()} kgf ÷ 機体重量 ${Math.round(b.weightKg).toLocaleString()} kg）`
+      + `${b.hoverRatio < 1 ? ' — 自重を支えられません' : ''}</div>`;
+
+  return `
+    <div class="hint">リフトエンジン：<b>${b.count} 基</b>／推力重心 Z = <b>${b.centroidZ.toFixed(3)}</b>／重心 Z = <b>${b.cgZ.toFixed(3)}</b></div>
+    <div class="hint">前後のズレ：<b style="color:${offsetColor}">${b.offsetZ >= 0 ? '+' : ''}${b.offsetZ.toFixed(3)} m</b>
+      ${balanced ? '（釣り合っています）' : `— ${dirLabel}`}</div>
+    ${balanced ? '' : `<div class="hint">ピッチングモーメント：約 ${Math.round(Math.abs(b.pitchMomentKgfM)).toLocaleString()} kgf·m</div>`}
+    ${hoverLine}
+  `;
+}
+
+// バランス表示だけを差し替える（スライダーのドラッグ中に毎フレーム呼ぶため、
+// フォーム全体は再描画しない）
+function refreshVtolReadout() {
+  const el = document.getElementById('vtolReadout');
+  if (el) el.innerHTML = vtolReadoutHtml();
 }
 
 function xyzFieldsHtml(prefix, vec) {
@@ -373,24 +564,28 @@ function renderTypeSpecificFields(part) {
         <input type="text" inputmode="decimal" id="fThrust" value="${part.props.thrustKgf}">
       </div>
       <div class="field">
-        <label>回転軸（プロペラ/ファン）</label>
+        <label>回転軸（プロペラ/ファン）＝推力の向き</label>
         <select id="fSpinAxis">
-          <option value="x" ${part.props.spinAxis === 'x' ? 'selected' : ''}>X軸</option>
-          <option value="y" ${part.props.spinAxis === 'y' ? 'selected' : ''}>Y軸</option>
-          <option value="z" ${part.props.spinAxis === 'z' ? 'selected' : ''}>Z軸（前後方向・推奨）</option>
+          <option value="x" ${part.props.spinAxis === 'x' ? 'selected' : ''}>X軸（左右向き）</option>
+          <option value="y" ${part.props.spinAxis === 'y' ? 'selected' : ''}>Y軸（上下向き・垂直離着陸／リフト用）</option>
+          <option value="z" ${part.props.spinAxis === 'z' ? 'selected' : ''}>Z軸（前後方向・推進用・推奨）</option>
         </select>
       </div>
       <div class="hint">位置は推力の作用点（機体重心からのオフセット）として飛行モデルに使用されます。</div>
+      ${isLiftEngine(part) ? vtolSectionHtml(part) : ''}
       <div class="divider"></div>
       <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
     `;
     document.getElementById('fThrust').addEventListener('change', (e) => {
       part.props.thrustKgf = parseFloat(e.target.value) || 0;
+      refreshVtolReadout(); // 推力を変えると推力重心も動くため
     });
     document.getElementById('fSpinAxis').addEventListener('change', (e) => {
       part.props.spinAxis = e.target.value;
+      renderInspector(); // Y軸に変えたらVTOLバランス欄を出す（外したら消す）ため再描画
     });
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
+    bindVtolSection(part);
 
   } else if (part.type === 'wing') {
     const center = wingCornersCenter(part.props.corners);
