@@ -19,6 +19,7 @@ const LABEL_KINDS = {
   range: { fadeStart: 150000, fadeEnd: 420000, minOpacity: 0, screenPx: 17, fontPx: 40 },
   city: { fadeStart: 70000, fadeEnd: 240000, minOpacity: 0, screenPx: 17, fontPx: 40 },
   airport: { fadeStart: 45000, fadeEnd: 160000, minOpacity: 0, screenPx: 16, fontPx: 40 },
+  water: { fadeStart: 60000, fadeEnd: 200000, minOpacity: 0, screenPx: 15, fontPx: 38 },
 };
 
 // 都市IDから決まる擬似乱数（世界側と同じ実装を使う）
@@ -249,6 +250,16 @@ function initPlaceLabels() {
 
   for (const ap of WORLD_AIRPORTS) {
     add('airport', ap.id, '#7fd4ff', ap.x, ap.elevationM + 620, ap.z);
+  }
+
+  for (const lake of WORLD_LAKES) {
+    add('water', lake.nameLatin, '#9fd8ee', lake.x, lake.level + 500, lake.z);
+  }
+
+  // 川の名前は経路の真ん中に置く
+  for (const river of WORLD_RIVERS) {
+    const m = river.points[Math.floor(river.points.length / 2)];
+    add('water', river.nameLatin, '#9fd8ee', m.x, m.h + 500, m.z);
   }
 
   EnvState.labelGroup.visible = EnvState.env.labelsVisible !== false;

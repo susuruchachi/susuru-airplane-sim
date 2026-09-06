@@ -113,6 +113,7 @@ function updateSkyForSunDirection(sunDir, elevationDeg) {
   if (typeof tintClouds === 'function') tintClouds(dayFactor, warmth);
   if (typeof updateAirportForDaylight === 'function') updateAirportForDaylight(dayFactor);
   if (typeof updateSeaForDaylight === 'function') updateSeaForDaylight(dayFactor, warmth);
+  if (typeof updateWaterForDaylight === 'function') updateWaterForDaylight(dayFactor, warmth);
   if (typeof updatePlacesForDaylight === 'function') updatePlacesForDaylight(dayFactor);
 }
 

@@ -377,9 +377,10 @@ function refreshTerrainTiles(immediate) {
     }
   }
 
-  // 街と空港も同じ判断で出し入れする（判定のタイミングを揃えておく）
+  // 街・空港・水面も同じ判断で出し入れする（判定のタイミングを揃えておく）
   if (typeof refreshCities === 'function') refreshCities();
   if (typeof refreshAirports === 'function') refreshAirports();
+  if (typeof refreshWater === 'function') refreshWater();
 
   // 近いタイルから作る（見ている場所ほど早く出てほしい）
   work.sort((a, b) => a.sortDist - b.sortDist);

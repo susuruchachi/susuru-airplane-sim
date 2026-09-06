@@ -128,6 +128,64 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   summary('街と十分離れた空港', apart, W.WORLD_AIRPORTS.length);
 }
 
+// --- 川 ---
+// 川は「河口から谷を遡って」引いている。下流へ向かって必ず下がること、
+// 全部が海に届くこと、滑走路を突っ切っていないことを見る。
+{
+  console.log(`\n川 ${W.WORLD_RIVERS.length} 本 / 湖 ${W.WORLD_LAKES.length}`);
+  let toSea = 0, monotone = 0, clearOfAirports = 0;
+  for (const r of W.WORLD_RIVERS) {
+    if (r.points[r.points.length - 1].h <= 25) toSea++;
+    else check(false, `${r.nameLatin} が海に届く`, `河口の標高 ${r.points[r.points.length - 1].h.toFixed(0)}m`);
+
+    let rises = 0;
+    for (let i = 1; i < r.points.length; i++) if (r.points[i].h > r.points[i - 1].h + 0.001) rises++;
+    if (rises === 0) monotone++;
+    else check(false, `${r.nameLatin} の川床が下り一方`, `${rises}区間が上っている`);
+
+    let hits = 0;
+    for (const p of r.points) {
+      for (const a of W.WORLD_AIRPORTS) {
+        if (Math.hypot(p.x - a.x, p.z - a.z) < a.flatInnerR) { hits++; break; }
+      }
+    }
+    if (hits === 0) clearOfAirports++;
+    else check(false, `${r.nameLatin} が空港を通っていない`, `${hits}点が滑走路の平地の中`);
+  }
+  summary('海に届く川', toSea, W.WORLD_RIVERS.length);
+  summary('川床が下り一方の川', monotone, W.WORLD_RIVERS.length);
+  summary('空港を通らない川', clearOfAirports, W.WORLD_RIVERS.length);
+
+  const lens = W.WORLD_RIVERS.map((r) => r.lengthM / 1000).sort((a, b) => b - a);
+  if (lens.length) {
+    console.log(`[  --  ] 川の長さ: 最長${lens[0].toFixed(0)}km 中央${lens[Math.floor(lens.length / 2)].toFixed(0)}km 最短${lens[lens.length - 1].toFixed(0)}km`);
+  }
+  check(W.WORLD_RIVERS.length >= 20, '川が十分な数ある', String(W.WORLD_RIVERS.length));
+}
+
+// --- 湖 ---
+{
+  let deep = 0, clear = 0;
+  for (const l of W.WORLD_LAKES) {
+    // 中心の地形が水面より下＝ちゃんと窪地になっている
+    if (W.worldHeightAt(l.x, l.z) < l.level - 1) deep++;
+    else check(false, `${l.nameLatin} が窪地になっている`, `地形 ${W.worldHeightAt(l.x, l.z).toFixed(0)}m / 水面 ${l.level.toFixed(0)}m`);
+
+    let clash = false;
+    for (const a of W.WORLD_AIRPORTS) {
+      if (Math.hypot(a.x - l.x, a.z - l.z) < a.flatOuterR + l.outerR) { clash = true; break; }
+    }
+    for (const c of W.WORLD_CITIES) {
+      if (Math.hypot(c.x - l.x, c.z - l.z) < c.flatOuterR + l.outerR) { clash = true; break; }
+    }
+    if (!clash) clear++;
+    else check(false, `${l.nameLatin} が街や空港と重なっていない`);
+  }
+  summary('窪地になっている湖', deep, W.WORLD_LAKES.length);
+  summary('街や空港と重ならない湖', clear, W.WORLD_LAKES.length);
+  check(W.WORLD_LAKES.length >= 15, '湖が十分な数ある', String(W.WORLD_LAKES.length));
+}
+
 // --- 山脈 ---
 {
   let ok = 0;

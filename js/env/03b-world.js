@@ -288,18 +288,23 @@ function worldMakePlaceName(styleId, rand, used) {
 
 const WORLD_CITIES = [];
 const WORLD_AIRPORTS = [];
+const WORLD_LAKES = [];
+const WORLD_RIVERS = [];
 const WORLD_LAND_ANCHORS = [];
 
 // 高さ関数の「段階」。前の段階の地形を見て次の地物を配置するので、
 // 準備が終わるまでは各段階を切っておく（切らないと自分自身を参照してしまう）。
 let _worldCitiesReady = false;
 let _worldAirportsReady = false;
+let _worldWaterReady = false;
 
 let _worldAnchorGrid = null;
 let _worldCityGrid = null;
 let _worldAirportGrid = null;
 let _worldLandmassGrid = null;
 let _worldRangeGrid = null;
+let _worldLakeGrid = null;
+let _worldRiverGrid = null;
 
 // 都市の広がり。builtRadiusM は建物が建つ範囲（js/env/03d-places.js もこれを使う）、
 // urbanR は市街地として地表色を変える範囲。
@@ -446,6 +451,14 @@ function worldHeightAt(x, z) {
         h += (c.groundY - h) * w * CITY_FLATTEN_STRENGTH;
       }
     }
+  }
+
+  // 湖と川を地形に刻む。どちらも「元の地形より下げる」だけ（min）なので、
+  // 街の均しのあとに掛けても街が水没することはなく、谷はきちんと残る。
+  // 空港の均しはこのあとに来るので、滑走路の平面が最後に必ず勝つ。
+  if (_worldWaterReady) {
+    h = worldCarveLakes(x, z, h);
+    h = worldCarveRivers(x, z, h);
   }
 
   if (_worldAirportsReady) {
@@ -639,6 +652,392 @@ function worldGenerateAirports() {
 }
 
 // ============================================================================
+// 9b. 湖と川
+//
+// 湖：内陸の平らな窪地を探して椀状に掘り、水面は掘る前の地面の高さに置く。
+// 川：山の高い所を源流に、ひたすら低い方へ歩かせて海か湖まで下ろす。
+//     そのあと通り道に沿って谷を刻む。
+//     谷を刻んでから歩かせると自分の掘った谷に落ちるので、
+//     経路は必ず「刻む前の地形」の上で決める。
+// ============================================================================
+
+const LAKE_MIN_R = 2200;
+const LAKE_MAX_R = 13000;
+
+// 川の断面の決めごと。描画側（03f-water.js）もこの値を使うので、
+// ここを直せば地形の刻み方と水面の張り方が同時に付いてくる。
+//   川床      = 経路の高さ - RIVER_BED_OFFSET_M
+//   水面      = 川床 + RIVER_WATER_DEPTH_M
+//   岸までの幅 = halfWidth + RIVER_WATER_DEPTH_M / RIVER_VALLEY_SLOPE
+//
+// 谷の傾きを緩くしてあるのは見た目のためだけではない。急な谷にすると幅が1km程度になり、
+// 数十km先の粗いLOD（1タイル24分割＝1.2km間隔）では谷そのものが再現されず、
+// 地形が水面を突き抜けて川がちぎれて見える。
+// （岸＝谷の斜面が水面の高さに達するところ。ここを合わせないと
+//   水面が地面に埋まったり、逆に地面が水面から顔を出したりする）
+const RIVER_VALLEY_SLOPE = 0.03;
+const RIVER_BED_OFFSET_M = 8;
+const RIVER_WATER_DEPTH_M = 5;
+const RIVER_MAX_INFLUENCE = 2400;
+const RIVER_STEP_M = 1500;
+const RIVER_MAX_STEPS = 420;
+const RIVER_MIN_LENGTH_M = 25000;
+
+// 経路探索で使う「なだらかにした地形」。
+// 山地の尾根ノイズは1〜3km規模の小さな窪地をいくらでも作るので、
+// 素の地形を見て歩かせると川は数kmで穴にはまって止まる。
+// 大陸規模の傾きだけが残るくらい強くならしてから歩かせる。
+const RIVER_SMOOTH_R = 6500;
+
+function worldSmoothHeightAt(x, z) {
+  const d = RIVER_SMOOTH_R;
+  return (worldBaseHeightAt(x, z)
+    + worldBaseHeightAt(x + d, z) + worldBaseHeightAt(x - d, z)
+    + worldBaseHeightAt(x, z + d) + worldBaseHeightAt(x, z - d)) / 5;
+}
+
+// ならしても残る窪地は、少しだけ登って越えることを許す（実際の川も鞍部を越える）。
+// 越えられる高さと回数に上限を置いて、際限なく山を登らないようにする。
+const RIVER_MAX_CLIMB_M = 45;
+const RIVER_CLIMB_BUDGET = 80;
+
+// --- 湖 ---------------------------------------------------------------------
+
+function worldGenerateLakes() {
+  WORLD_LAKES.length = 0;
+  const usedNames = new Set();
+
+  for (const country of WORLD_COUNTRIES) {
+    const rand = worldRng('lake:' + country.id);
+    const want = 2 + Math.round(country.radius / 190000);
+    let placed = 0;
+
+    for (let attempt = 0; attempt < want * 120 && placed < want; attempt++) {
+      const ang = rand() * Math.PI * 2;
+      const dist = Math.sqrt(rand()) * country.radius;
+      const x = Math.round(country.cx + Math.cos(ang) * dist);
+      const z = Math.round(country.cz + Math.sin(ang) * dist);
+
+      const level = worldBaseHeightAt(x, z);
+      if (level < 25 || level > 1500) continue;
+
+      const outerR = LAKE_MIN_R + Math.pow(rand(), 1.7) * (LAKE_MAX_R - LAKE_MIN_R);
+      // 窪地でないと湖にならないので、周囲が平らなことを確かめる
+      if (worldLocalReliefAt(x, z, outerR, 5) > 320) continue;
+
+      // 街・空港・他の湖と重ならないこと
+      let clash = false;
+      for (const c of WORLD_CITIES) {
+        if (Math.hypot(c.x - x, c.z - z) < c.flatOuterR + outerR + 3000) { clash = true; break; }
+      }
+      if (!clash) for (const a of WORLD_AIRPORTS) {
+        if (Math.hypot(a.x - x, a.z - z) < a.flatOuterR + outerR + 3000) { clash = true; break; }
+      }
+      if (!clash) for (const l of WORLD_LAKES) {
+        if (Math.hypot(l.x - x, l.z - z) < l.outerR + outerR + 8000) { clash = true; break; }
+      }
+      if (clash) continue;
+
+      const nm = worldMakePlaceName(country.nameStyle, rand, usedNames);
+      WORLD_LAKES.push({
+        id: 'lake-' + country.id + '-' + nm.nameLatin.toLowerCase(),
+        name: nm.name + '湖', nameLatin: 'Lake ' + nm.nameLatin,
+        country: country.id,
+        x, z, level,
+        innerR: outerR * 0.45,
+        outerR,
+        depth: 14 + rand() * 55,
+        seed: nm.nameLatin,
+      });
+      placed++;
+    }
+  }
+}
+
+// 岸を真円にしないためのゆらぎ。中心からの距離を方位で伸び縮みさせる。
+function worldLakeWobble(lake, x, z) {
+  const a = Math.atan2(z - lake.z, x - lake.x);
+  return 0.78 + worldFbm(Math.cos(a) * 2.6 + lake.x * 1e-5, Math.sin(a) * 2.6 + lake.z * 1e-5, 3) * 0.5;
+}
+
+function worldCarveLakes(x, z, h) {
+  const lakes = _worldLakeGrid.at(x, z);
+  if (!lakes) return h;
+  for (let i = 0; i < lakes.length; i++) {
+    const l = lakes[i];
+    const dx = x - l.x, dz = z - l.z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 >= l.outerR * l.outerR) continue;
+    const d = Math.sqrt(d2) / worldLakeWobble(l, x, z);
+    if (d >= l.outerR) continue;
+    const t = worldSmooth01((l.outerR - d) / (l.outerR - l.innerR));
+    const bed = l.level - l.depth * t;
+    if (bed < h) h = bed;
+  }
+  return h;
+}
+
+// その地点が湖の中なら水面の高さを返す（湖の外なら null）
+function worldLakeAt(x, z) {
+  if (!_worldLakeGrid) return null;
+  const lakes = _worldLakeGrid.at(x, z);
+  if (!lakes) return null;
+  for (let i = 0; i < lakes.length; i++) {
+    const l = lakes[i];
+    const d = Math.hypot(x - l.x, z - l.z) / worldLakeWobble(l, x, z);
+    if (d < l.outerR && worldHeightAt(x, z) < l.level) return l;
+  }
+  return null;
+}
+
+// --- 川 ---------------------------------------------------------------------
+
+// 川は **河口から上流へ遡って** 引く。
+//
+// 源流から下らせると、大陸の内側にいくらでもある窪地にはまって海まで届かない
+// （尾根ノイズが大陸規模の傾きより強いので、下り一辺倒では抜けられない）。
+// 逆に海岸から登る場合、「いまいる高さより高い隣のうち、いちばん低いところ」を
+// 選び続ければ谷底を遡ることになり、行き止まりは山頂にしか無い。
+// つまり必ず海に届く川ができる。最後に順序をひっくり返して上流→河口の経路にする。
+function worldTraceRiverFromMouth(mx, mz) {
+  const back = [];
+  let x = mx, z = mz;
+  let walkH = worldSmoothHeightAt(x, z);
+  let dirX = 0, dirZ = 0;
+
+  for (let i = 0; i < RIVER_MAX_STEPS; i++) {
+    back.push({ x, z });
+
+    let best = null;
+    for (let a = 0; a < 8; a++) {
+      const ang = (a / 8) * Math.PI * 2;
+      const cx = Math.cos(ang), cz = Math.sin(ang);
+      const nx = x + cx * RIVER_STEP_M, nz = z + cz * RIVER_STEP_M;
+      const nh = worldSmoothHeightAt(nx, nz);
+      if (nh <= walkH + 0.5) continue; // 上流は必ず今より高い
+
+      // 慣性ぶんを引いて、まっすぐ遡るほど有利にする
+      let score = nh - (cx * dirX + cz * dirZ) * 22;
+      // 滑走路の真ん中を川が通ると破綻するので、空港の均し範囲は避ける
+      for (let k = 0; k < WORLD_AIRPORTS.length; k++) {
+        const ap = WORLD_AIRPORTS[k];
+        const dx = nx - ap.x, dz = nz - ap.z;
+        const r = ap.flatOuterR + 2000;
+        if (dx * dx + dz * dz < r * r) { score += 1e6; break; }
+      }
+      // 「高い隣のうち、いちばん低いところ」＝谷底を遡る
+      if (!best || score < best.score) best = { x: nx, z: nz, h: nh, score };
+    }
+
+    if (!best || best.score > 1e5) break; // 山頂に着いた（or 空港に囲まれた）
+    if (best.h - walkH > 300) break;      // 崖を登り始めたら源流とみなす
+
+    dirX = (best.x - x) / RIVER_STEP_M;
+    dirZ = (best.z - z) / RIVER_STEP_M;
+    x = best.x; z = best.z;
+    walkH = best.h;
+  }
+
+  // 上流→河口の順に直してから角を落とす
+  back.reverse();
+  const smooth = worldChaikinPath(back, 2);
+
+  // 川床の高さを入れる。上流から下流へ単調に下がり、
+  // かつその場の地形より上には出さない（谷底を通す）。
+  let bed = Infinity;
+  const pts = [];
+  for (let i = 0; i < smooth.length; i++) {
+    const p = smooth[i];
+    bed = Math.min(bed, worldBaseHeightAt(p.x, p.z));
+    pts.push({ x: p.x, z: p.z, h: bed });
+  }
+  return pts;
+}
+
+// 経路探索の途中で使う軽い湖判定（worldHeightAt を呼ばずに済ませる）
+function worldLakeGridHas(x, z, h) {
+  if (!_worldLakeGrid) return false;
+  const lakes = _worldLakeGrid.at(x, z);
+  if (!lakes) return false;
+  for (let i = 0; i < lakes.length; i++) {
+    const l = lakes[i];
+    if (Math.hypot(x - l.x, z - l.z) < l.outerR && h <= l.level + 30) return true;
+  }
+  return false;
+}
+
+// 経路の角を落とす（Chaikin）。8方向にしか進めないので折れ線は45°刻みになる。
+// 2回かけると点数が約4倍になり、川らしい滑らかな蛇行になる。
+function worldChaikinPath(pts, passes) {
+  let cur = pts;
+  for (let p = 0; p < passes; p++) {
+    const out = [cur[0]];
+    for (let i = 0; i < cur.length - 1; i++) {
+      const a = cur[i], b = cur[i + 1];
+      out.push({ x: a.x * 0.75 + b.x * 0.25, z: a.z * 0.75 + b.z * 0.25 });
+      out.push({ x: a.x * 0.25 + b.x * 0.75, z: a.z * 0.25 + b.z * 0.75 });
+    }
+    out.push(cur[cur.length - 1]);
+    cur = out;
+  }
+  return cur;
+}
+
+// 海岸線の上に河口の候補を探す
+function worldFindRiverMouth(country, rand) {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const ang = rand() * Math.PI * 2;
+    const dist = Math.sqrt(rand()) * country.radius;
+    const x = country.cx + Math.cos(ang) * dist;
+    const z = country.cz + Math.sin(ang) * dist;
+    const h = worldBaseHeightAt(x, z);
+    if (h < -60 || h > 25) continue; // 汀線の近くだけ
+
+    // まわりに陸がなければ（孤立した浅瀬なら）河口にしない
+    let land = 0;
+    for (let a = 0; a < 8; a++) {
+      const t = (a / 8) * Math.PI * 2;
+      if (worldBaseHeightAt(x + Math.cos(t) * 6000, z + Math.sin(t) * 6000) > 40) land++;
+    }
+    if (land < 2) continue;
+    return { x, z };
+  }
+  return null;
+}
+
+function worldGenerateRivers() {
+  WORLD_RIVERS.length = 0;
+  const usedNames = new Set();
+
+  for (const country of WORLD_COUNTRIES) {
+    const rand = worldRng('river:' + country.id);
+    const want = Math.max(3, Math.round(country.radius / 55000));
+    let placed = 0;
+
+    for (let attempt = 0; attempt < want * 12 && placed < want; attempt++) {
+      const mouth = worldFindRiverMouth(country, rand);
+      if (!mouth) continue;
+
+      // 河口どうしが近すぎると同じ川が二重に流れて見える
+      let clash = false;
+      for (const r of WORLD_RIVERS) {
+        const e = r.points[r.points.length - 1];
+        if (Math.hypot(e.x - mouth.x, e.z - mouth.z) < 55000) { clash = true; break; }
+      }
+      if (clash) continue;
+
+      const pts = worldTraceRiverFromMouth(mouth.x, mouth.z);
+      let length = 0;
+      for (let i = 1; i < pts.length; i++) length += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z);
+      if (length < RIVER_MIN_LENGTH_M) continue;
+
+      const nm = worldMakePlaceName(country.nameStyle, rand, usedNames);
+      WORLD_RIVERS.push({
+        id: 'river-' + country.id + '-' + nm.nameLatin.toLowerCase(),
+        name: nm.name + '川', nameLatin: nm.nameLatin + ' River',
+        country: country.id, points: pts, lengthM: length,
+        sourceHeightM: pts[0].h,
+      });
+      placed++;
+    }
+  }
+}
+
+// 海まで届かず内陸で止まった川の終端に湖を置く。
+// 大陸の内側には必ず「そこから先へ下れない窪地」が残るので、
+// 川をそこで唐突に切るのではなく、内陸湖に注ぐ形にする（実在の内陸河川と同じ）。
+function worldAddTerminalLakes() {
+  for (const r of WORLD_RIVERS) {
+    const end = r.points[r.points.length - 1];
+    if (end.h <= 20) continue;                       // 海に着いている
+    if (worldLakeGridHas(end.x, end.z, end.h)) continue; // すでに湖に注いでいる
+
+    const outerR = worldClamp(1800 + r.lengthM * 0.035, 1800, 11000);
+
+    let clash = false;
+    for (const c of WORLD_CITIES) {
+      if (Math.hypot(c.x - end.x, c.z - end.z) < c.flatOuterR + outerR + 2000) { clash = true; break; }
+    }
+    if (!clash) for (const a of WORLD_AIRPORTS) {
+      if (Math.hypot(a.x - end.x, a.z - end.z) < a.flatOuterR + outerR + 2000) { clash = true; break; }
+    }
+    if (!clash) for (const l of WORLD_LAKES) {
+      if (Math.hypot(l.x - end.x, l.z - end.z) < l.outerR + outerR + 3000) { clash = true; break; }
+    }
+    if (clash) continue;
+
+    const country = worldCountryById(r.country);
+    WORLD_LAKES.push({
+      id: 'lake-end-' + r.id,
+      name: r.name.replace('川', '') + '湖',
+      nameLatin: 'Lake ' + r.nameLatin.replace(' River', ''),
+      country: r.country,
+      x: Math.round(end.x), z: Math.round(end.z),
+      level: end.h + 6,
+      innerR: outerR * 0.45,
+      outerR,
+      depth: 12 + Math.min(r.lengthM / 12000, 40),
+      seed: r.id,
+      fedByRiver: r.id,
+    });
+    void country;
+  }
+}
+
+function worldNearestCountryId(x, z) {
+  let best = null, bestD = Infinity;
+  for (const c of WORLD_COUNTRIES) {
+    const d = Math.hypot(x - c.cx, z - c.cz);
+    if (d < bestD) { bestD = d; best = c.id; }
+  }
+  return best;
+}
+
+// 点と線分の距離の二乗。t には線分上のどこに落ちたか（0〜1）が入る。
+const _worldSegT = { t: 0 };
+function worldPointSegDist2(px, pz, ax, az, bx, bz) {
+  const vx = bx - ax, vz = bz - az;
+  const wx = px - ax, wz = pz - az;
+  const len2 = vx * vx + vz * vz;
+  let t = len2 > 0 ? (wx * vx + wz * vz) / len2 : 0;
+  if (t < 0) t = 0; else if (t > 1) t = 1;
+  const dx = wx - vx * t, dz = wz - vz * t;
+  _worldSegT.t = t;
+  return dx * dx + dz * dz;
+}
+
+function worldCarveRivers(x, z, h) {
+  const segs = _worldRiverGrid.at(x, z);
+  if (!segs) return h;
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    const d2 = worldPointSegDist2(x, z, s.ax, s.az, s.bx, s.bz);
+    if (d2 >= RIVER_MAX_INFLUENCE * RIVER_MAX_INFLUENCE) continue;
+    const d = Math.sqrt(d2);
+    // 線分上のどこかで川床の高さが変わるので、その位置で補間する
+    const bed = s.ah + (s.bh - s.ah) * _worldSegT.t;
+    const target = d < s.halfWidth ? bed : bed + (d - s.halfWidth) * RIVER_VALLEY_SLOPE;
+    if (target < h) h = target;
+  }
+  return h;
+}
+
+// その地点が川の中なら水面の高さを返す（川の外なら null）
+function worldRiverAt(x, z) {
+  if (!_worldRiverGrid) return null;
+  const segs = _worldRiverGrid.at(x, z);
+  if (!segs) return null;
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    const d2 = worldPointSegDist2(x, z, s.ax, s.az, s.bx, s.bz);
+    if (d2 < s.halfWidth * s.halfWidth) {
+      return s.ah + (s.bh - s.ah) * _worldSegT.t;
+    }
+  }
+  return null;
+}
+
+// ============================================================================
 // 10. 検索ヘルパー
 // ============================================================================
 
@@ -692,7 +1091,41 @@ function initWorld() {
   // 2) 街から少し離れた平らな場所に空港を置く
   worldGenerateAirports();
 
-  // 3) 街と空港が海岸線ノイズで沈まないようアンカーを張る
+  // 3) 内陸の窪地に湖を置く（街・空港とは重ならない場所を選ぶ）
+  worldGenerateLakes();
+  _worldLakeGrid = makeWorldGrid(30000);
+  for (const l of WORLD_LAKES) _worldLakeGrid.insert(l.x, l.z, l.outerR, l);
+
+  // 4) 山から海（または湖）まで川を下ろす。
+  //    経路は「刻む前の地形」の上で決めること。谷を刻んでから歩かせると
+  //    自分の掘った谷に落ちて、そこから先へ進めなくなる。
+  worldGenerateRivers();
+
+  // 内陸で止まった川の終端に湖を足し、湖グリッドを作り直す
+  worldAddTerminalLakes();
+  _worldLakeGrid = makeWorldGrid(30000);
+  for (const l of WORLD_LAKES) _worldLakeGrid.insert(l.x, l.z, l.outerR, l);
+
+  _worldRiverGrid = makeWorldGrid(20000);
+  for (const r of WORLD_RIVERS) {
+    let acc = 0;
+    r.points[0].halfWidth = 12;
+    for (let i = 1; i < r.points.length; i++) {
+      const a = r.points[i - 1], b = r.points[i];
+      const segLen = Math.hypot(b.x - a.x, b.z - a.z);
+      // 下流ほど幅が広がる
+      const halfWidth = 12 + ((acc + segLen / 2) / r.lengthM) * 95;
+      b.halfWidth = halfWidth;
+      _worldRiverGrid.insert((a.x + b.x) / 2, (a.z + b.z) / 2, segLen / 2 + RIVER_MAX_INFLUENCE, {
+        ax: a.x, az: a.z, ah: a.h - RIVER_BED_OFFSET_M,
+        bx: b.x, bz: b.z, bh: b.h - RIVER_BED_OFFSET_M,
+        halfWidth,
+      });
+      acc += segLen;
+    }
+  }
+
+  // 5) 街と空港が海岸線ノイズで沈まないようアンカーを張る
   WORLD_LAND_ANCHORS.length = 0;
   for (const a of WORLD_AIRPORTS) {
     WORLD_LAND_ANCHORS.push({ x: a.x, z: a.z, r: Math.max(a.flatOuterR * 1.5, 22000) });
@@ -703,7 +1136,7 @@ function initWorld() {
   _worldAnchorGrid = makeWorldGrid(40000);
   for (const a of WORLD_LAND_ANCHORS) _worldAnchorGrid.insert(a.x, a.z, a.r, a);
 
-  // 4) 街の基準標高を「街を均す前の地形」から取ってから、街の均しを有効にする
+  // 6) 街の基準標高を「街を均す前の地形」から取ってから、街の均しを有効にする
   _worldCityGrid = makeWorldGrid(40000);
   for (const c of WORLD_CITIES) {
     c.groundY = worldHeightAt(c.x, c.z);
@@ -711,7 +1144,10 @@ function initWorld() {
   }
   _worldCitiesReady = true;
 
-  // 5) 空港の均しを有効にする（滑走路の平面が最後に勝つ）
+  // 7) 湖と川の刻み込みを有効にする（街の均しのあと、空港の均しの前）
+  _worldWaterReady = true;
+
+  // 8) 空港の均しを有効にする（滑走路の平面が最後に勝つ）
   _worldAirportGrid = makeWorldGrid(40000);
   for (const a of WORLD_AIRPORTS) _worldAirportGrid.insert(a.x, a.z, a.flatOuterR, a);
   _worldAirportsReady = true;
@@ -725,7 +1161,8 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     WORLD_SEED, WORLD_SIZE, WORLD_HALF,
     WORLD_LANDMASSES, WORLD_RANGES, WORLD_COUNTRIES, WORLD_CITIES, WORLD_AIRPORTS,
-    CITY_FLATTEN_STRENGTH,
+    WORLD_LAKES, WORLD_RIVERS, worldLakeAt, worldRiverAt,
+    CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
     initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt,
     worldTemperatureAt, worldDrynessAt, worldLocalReliefAt,
     worldNearestAirport, worldRegionAt, worldCountryById, worldCityById, worldAirportById,

@@ -31,6 +31,11 @@ const EnvState = {
   sea: null,
   seaNormalMap: null,
 
+  // 川と湖の水面（地形と同じくカメラの周りだけ作る）
+  waterGroup: null,
+  builtWater: null,     // Map(川/湖のid -> Mesh)
+  waterMaterial: null,
+
   // 都市。世界には130あるので、カメラの周りだけを建てて離れたら片付ける。
   cityGroup: null,
   builtCities: null,   // Map(都市id -> { city, buildings, lights })
