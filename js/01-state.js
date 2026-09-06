@@ -46,6 +46,17 @@ const State = {
   // UI
   gizmoMode: 'translate', // translate | rotate | scale
 
+  // 左右ミラー連動（エンジンのみ）。ONのとき、左右対称に置かれたエンジンの
+  // 片方を動かすと、もう片方も鏡像位置へ一緒に動く。
+  // ミラーで複製したエンジンは「別々のパーツ」なので、これが無いと
+  // VTOLエンジンの前後位置合わせのたびに左右2回ずつ同じ編集が必要になり、
+  // わずかな入力ミスで左右非対称になってしまう。
+  mirrorLinkEnabled: true,
+  // 連動対象の相方をパーツ選択時に覚えておくキャッシュ {partId, twinId}。
+  // 動かした後の座標から相方を探すと、1回動かした時点で相方と位置がズレて
+  // 見つからなくなり連動が切れてしまうため（詳細は05d-vtol-system.js）。
+  mirrorTwinCache: null,
+
   // 設定保存メタ
   configName: 'default',
 };
