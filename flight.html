@@ -134,15 +134,33 @@
       </div>
     </div>
 
-    <div class="section-title">雲</div>
+    <div class="section-title">天候</div>
     <div class="env-group">
-      <div class="env-row"><label>雲量</label><span id="envCloudCoverageReadout" class="val">45%</span></div>
-      <input type="range" id="envCloudCoverage" min="0" max="100" step="1">
+      <select id="envWeatherPreset"></select>
+      <div class="env-note" style="margin-top:6px;">
+        「自動」は場所と時間で天気が移り変わります。3,000km飛べば天気も変わります。
+      </div>
+      <div class="env-row" style="margin-top:10px;"><label>いまの天候</label><span id="envWeatherReadout" class="val">--</span></div>
+      <div class="env-row" style="margin-top:6px;"><label>視程</label><span id="envVisibilityReadout" class="val">--</span></div>
+      <div class="env-row" style="margin-top:6px;"><label>雲底</label><span id="envCloudBaseReadout" class="val">--</span></div>
+
+      <div id="envWeatherManual" style="display:none;">
+        <div class="env-row" style="margin-top:12px;"><label>湿り（雲量）</label><span id="envCloudCoverageReadout" class="val">35%</span></div>
+        <input type="range" id="envCloudCoverage" min="0" max="100" step="1">
+        <div class="env-row" style="margin-top:10px;"><label>荒れ具合</label><span id="envStorminessReadout" class="val">0%</span></div>
+        <input type="range" id="envStorminess" min="0" max="100" step="1">
+        <div class="env-row" style="margin-top:10px;"><label>霧</label><span id="envFogginessReadout" class="val">0%</span></div>
+        <input type="range" id="envFogginess" min="0" max="100" step="1">
+      </div>
     </div>
 
     <div class="section-title">風</div>
     <div class="env-group">
-      <div class="env-row"><label>風速</label><span id="envWindSpeedReadout" class="val">20 km/h</span></div>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="envWindFromWeather" checked>
+        <span>風速を天候に任せる</span>
+      </label>
+      <div class="env-row" style="margin-top:10px;"><label>風速</label><span id="envWindSpeedReadout" class="val">20 km/h</span></div>
       <input type="range" id="envWindSpeed" min="0" max="150" step="1">
       <div class="env-row" style="margin-top:10px;"><label>風向</label><span id="envWindDirectionReadout" class="val">90°</span></div>
       <input type="range" id="envWindDirection" min="0" max="360" step="1">
@@ -245,6 +263,7 @@
 <script src="js/env/04-clouds.js" onerror="_markFailed('js/env/04-clouds.js')"></script>
 <script src="js/env/04b-airport.js" onerror="_markFailed('js/env/04b-airport.js')"></script>
 <script src="js/env/05-daynight.js" onerror="_markFailed('js/env/05-daynight.js')"></script>
+<script src="js/env/05b-weather.js" onerror="_markFailed('js/env/05b-weather.js')"></script>
 <script src="js/env/06-env-ui.js" onerror="_markFailed('js/env/06-env-ui.js')"></script>
 <script src="js/env/08-env-storage.js" onerror="_markFailed('js/env/08-env-storage.js')"></script>
 <script src="js/env/07-env-main.js" onerror="_markFailed('js/env/07-env-main.js')"></script>

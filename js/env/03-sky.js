@@ -5,9 +5,8 @@
 // 600km四方のマップでは原点固定にすると、少し飛んだだけで太陽を後ろに置き去りにしてしまう。
 const ENV_SUN_DISTANCE = 18000;
 const ENV_MOON_DISTANCE = 18000;
-// 快晴時の視程。FogExp2 は 1-exp(-(距離*密度)^2) なので、この値だと
-// 80km先でおよそ半分霞む。600km四方のマップを見渡すため、地表付近でもかなり薄くしてある
-// （数km用の濃さのままだと、数十km先の山も海も一様な白になってしまう）。
+// 霧の濃さの既定値。ふだんは天候（js/env/05b-weather.js）の視程から計算した値を使うので、
+// これは天候がまだ用意できていない起動直後だけの保険。
 const ENV_BASE_FOG_DENSITY = 0.0000105;
 
 function initSky() {
@@ -109,6 +108,9 @@ function updateSkyForSunDirection(sunDir, elevationDeg) {
   const starOpacity = THREE.MathUtils.clamp(1 - THREE.MathUtils.smoothstep(elevationDeg, -18, -2), 0, 1);
   EnvState.stars.material.opacity = starOpacity * 0.9;
 
+  // 天候ぶんの減光・稲光は、昼夜の計算が終わってから掛ける
+  if (typeof applyWeatherToLighting === 'function') applyWeatherToLighting(dayFactor);
+
   updateSkyColorsForAltitude(dayFactor);
   if (typeof tintClouds === 'function') tintClouds(dayFactor, warmth);
   if (typeof updateAirportForDaylight === 'function') updateAirportForDaylight(dayFactor);
@@ -126,7 +128,18 @@ function updateSkyColorsForAltitude(dayFactor) {
   const nightFog = new THREE.Color(0x0a1220).lerp(new THREE.Color(0x02050f), altFactor);
   const fogColor = nightFog.lerp(dayFog, dayFactor);
 
+  // 雨や曇りでは青みが抜けて灰色になる。稲光では一瞬明るくなる。
+  if (typeof weatherApplyFogTint === 'function') weatherApplyFogTint(fogColor);
+
+  // 霧の濃さは天候の視程から決まる（快晴200km〜濃霧0.7km）。
+  // 高いところほど霞が薄いのは変わらないので、その掛け算は残す。
+  const density = (typeof weatherFogDensity === 'function' ? weatherFogDensity() : ENV_BASE_FOG_DENSITY);
   EnvState.scene.fog.color.copy(fogColor);
-  EnvState.scene.fog.density = ENV_BASE_FOG_DENSITY * (1 - altFactor * 0.9);
+  EnvState.scene.fog.density = density * (1 - altFactor * 0.9);
   EnvState.renderer.setClearColor(fogColor); // 空ドームの外側（遠景）にも霧色を反映させる
+
+  // 空ドームには霧が効かないので、霧が濃いときは霞の球でふさぐ
+  if (typeof weatherUpdateSkyHaze === 'function') {
+    weatherUpdateSkyHaze(fogColor, EnvState.scene.fog.density);
+  }
 }

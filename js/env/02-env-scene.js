@@ -55,6 +55,7 @@ function animateEnv() {
   requestAnimationFrame(animateEnv);
   const dt = Math.min(EnvState.clock.getDelta(), 0.1);
   EnvState.orbitControls.update();
+  updateWeather(dt);    // 光と霧に効くので、昼夜サイクルより先に決める
   updateDayNightCycle(dt);
   updateTerrain();      // カメラが動いたぶんだけ地形タイルのLODを入れ替える
   updateVegetation();

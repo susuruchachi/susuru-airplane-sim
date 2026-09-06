@@ -39,6 +39,11 @@ function collectEnvSnapshot() {
       previewAltitudeM: EnvState.env.previewAltitudeM,
       labelsVisible: EnvState.env.labelsVisible,
       treesVisible: EnvState.env.treesVisible,
+      windFromWeather: EnvState.env.windFromWeather,
+    },
+    weather: {
+      presetId: EnvState.weather.presetId,
+      manual: { ...EnvState.weather.manual },
     },
     selectedAirportId: EnvState.selectedAirportId,
     airports,
@@ -66,6 +71,20 @@ function applyEnvSnapshot(data) {
     }
     if (typeof data.env.labelsVisible === 'boolean') EnvState.env.labelsVisible = data.env.labelsVisible;
     if (typeof data.env.treesVisible === 'boolean') EnvState.env.treesVisible = data.env.treesVisible;
+    if (typeof data.env.windFromWeather === 'boolean') EnvState.env.windFromWeather = data.env.windFromWeather;
+  }
+
+  if (data.weather) {
+    // 知らないプリセットIDは無視する（将来プリセットを増減しても壊れない）
+    if (weatherPresetById(data.weather.presetId).id === data.weather.presetId) {
+      EnvState.weather.presetId = data.weather.presetId;
+    }
+    const m = data.weather.manual;
+    if (m) {
+      for (const k of ['wetness', 'storminess', 'fogginess']) {
+        if (typeof m[k] === 'number') EnvState.weather.manual[k] = Math.min(Math.max(m[k], 0), 1);
+      }
+    }
   }
 
   let applied = 0, skipped = 0;

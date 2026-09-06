@@ -11,6 +11,7 @@ function bootstrapEnv() {
     initWater();     // 川と湖の水面
     initPlaces();    // 都市と地名ラベル
     initClouds();
+    initWeather();   // 雲・霧・光に効くので、雲のあと・UIの前に用意する
     initAirport();
     initVegetation(); // 空港の敷地を避けて生やすので、空港のあとに作る
     initMinimap();

@@ -343,6 +343,33 @@ function worldDrynessAt(x, z, land) {
   return worldClamp(d, 0, 1);
 }
 
+// 気象の場。位置と「気象の時計」から、湿り具合と荒れ具合を返す。
+//
+// 低気圧が風に乗って流れていくイメージで、時刻に応じて場そのものをずらしている。
+// 気候（worldDrynessAt / worldTemperatureAt）とは別物であることに注意：
+// 気候は「その土地がどういう場所か」、気象は「いま何が起きているか」。
+// 実際の天候はこの2つを掛け合わせて決める（砂漠では雨雲が来ても雨になりにくい、など）。
+const WEATHER_FIELD_SCALE = 0.0000042; // 気象系ひとつの大きさ ≒ 240km
+const WEATHER_DRIFT_KMH = 34;          // 気圧配置が動く速さ
+
+function worldWeatherFieldAt(x, z, hours) {
+  const drift = hours * WEATHER_DRIFT_KMH * 1000;
+  const sx = (x - drift) * WEATHER_FIELD_SCALE;
+  const sz = (z - drift * 0.4) * WEATHER_FIELD_SCALE;
+
+  // しきい値0.34は当てずっぽうではなく、陸ぜんぶを何時刻ぶんか分類して決めた値。
+  // 高くすると世界じゅうが快晴になり、低くするとどこもかしこも雨になる。
+  // いまの内訳は tools/verify-world.js が「陸の天気」として毎回出す。
+  const wetness = worldSmooth01((worldFbm(sx, sz, 4) - 0.34) / 0.34);
+  // 荒れるのは湿っているところだけ（乾いた晴天が荒れることはない）
+  const storminess = worldSmooth01((worldFbm(sx * 1.7 + 51.3, sz * 1.7 + 17.9, 3) - 0.52) / 0.24) * wetness;
+  // 霧は別のチャンネル。荒れていると立たないので、風の弱い湿った所にだけ出る
+  const fogginess = worldSmooth01((worldFbm(sx * 2.3 + 91.7, sz * 2.3 + 63.1, 3) - 0.60) / 0.18)
+    * (1 - storminess) * worldSmooth01((wetness - 0.18) / 0.25);
+
+  return { wetness, storminess, fogginess };
+}
+
 // ============================================================================
 // 8. 高さ関数
 // ============================================================================
@@ -1192,8 +1219,9 @@ if (typeof module !== 'undefined' && module.exports) {
     WORLD_LANDMASSES, WORLD_RANGES, WORLD_COUNTRIES, WORLD_CITIES, WORLD_AIRPORTS,
     WORLD_LAKES, WORLD_RIVERS, worldLakeAt, worldRiverAt, worldWaterSurfaceAt,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
+    worldClamp, worldSmooth01, worldValueNoise, worldFbm,
     initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt,
-    worldTemperatureAt, worldDrynessAt, worldLocalReliefAt,
+    worldTemperatureAt, worldDrynessAt, worldWeatherFieldAt, worldLocalReliefAt,
     worldNearestAirport, worldRegionAt, worldCountryById, worldCityById, worldAirportById,
   };
 }

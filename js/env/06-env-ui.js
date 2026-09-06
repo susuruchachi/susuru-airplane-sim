@@ -36,13 +36,15 @@ function setupEnvUI() {
     cycleInput.value = EnvState.time.cycleMinutes;
   });
 
+  // 雲量スライダーは手動モードのときだけ出る。値は「湿り」で、雲量はそこから導かれる。
   cloudSlider.addEventListener('input', () => {
-    EnvState.env.cloudCoverage = parseFloat(cloudSlider.value) / 100;
+    EnvState.weather.manual.wetness = parseFloat(cloudSlider.value) / 100;
     cloudReadout.textContent = cloudSlider.value + '%';
-    applyCloudCoverage();
   });
 
   windSpeedSlider.addEventListener('input', () => {
+    EnvState.env.windFromWeather = false;
+    document.getElementById('envWindFromWeather').checked = false;
     EnvState.env.windSpeedKmh = parseFloat(windSpeedSlider.value);
     windSpeedReadout.textContent = windSpeedSlider.value + ' km/h';
   });
@@ -58,20 +60,21 @@ function setupEnvUI() {
   });
 
   setupWorldUI();
+  setupWeatherUI();
   setupAirportUI();
 
   btnReset.addEventListener('click', () => {
     EnvState.time.hours = 9;
     EnvState.time.cycleMinutes = 15;
     EnvState.time.paused = false;
-    EnvState.env.cloudCoverage = 0.45;
-    EnvState.env.windSpeedKmh = 20;
     EnvState.env.windDirectionDeg = 90;
     EnvState.env.previewAltitudeM = 0;
+    EnvState.env.windFromWeather = true;
+    EnvState.weather.presetId = 'auto';
+    EnvState.weather.manual = { wetness: 0.35, storminess: 0, fogginess: 0 };
     setLabelsVisible(true);
     setTreesVisible(true);
     resetSelectedAirport();
-    applyCloudCoverage();
     syncEnvUIToState();
   });
 
@@ -92,8 +95,15 @@ function syncEnvUIToState() {
   btnToggle.textContent = EnvState.time.paused ? '▶ 再生' : '❚❚ 一時停止';
   btnToggle.classList.toggle('active', EnvState.time.paused);
 
-  set('envCloudCoverage', Math.round(EnvState.env.cloudCoverage * 100));
-  text('envCloudCoverageReadout', Math.round(EnvState.env.cloudCoverage * 100) + '%');
+  set('envWeatherPreset', EnvState.weather.presetId);
+  set('envCloudCoverage', Math.round(EnvState.weather.manual.wetness * 100));
+  text('envCloudCoverageReadout', Math.round(EnvState.weather.manual.wetness * 100) + '%');
+  set('envStorminess', Math.round(EnvState.weather.manual.storminess * 100));
+  text('envStorminessReadout', Math.round(EnvState.weather.manual.storminess * 100) + '%');
+  set('envFogginess', Math.round(EnvState.weather.manual.fogginess * 100));
+  text('envFogginessReadout', Math.round(EnvState.weather.manual.fogginess * 100) + '%');
+  document.getElementById('envWindFromWeather').checked = EnvState.env.windFromWeather !== false;
+  refreshWeatherManualVisibility();
   set('envWindSpeed', EnvState.env.windSpeedKmh);
   text('envWindSpeedReadout', EnvState.env.windSpeedKmh + ' km/h');
   set('envWindDirection', EnvState.env.windDirectionDeg);
@@ -137,6 +147,51 @@ function setupWorldUI() {
   setupMinimapUI();
 }
 
+// --- 天候セクション ---------------------------------------------------------
+
+function setupWeatherUI() {
+  const select = document.getElementById('envWeatherPreset');
+  for (const p of WEATHER_PRESETS) {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name;
+    select.appendChild(opt);
+  }
+  select.addEventListener('change', () => {
+    setWeatherPreset(select.value);
+    refreshWeatherManualVisibility();
+    onEnvSettingsChanged();
+  });
+
+  const storm = document.getElementById('envStorminess');
+  storm.addEventListener('input', () => {
+    EnvState.weather.manual.storminess = parseFloat(storm.value) / 100;
+    document.getElementById('envStorminessReadout').textContent = storm.value + '%';
+  });
+  storm.addEventListener('change', onEnvSettingsChanged);
+
+  const fog = document.getElementById('envFogginess');
+  fog.addEventListener('input', () => {
+    EnvState.weather.manual.fogginess = parseFloat(fog.value) / 100;
+    document.getElementById('envFogginessReadout').textContent = fog.value + '%';
+  });
+  fog.addEventListener('change', onEnvSettingsChanged);
+
+  document.getElementById('envCloudCoverage').addEventListener('change', onEnvSettingsChanged);
+
+  const windAuto = document.getElementById('envWindFromWeather');
+  windAuto.addEventListener('change', () => {
+    EnvState.env.windFromWeather = windAuto.checked;
+    onEnvSettingsChanged();
+  });
+}
+
+// 手動モードのときだけスライダーを出す
+function refreshWeatherManualVisibility() {
+  const box = document.getElementById('envWeatherManual');
+  box.style.display = EnvState.weather.presetId === 'manual' ? '' : 'none';
+}
+
 // カメラが見ている地点がどこかを表示する。毎フレームDOMを触ると重いので5回/秒に間引く。
 let _envWorldReadoutAt = 0;
 
@@ -170,6 +225,21 @@ function updateEnvWorldReadout() {
   const near = worldNearestAirport(t.x, t.z);
   document.getElementById('envNearestReadout').textContent = near.airport
     ? `${near.airport.id} / ${(near.distanceM / 1000).toFixed(0)} km` : '--';
+
+  // 天候の読み出し。風速は天候に任せているときスライダーも追従させる。
+  const w = EnvState.weather.current;
+  if (!w) return;
+  document.getElementById('envWeatherReadout').textContent = weatherLabel(w);
+  const vis = w.visibilityM;
+  document.getElementById('envVisibilityReadout').textContent =
+    vis >= 10000 ? Math.round(vis / 1000) + ' km' : Math.round(vis / 100) * 100 + ' m';
+  document.getElementById('envCloudBaseReadout').textContent =
+    w.overcast > 0.05 ? Math.round(w.cloudBaseM / 10) * 10 + ' m' : '—';
+
+  if (EnvState.env.windFromWeather !== false) {
+    document.getElementById('envWindSpeed').value = EnvState.env.windSpeedKmh;
+    document.getElementById('envWindSpeedReadout').textContent = EnvState.env.windSpeedKmh + ' km/h';
+  }
 }
 
 // --- 空港セクション ---------------------------------------------------------
@@ -227,7 +297,7 @@ function setupAirportUI() {
     const entry = EnvState.builtAirports.get(EnvState.selectedAirportId);
     if (entry) entry.group.visible = st.visible;
     btnToggle.textContent = st.visible ? '空港を隠す' : '空港を表示';
-    onAirportSettingsChanged();
+    onEnvSettingsChanged();
   });
 
   btnFocus.addEventListener('click', focusCameraOnAirport);
@@ -238,7 +308,7 @@ function setupAirportUI() {
     refreshRunwayNumbers();
     refreshHeadingLabels();
   });
-  headingSlider.addEventListener('change', onAirportSettingsChanged);
+  headingSlider.addEventListener('change', onEnvSettingsChanged);
 
   lengthSlider.addEventListener('input', () => {
     lengthReadout.textContent = lengthSlider.value + ' m';
@@ -246,7 +316,7 @@ function setupAirportUI() {
   lengthSlider.addEventListener('change', () => {
     selectedAirportSettings().runwayLengthM = parseFloat(lengthSlider.value);
     rebuildSelectedAirport();
-    onAirportSettingsChanged();
+    onEnvSettingsChanged();
   });
 
   widthSlider.addEventListener('input', () => {
@@ -255,12 +325,12 @@ function setupAirportUI() {
   widthSlider.addEventListener('change', () => {
     selectedAirportSettings().runwayWidthM = parseFloat(widthSlider.value);
     rebuildSelectedAirport();
-    onAirportSettingsChanged();
+    onEnvSettingsChanged();
   });
 
   lightsSelect.addEventListener('change', () => {
     selectedAirportSettings().lightsMode = lightsSelect.value;
-    onAirportSettingsChanged();
+    onEnvSettingsChanged();
   });
 
   syncAirportUIToSelection();
@@ -275,7 +345,7 @@ function resetSelectedAirport() {
   rebuildSelectedAirport();
   applyAirportHeading();
   syncAirportUIToSelection();
-  onAirportSettingsChanged();
+  onEnvSettingsChanged();
 }
 
 // 方位の読み出しと滑走路の呼称（例:09/27）を書き直す
@@ -317,8 +387,8 @@ function syncAirportUIToSelection() {
   refreshHeadingLabels();
 }
 
-// 空港の設定が変わったときの後始末（保存は 08-env-storage.js が引き受ける）
-function onAirportSettingsChanged() {
+// 設定が変わったときの後始末（保存は 08-env-storage.js が引き受ける）
+function onEnvSettingsChanged() {
   if (typeof saveAirportSettings === 'function') saveAirportSettings();
 }
 

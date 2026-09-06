@@ -257,6 +257,103 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   check(bins['寒帯'] / land > 0.05, '寒帯がある', pct('寒帯'));
 }
 
+// --- 天候（自動モード）---
+// 見え方は js/env/05b-weather.js の deriveWeather が決めるので、そこを直接呼ぶ。
+// 「3,000km飛べば天気が変わる」「どこもかしこも雨」にならない、を確かめる。
+{
+  const WX = require(path.join(__dirname, '..', 'js', 'env', '05b-weather.js'));
+  // ブラウザでは番号順に読み込まれて全部が同じスコープに並ぶ。
+  // Node ではモジュールごとに閉じてしまうので、天候が使う世界の関数を渡しておく。
+  for (const k of ['worldClamp', 'worldLandValueAt', 'worldTemperatureAt', 'worldDrynessAt']) {
+    globalThis[k] = W[k];
+  }
+  const auto = (x, z, hours) => {
+    const h = W.worldHeightAt(x, z);
+    return WX.deriveWeather(W.worldWeatherFieldAt(x, z, hours), x, z, h, { climate: true });
+  };
+
+  // 1) 陸の上での天気の内訳。
+  //    ある一瞬だけを見ると偏るので、1日ぶんの何時刻かをまとめて数える。
+  const N = 120;
+  const HOURS = [0, 7, 15, 23];
+  const bins = {};
+  let land = 0;
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      const x = -W.WORLD_HALF + (i + 0.5) * (W.WORLD_SIZE / N);
+      const z = -W.WORLD_HALF + (j + 0.5) * (W.WORLD_SIZE / N);
+      if (W.worldHeightAt(x, z) <= 0) continue;
+      for (const hr of HOURS) {
+        land++;
+        const label = WX.weatherLabel(auto(x, z, hr));
+        bins[label] = (bins[label] || 0) + 1;
+      }
+    }
+  }
+  const pct = (k) => (((bins[k] || 0) / land) * 100).toFixed(0) + '%';
+  console.log('[  --  ] 陸の天気: ' + Object.keys(bins).map((k) => `${k}${pct(k)}`).join(' '));
+  const fine = ((bins['快晴'] || 0) + (bins['晴れ'] || 0)) / land;
+  const wet = ((bins['雨'] || 0) + (bins['小雨'] || 0) + (bins['雷雨'] || 0)
+             + (bins['雪'] || 0) + (bins['小雪'] || 0) + (bins['吹雪'] || 0)) / land;
+  check(fine > 0.35 && fine < 0.85, '晴れている土地がほどよくある', (fine * 100).toFixed(0) + '%');
+  check(wet > 0.05 && wet < 0.40, '降っている土地がほどよくある', (wet * 100).toFixed(0) + '%');
+  check(Object.keys(bins).length >= 4, '天気の種類が出そろっている', Object.keys(bins).join('/'));
+
+  // 2) 場所で変わること：1,500km離れた2点の天気が、そこそこの割合で食い違う
+  let differ = 0, pairs = 0;
+  for (let i = 0; i < 400; i++) {
+    const x = ((i * 8887) % W.WORLD_SIZE) - W.WORLD_HALF;
+    const z = ((i * 4241) % W.WORLD_SIZE) - W.WORLD_HALF;
+    const x2 = x + 1500000 > W.WORLD_HALF ? x - 1500000 : x + 1500000;
+    pairs++;
+    if (WX.weatherLabel(auto(x, z, 0)) !== WX.weatherLabel(auto(x2, z, 0))) differ++;
+  }
+  check(differ / pairs > 0.4, '1,500km離れれば天気が変わる', `${((differ / pairs) * 100).toFixed(0)}%が別の天気`);
+
+  // 3) 時間で変わること：同じ場所でも1日回せば天気が移り変わる
+  const px = W.WORLD_CITIES[0].x, pz = W.WORLD_CITIES[0].z;
+  const seen = new Set();
+  for (let h = 0; h < 48; h += 2) seen.add(WX.weatherLabel(auto(px, pz, h)));
+  check(seen.size >= 2, '同じ場所でも時間で天気が変わる', `${W.WORLD_CITIES[0].name}で2日間に ${[...seen].join('→')}`);
+
+  // 4) 切れ目がないこと。
+  //    霧の縁のように数kmで一気に変わる場所はあってよい（実際そういうものだし、
+  //    飛び込むのが面白い）ので、見るのは「1秒ぶん飛んだ距離」での変化。
+  //    ここが跳ねるときは場が不連続になっている。
+  let worstJump = 0;
+  for (let i = 0; i < 1500; i++) {
+    const x = ((i * 7717) % W.WORLD_SIZE) - W.WORLD_HALF;
+    const z = ((i * 3313) % W.WORLD_SIZE) - W.WORLD_HALF;
+    const a = auto(x, z, 0).visibilityM, b = auto(x + 500, z, 0).visibilityM;
+    worstJump = Math.max(worstJump, Math.max(a, b) / Math.min(a, b));
+  }
+  check(worstJump < 1.5, '天候の場に切れ目がない', `500mあたり最大 ${worstJump.toFixed(2)}倍`);
+
+  // 5) プリセットは選んだとおりの天気になること（気候に打ち消されない）
+  //    砂漠のど真ん中で「雨」を選んでも降る、が要点。
+  let dryX = 0, dryZ = 0, dryest = -1;
+  for (let i = 0; i < 20000; i++) {
+    const x = ((i * 9973) % W.WORLD_SIZE) - W.WORLD_HALF;
+    const z = ((i * 6151) % W.WORLD_SIZE) - W.WORLD_HALF;
+    if (W.worldHeightAt(x, z) <= 0) continue;
+    const d = W.worldDrynessAt(x, z, W.worldLandValueAt(x, z));
+    if (d > dryest) { dryest = d; dryX = x; dryZ = z; }
+  }
+  const expected = { clear: '快晴', fair: '晴れ', cloudy: '曇り', rain: '雨', storm: '雷雨', snow: '雪', fog: '霧' };
+  let okPresets = 0;
+  const got = [];
+  for (const id in expected) {
+    const p = WX.weatherPresetById(id);
+    const w = WX.deriveWeather(p, dryX, dryZ, W.worldHeightAt(dryX, dryZ),
+      { forcePrecip: p.forcePrecip || null, climate: false });
+    const label = WX.weatherLabel(w);
+    got.push(`${p.name}→${label}`);
+    if (label === expected[id]) okPresets++;
+  }
+  summary(`プリセットが名前どおりの天気になる（乾燥度${dryest.toFixed(2)}の土地で）`,
+    okPresets, Object.keys(expected).length, got.join(' '));
+}
+
 // --- 高さ関数の速度（地形メッシュはこれを毎フレーム何万回も呼ぶ）---
 {
   const t = Date.now();

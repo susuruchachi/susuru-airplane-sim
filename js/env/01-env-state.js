@@ -1,7 +1,7 @@
 // 01-env-state.js — 環境シーン（空・雲・昼夜サイクル）のグローバル状態
 // 番号プレフィックス方式：flight.html 専用。Builder側(index.html)の State とは別の名前空間。
 
-const ENV_VERSION = 'env-v3';
+const ENV_VERSION = 'env-v4';
 
 const EnvState = {
   // Three.js 中枢
@@ -35,6 +35,25 @@ const EnvState = {
   waterGroup: null,
   builtWater: null,     // Map(川/湖のid -> Mesh)
   waterMaterial: null,
+
+  // 天候。気象の場（03b-world.js）と気候から、雲量・視程・降水・突風を決める。
+  weatherGroup: null,
+  skyHaze: null,          // 霧のとき空ドームをふさぐ霞の球
+  cloudDeck: null,        // 曇り空の天井
+  cloudDeckTexture: null,
+  rain: null,             // 雨（線分）
+  snow: null,             // 雪（点）
+  weather: {
+    presetId: 'auto',     // auto / clear / fair / cloudy / rain / storm / snow / fog / manual
+    clockHours: 0,        // 気象の時計。昼夜の時刻と違って24で折り返さず単調に進む
+    manual: { wetness: 0.35, storminess: 0, fogginess: 0 }, // 手動モードの入力
+    current: null,        // いま見えている値（targetへ滑らかに寄る）
+    target: null,
+    gust: 0,              // 突風（風速に足す km/h）
+    flash: 0,             // 稲光 0〜1
+    aboveDeck: 0,         // 曇りの天井より上に出ている度合い 0〜1（雨と霧を抑える）
+    deckDrift: { x: 0, y: 0 },
+  },
 
   // 植生。カメラの手前だけにインスタンス描画で生やす。
   treeGroup: null,
@@ -76,5 +95,6 @@ const EnvState = {
     previewAltitudeM: 0,     // 「高度による空の色の変化」のプレビュー用（機体が無いのでスライダーで代用）
     labelsVisible: true,     // 国名・都市名・空港コードのラベル表示
     treesVisible: true,      // 樹木の表示
+    windFromWeather: true,   // 風速を天候に任せるか（風向はいつでも手動）
   },
 };
