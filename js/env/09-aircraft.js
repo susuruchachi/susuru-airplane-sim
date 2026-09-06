@@ -20,7 +20,7 @@ const AERO_DEFAULTS = {
   oswald: 0.80,          // 翼効率。誘導抗力 Cdi = Cl^2/(pi*AR*e)
   stallDeg: 15,          // 失速角。これを超えるとClが崩れる
   flapMaxDeg: 30,        // フラップ全開の舵角
-  controlMaxDeg: 22,     // 舵面の最大舵角（Builderのmin/maxDegがあればそちらを使う）
+  controlMaxDeg: 28,     // 舵面の最大舵角（Builderのmin/maxDegがあればそちらを使う）
   surfaceEffect: 0.55,   // 舵角に対する迎角の変化率（薄翼理論の目安）
   flapEffect: 0.35,      // フラップは面積が小さいので効きも小さい（全開でCl+0.85ほど）
   fuselageCd: 1.00,      // 胴体の抗力係数（前面投影面積基準）
@@ -483,6 +483,35 @@ function analyzeAircraftPerformance(model) {
     rotateRatio = weightMoment > 1e-6 ? elevatorMoment / weightMoment : null;
   }
 
+  // 主翼の揚力が重心の前後どちらに、どれだけずれてかかっているか。
+  // s.center は「重心からの相対」で、しかも前縁から1/4の点まで動かしてあるので、
+  // ここのzがそのまま「揚力の腕」になる。ずれていると飛ばした瞬間から
+  // 機首が勝手に上がる（前にずれ）／下がる（後ろにずれ）。
+  let wingNum = 0, wingDen = 0;
+  for (const s of model.surfaces) {
+    if (s.role !== 'main') continue;
+    wingNum += s.area * s.center.z;
+    wingDen += s.area;
+  }
+  const wingAcZ = wingDen > 0 ? wingNum / wingDen : 0;
+  const wingAcOffsetMac = wingAcZ / mac;
+
+  // エンジンが重心を通っていないと、スロットルを開けただけで機体が回る。
+  // 上下のずれはピッチに出る（下にあるエンジン＝機首上げ）。
+  let thrustPitchMoment = 0;
+  for (const e of model.engines) {
+    thrustPitchMoment += e.position.y * (e.axis.z * e.thrustN) - e.position.z * (e.axis.y * e.thrustN);
+  }
+  // 比べる相手はエレベーターの力（浮上速度のとき、重心まわり）
+  let elevatorPower = 0;
+  {
+    const qL = 0.5 * rho * liftoffMps * liftoffMps;
+    for (const s of model.surfaces) {
+      if (Math.abs(s.pitch) < 1e-6) continue;
+      elevatorPower += qL * s.area * 2 * Math.PI * Math.abs(s.pitch) * Math.abs(s.center.z);
+    }
+  }
+
   const notes = [];
   const kt = (mps) => Math.round(mps * 1.94384);
   if (wingLoading > 900) {
@@ -506,6 +535,26 @@ function analyzeAircraftPerformance(model) {
     notes.push({ level: 'warn', text:
       `重心が翼より後ろにあり、ピッチが不安定です（静安定 ${staticMarginPct.toFixed(0)}% MAC）。`
       + `重心を前へ出すか、水平尾翼を大きくしてください。` });
+  } else if (staticMarginPct > 60) {
+    notes.push({ level: 'warn', text:
+      `安定しすぎです（静安定 ${staticMarginPct.toFixed(0)}% MAC、ふつうは5〜20%）。`
+      + `水平尾翼が主翼に対して大きすぎるか後ろすぎて、迎角がほとんど0°に固定され、`
+      + `舵を引いても機首が上がりません。水平尾翼を小さくしてください。` });
+  }
+  if (Math.abs(wingAcOffsetMac) > 0.15) {
+    const ahead = wingAcOffsetMac < 0;
+    notes.push({ level: 'warn', text:
+      `主翼の揚力が重心の${ahead ? '前' : '後ろ'} ${Math.abs(wingAcZ).toFixed(2)} m`
+      + `（翼弦の ${Math.abs(wingAcOffsetMac * 100).toFixed(0)}%）にかかっていて、`
+      + `飛ばすと勝手に機首${ahead ? '上げ' : '下げ'}を始めます。`
+      + `Builderの重心設定にある「主翼から決定」を押すと揃います。` });
+  }
+  if (elevatorPower > 1e-6 && Math.abs(thrustPitchMoment) > elevatorPower * 0.15) {
+    const up = thrustPitchMoment > 0;
+    notes.push({ level: 'warn', text:
+      `エンジンが重心を通っていません（推力が重心の${up ? '下' : '上'}へ寄っている）。`
+      + `スロットルを開けるほど機首${up ? '上げ' : '下げ'}になります。`
+      + `上下対のエンジンが同じ位置に重なっていないか、鏡像複製を確かめてください。` });
   }
   const anyIncidence = model.surfaces.some((s) => s.role === 'main' && Math.abs(s.incidenceRad) > 0.005);
   if (!anyIncidence) {
@@ -521,6 +570,7 @@ function analyzeAircraftPerformance(model) {
   return {
     wingLoading, stallMps, liftoffMps, thrustToWeight,
     fwdThrust, liftThrust, takeoffM, staticMarginPct, rotateRatio, notes,
+    wingAcZ, wingAcOffsetMac, thrustPitchMoment, elevatorPower,
     flyable: !notes.some((n) => n.level === 'error'),
   };
 }
@@ -560,7 +610,7 @@ function defaultAircraftConfig() {
   const cs = (id, name, kind, parentWingId, x, y, z) => ({
     id, type: 'control_surface', name,
     position: { x, y, z }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
-    props: { kind, parentWingId, minDeg: -22, maxDeg: 22, hingeAxis: 'x', spanS: 0.7 },
+    props: { kind, parentWingId, minDeg: -28, maxDeg: 28, hingeAxis: 'x', spanS: 0.7 },
   });
   const gear = (id, name, pos, x, z) => ({
     id, type: 'landing_gear', name,
@@ -579,8 +629,8 @@ function defaultAircraftConfig() {
     // 尾翼が釣り合うのが「揚力ゼロの迎角」になってしまい、永遠に浮かない。
     cg: { x: 0, y: 1.05, z: -0.35 },
     parts: [
-      wing('w_main_l', '主翼 左', 'main', 'left', -0.55, 1.55, 0.05, 4.95, 1.55, 0.10, 2.0),
-      wing('w_main_r', '主翼 右', 'main', 'right', 0.55, 1.55, 0.05, 4.95, 1.55, 0.10, 2.0),
+      wing('w_main_l', '主翼 左', 'main', 'left', -0.55, 1.55, 0.05, 4.95, 1.55, 0.10, 3.0),
+      wing('w_main_r', '主翼 右', 'main', 'right', 0.55, 1.55, 0.05, 4.95, 1.55, 0.10, 3.0),
       wing('w_htail_l', '水平尾翼 左', 'htail', 'left', -0.30, 1.25, 4.35, 1.55, 0.95, 0.16, -1.0),
       wing('w_htail_r', '水平尾翼 右', 'htail', 'right', 0.30, 1.25, 4.35, 1.55, 0.95, 0.16, -1.0),
       wing('w_vtail', '垂直尾翼', 'vtail', 'center', 0, 1.35, 4.20, 1.45, 1.20, 0.55, 0),

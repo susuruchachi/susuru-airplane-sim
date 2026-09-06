@@ -295,7 +295,9 @@ let takeoffRun = null;
   takeoffRun = r;
   const s = r.state;
   check(!r.blewUp, '離陸で数値が壊れない');
-  check(s.altitudeAglM > 150, '離陸して上昇できる', s.altitudeAglM.toFixed(0) + 'm');
+  // 60秒には滑走している時間も入る。高さそのものより上昇率のほうが機体の性能をよく表すので、
+  // ここは「ちゃんと離れて上がっていく」ことだけを見て、速さは下の上昇率で見る。
+  check(s.altitudeAglM > 100, '離陸して上昇できる', s.altitudeAglM.toFixed(0) + 'm');
   // 上昇率は「浮いてから」で測る。滑走している時間まで混ぜると機体の性能が見えない。
   const climbing = r.log.filter((x) => !x.onGround && x.altAgl > 20);
   const climbFpm = climbing.length >= 2

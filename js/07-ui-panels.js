@@ -237,7 +237,7 @@ function renderCgInspector(el) {
 
     <div class="divider"></div>
     <div class="subgroup-title">主翼から決定</div>
-    <div class="hint" style="margin-bottom:8px;">左翼・右翼として登録された主翼のX位置から、左右対称の中心をXに反映します（Y・Zは変更しません）。</div>
+    <div class="hint" style="margin-bottom:8px;">主翼の空力中心（前縁から1/4翼弦）へ重心を合わせます。X＝左右主翼の中心線、Z＝前後、Y＝主翼の面の高さ。前後がずれていると飛ばしたときに勝手に機首が上がり下がりします。</div>
     <button class="btn-danger-outline" id="btnCgFromWings" style="color:var(--accent);border-color:var(--accent-dim);">
       主翼から決定
     </button>

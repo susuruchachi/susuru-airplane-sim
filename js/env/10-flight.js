@@ -140,16 +140,20 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
     const v = Math.sqrt(v2);
 
     // 迎角。前向き成分に対して法線方向へどれだけ流れているか。
+    // s.fwd はその翼の翼弦そのものなので、この時点で**取付角は入っている**。
+    // ここへ s.incidenceRad を足すと取付角が二重に効いて、2°で付けた主翼が
+    // 4°で飛んでしまう。重心の前にある主翼ならそのぶん機首上げの力が出て、
+    // 手を離すと勝手に上を向く機体になる。取付角は表示用の数字として持つだけにする。
     const u = local.dot(s.fwd);
     const w = local.dot(s.up);
     let alpha = Math.atan2(-w, Math.abs(u) < 1e-6 ? 1e-6 : u);
     if (u < 0) alpha = -alpha; // 後ろ向きに飛んでいるときも符号が破綻しないように
 
-    // 取付角と舵角を足す
+    // 舵角を足す
     const flapPart = s.flap * controls.flap;
     const deflect = s.pitch * controls.pitch + s.roll * controls.roll
       + s.yaw * controls.yaw + flapPart;
-    const alphaEff = alpha + s.incidenceRad + deflect;
+    const alphaEff = alpha + deflect;
 
     // フラップは「翼のキャンバーを増やす」もの。迎角をずらすだけの扱いにすると、
     // 失速する迎角まで同じぶんだけ前倒しになって最大揚力が増えず、

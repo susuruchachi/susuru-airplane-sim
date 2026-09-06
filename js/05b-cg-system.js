@@ -91,8 +91,75 @@ function deselectCg() {
   }
 }
 
-// 「主翼から決定」— 左右主翼のX位置の中間点を重心のXに反映する
-// （Y/Zは変更しない。左右対称の中心線を出すのが目的のため。尾翼は対象外とし主翼のみで判定する）
+// --- 主翼の空力中心 -----------------------------------------------------------
+
+// パーツのローカル座標→機体座標の行列。rotation は「度」で持っているので直して使う。
+function cgPartMatrix(part) {
+  const r = part.rotation || { x: 0, y: 0, z: 0 };
+  const s = part.scale || { x: 1, y: 1, z: 1 };
+  return new THREE.Matrix4().compose(
+    new THREE.Vector3(part.position.x, part.position.y, part.position.z),
+    new THREE.Quaternion().setFromEuler(new THREE.Euler(
+      THREE.MathUtils.degToRad(r.x || 0),
+      THREE.MathUtils.degToRad(r.y || 0),
+      THREE.MathUtils.degToRad(r.z || 0)
+    )),
+    new THREE.Vector3(s.x || 1, s.y || 1, s.z || 1)
+  );
+}
+
+// 三角形2枚ぶんの面積（4頂点の四角形を割って足す）
+function cgQuadArea(a, b, c, d) {
+  const tri = (p, q, r) => new THREE.Vector3()
+    .crossVectors(new THREE.Vector3().subVectors(q, p), new THREE.Vector3().subVectors(r, p))
+    .length() * 0.5;
+  return tri(a, b, c) + tri(a, c, d);
+}
+
+// 主翼の空力中心（揚力が実際にかかる点）を、面積で重み付けして求める。
+//
+// 翼の4頂点の真ん中は「翼弦の中央」で、揚力がかかるのはそこではなく**前縁から1/4**。
+// 重心をここに置くと主翼が自分でひねる力を出さなくなる。パーツの原点は
+// 翼のどこにあってもいい（原点は形の基準でしかない）ので、原点で合わせると
+// 実際の揚力の位置と何メートルもずれることがある。
+function mainWingAeroCenter() {
+  const wings = State.parts.filter(p => p.type === 'wing' && p.props && p.props.role === 'main');
+  if (!wings.length) return null;
+
+  const acc = new THREE.Vector3();
+  let area = 0, chordSum = 0;
+  for (const w of wings) {
+    const m = cgPartMatrix(w);
+    const c = (w.props && w.props.corners) || {};
+    const P = {};
+    for (const k of WING_CORNER_KEYS) {
+      const v = c[k] || { x: 0, y: 0, z: 0 };
+      P[k] = new THREE.Vector3(v.x || 0, v.y || 0, v.z || 0).applyMatrix4(m);
+    }
+    const mid = (a, b) => new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+    const leading = mid(P.rootLeading, P.tipLeading);
+    const trailing = mid(P.rootTrailing, P.tipTrailing);
+    const a = cgQuadArea(P.rootLeading, P.tipLeading, P.tipTrailing, P.rootTrailing);
+    if (!(a > 1e-9)) continue;
+    // 前縁→後縁の1/4の点
+    const quarter = leading.clone().lerp(trailing, 0.25);
+    acc.addScaledVector(quarter, a);
+    chordSum += new THREE.Vector3().subVectors(trailing, leading).length() * a;
+    area += a;
+  }
+  if (area <= 1e-9) return null;
+  return { point: acc.multiplyScalar(1 / area), area, chord: chordSum / area };
+}
+
+// 「主翼から決定」— 主翼の空力中心へ重心を合わせる（X・Y・Zとも）
+//
+//   X … 左翼と右翼の中間（左右対称の中心線）
+//   Z … 主翼の空力中心（前縁から1/4翼弦）の前後位置
+//   Y … 主翼の面の高さ
+//
+// Zが合っていないと、主翼の揚力が重心の前後にずれた場所にかかり、
+// 飛ばすと勝手に機首上げ／機首下げを始める。Yが合っていないと、
+// 速度が上がるほど抗力が重心をひねる。尾翼は対象外（主翼だけで決める）。
 function setCgFromWings() {
   const wings = State.parts.filter(p => p.type === 'wing' && p.props.role === 'main');
   const leftWings = wings.filter(w => w.props.side === 'left');
@@ -104,14 +171,21 @@ function setCgFromWings() {
   }
 
   const avgX = (arr) => arr.reduce((s, w) => s + w.position.x, 0) / arr.length;
-  const leftX = avgX(leftWings);
-  const rightX = avgX(rightWings);
-  const midX = (leftX + rightX) / 2;
+  const midX = (avgX(leftWings) + avgX(rightWings)) / 2;
+
+  const ac = mainWingAeroCenter();
+  if (!ac) {
+    showToast('主翼の形（4頂点）が読めませんでした', true);
+    return false;
+  }
 
   State.cg.position.x = midX;
+  State.cg.position.y = ac.point.y;
+  State.cg.position.z = ac.point.z;
   applyCgToGizmo();
   if (State.cg.selected) updateInspectorNumbersOnly(null, true);
   renderInspector();
-  showToast(`左右主翼の中心（X = ${midX.toFixed(3)}）に重心を合わせました`);
+  showToast('主翼の空力中心（前縁から1/4翼弦）へ重心を合わせました'
+    + ` X ${midX.toFixed(2)} / Y ${ac.point.y.toFixed(2)} / Z ${ac.point.z.toFixed(2)}`);
   return true;
 }
