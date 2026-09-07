@@ -743,12 +743,10 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
   const sf = sm.surfaces.find((s) => s.role === 'main').fwd;
   check(sf.z < -0.9, '機体を180°回しても主翼の前方は機首(-Z)を向く',
     `fwd=(${sf.toArray().map((v) => v.toFixed(2)).join(',')})`);
-  // エンジンの推力も、翼と同じく機首(-Z)向きのまま揃っていること。
-  // ここが翼だけ直っていてエンジンが直っていないと、180°回した機体は
-  // 前へ進むはずが後ろへ押す機体になる（機首は正しく向くのに推力が逆）。
-  const se = sm.engines[0].axis;
-  check(se.z < -0.9, '機体を180°回してもエンジンの推力は機首(-Z)向きのまま',
-    `axis=(${se.toArray().map((v) => v.toFixed(2)).join(',')})`);
+  // エンジンの spinAxis に modelTransform の回転そのものは掛けない（掛けるのは
+  // qFix だけ）。理由は下の「前後逆さに作られたモデル」の節で確かめる——
+  // spinAxis は常にBuilderの画面に映っている向きを指す約束で、その画面は
+  // 常に modelTransform を適用したあとの見た目だから。
 
   // エンジン自身の回転（Builderで傾けて取り付けた場合）も推力の向きに乗ること
   const tilted = defaultAircraftConfig();
@@ -774,6 +772,69 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
     `${base.wingSpan.toFixed(1)}m → ${bm.wingSpan.toFixed(1)}m`);
   check(Math.abs(bm.wingArea / base.wingArea - 4) < 0.02, '2倍に拡大すると翼面積は4倍',
     `${base.wingArea.toFixed(1)}m² → ${bm.wingArea.toFixed(1)}m²`);
+}
+
+// --- 前後逆さに作られたモデルを modelTransform で直した機体 ----------------------
+//
+// 実際にユーザーから「モデルが前後逆だから反転してるんだけど、フライトでは
+// 元の向きのまま出てきちゃう」という報告があり、パーツの位置は直したが
+// （54abce9）、エンジンの推力の向きは直っていなかった——180°反転した機体で
+// 主翼は正しく機首(-Z)を向くのに、エンジンの推力だけ後ろ向きのままで、
+// 前へ進むはずが後ろへ進む機体になっていた。ここでは「翼もエンジンも
+// 生の座標では後ろ向きに作られていて、modelTransformで直す」という
+// **実際にBuilderで起きる順番**を再現する（座標だけ後から動かす前の節とは違う）。
+{
+  const wing = (side, sign) => ({
+    id: 'w_' + side, type: 'wing', name: '主翼', position: { x: 0, y: 0, z: 0 },
+    rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: {
+      span: 5, role: 'main', side,
+      // 生の座標では前縁が+Z（後ろ向き＝逆さ）。実際の反転モデルと同じ形。
+      corners: {
+        rootLeading: { x: 0, y: 0, z: 3 }, rootTrailing: { x: 0, y: 0, z: -1 },
+        tipLeading: { x: sign * 4, y: 0, z: 2.5 }, tipTrailing: { x: sign * 4, y: 0, z: -0.5 },
+      },
+    },
+  });
+  const engine = (id, x) => ({
+    id, type: 'engine', name: 'エンジン', position: { x, y: -0.3, z: 2 },
+    rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: { thrustKgf: 2000, spinAxis: 'z' },
+  });
+  const backward = {
+    name: '反転モデルテスト機', modelWeightKg: 8000, modelMaxSpeedValue: 300, modelMaxSpeedUnit: 'kt',
+    cg: { x: 0, y: 0, z: 1 },
+    // 生の座標のまま（modelTransformなし）だと機首は逆(+Z)を向く
+    parts: [wing('right', 1), wing('left', -1), engine('e1', -1.5), engine('e2', 1.5)],
+  };
+  // qFix は主翼の向きから毎回自動で決まるので、翼自身の「機首方向」（surf.fwd）は
+  // modelTransformが無くても常に-Zに正規化される——それがqFixの仕事そのもの。
+  // なのでここで確かめられるのは「主翼が-Zを自称している」ことではなく、
+  // qFixが実際に大きく効いていること（＝生の座標では前後が逆だったこと）。
+  const raw = buildAircraftModel(backward);
+  const rawYaw = Math.abs(new THREE.Euler().setFromQuaternion(raw.qFix, 'YXZ').y);
+  check(rawYaw > Math.PI * 0.9,
+    '直す前：qFixがほぼ180°効いている（生の座標では前後が逆さ、の再現）',
+    (rawYaw * 180 / Math.PI).toFixed(0) + '°');
+
+  // Builderの「機体全体の向き」でユーザーが180°直す
+  const fixed = Object.assign({}, backward, {
+    modelTransform: { rotation: { x: 0, y: Math.PI, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
+  });
+  const fm = buildAircraftModel(fixed);
+  check(fm.surfaces.find((s) => s.role === 'main').fwd.z < -0.9,
+    'modelTransformで直したあと：主翼は機首(-Z)を向く');
+  check(fm.engines[0].axis.z < -0.9,
+    'modelTransformで直したあと：エンジンの推力も機首(-Z)向きになる（翼と食い違わない）',
+    `axis=(${fm.engines[0].axis.toArray().map((v) => v.toFixed(2)).join(',')})`);
+
+  // 実際に地上でフルパワーにして、前へ進むことを確かめる（うしろへ進まない）
+  const st = createFlightState(), c = createFlightControls();
+  placeAircraftOnGround(fm, st, 0, 0, 0, flatGround);
+  c.parkingBrake = false; c.throttle = 1;
+  for (let i = 0; i < 60 * 2; i++) advanceFlight(fm, st, c, noWind, flatGround, 1 / 60);
+  check(st.velocity.z < -1, '直した機体はフルパワーで前(-Z)へ進む（後ろへ進まない）',
+    'velocity.z=' + st.velocity.z.toFixed(1));
 }
 
 // --- 車輪の並び ---------------------------------------------------------------
