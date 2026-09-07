@@ -1163,6 +1163,144 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
   check(pctx.balancePitchTrim() === false, '主翼が無ければ断る');
 }
 
+// --- Builderの「エンジン出力の自動設定」------------------------------------------
+//
+// エンジンを置いても、その推力で「設定した最高速度まで出せるか」「垂直に浮けるか」は
+// 自分で計算しないと分からない。09-aircraft.js と同じ抗力・推力の式をBuilder側で
+// 再現して逆算する（js/05f-engine-power.js）。ここでは逆算した推力を実際の飛行モデル
+// （buildAircraftModel／solveLevelTrim／advanceFlight）へ通し、Builder側の簡略式が
+// 出した答えが、本物の物理でも成立しているかまで確かめる。
+{
+  const toasts = [];
+  const ectx = vm.createContext({
+    THREE, console, Math, Number, Array, Object, JSON,
+    WING_CORNER_KEYS: ['rootLeading', 'rootTrailing', 'tipLeading', 'tipTrailing'],
+    State: null, showToast: (m, e) => toasts.push({ msg: m, error: !!e }),
+    renderPartList: () => {}, renderInspector: () => {}, renderModelSettingsPanel: () => {},
+  });
+  for (const f of ['05b-cg-system.js', '05d-vtol-balance.js', '05e-pitch-balance.js', '05f-engine-power.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'js', f), 'utf8');
+    vm.runInContext(src, ectx, { filename: f });
+  }
+
+  // --- 最高速度に必要な推力 --------------------------------------------------
+  // 内蔵の練習機（140kt用の小さなエンジン）に、もっと速い最高速度を設定する。
+  // もとの推力のままでは到底届かないはずで、そこを直せるかを見る。
+  const trainerConfig = defaultAircraftConfig();
+  ectx.State = {
+    parts: trainerConfig.parts,
+    cg: { position: { ...trainerConfig.cg }, gizmo: { position: new THREE.Vector3() } },
+    model: { weightKg: trainerConfig.modelWeightKg, maxSpeedValue: 350, maxSpeedUnit: 'kt' },
+  };
+  const engineBefore = ectx.State.parts.find((p) => p.type === 'engine');
+  const thrustBefore = engineBefore.props.thrustKgf;
+
+  const speedConfigOf = (state) => ({
+    name: 'speed-test', modelWeightKg: state.model.weightKg,
+    modelMaxSpeedValue: state.model.maxSpeedValue, modelMaxSpeedUnit: state.model.maxSpeedUnit,
+    cg: state.cg.position, parts: state.parts,
+  });
+  const beforeModel = buildAircraftModel(speedConfigOf(ectx.State));
+  const beforeTrim = solveLevelTrim(beforeModel, beforeModel.vMaxMps, 0);
+  check(!beforeTrim.ok || beforeTrim.throttle >= 0.999,
+    '直す前：もとの推力のままでは、本物の飛行モデルでも最高速度で水平飛行できない',
+    `ok=${beforeTrim.ok} throttle=${beforeTrim.throttle.toFixed(2)}`);
+
+  toasts.length = 0;
+  check(ectx.applyEngineSpeedTarget() === true, '最高速度に必要な出力へ自動設定できる');
+  const engineAfter = ectx.State.parts.find((p) => p.type === 'engine');
+  check(engineAfter.props.thrustKgf > thrustBefore, '推力が増える方向に直る',
+    `${thrustBefore} → ${engineAfter.props.thrustKgf}`);
+
+  const afterModel = buildAircraftModel(speedConfigOf(ectx.State));
+  const afterTrim = solveLevelTrim(afterModel, afterModel.vMaxMps, 0);
+  check(afterTrim.ok && afterTrim.throttle < 0.95,
+    '直したあと：本物の飛行モデルでも、最高速度でスロットルに余裕を残して水平飛行できる',
+    `ok=${afterTrim.ok} throttle=${afterTrim.throttle.toFixed(2)}`);
+
+  // 主翼が無ければ最高速度に必要な推力の計算しようがないので断る
+  ectx.State = {
+    parts: [engineAfter],
+    cg: { position: { x: 0, y: 0, z: 0 }, gizmo: { position: new THREE.Vector3() } },
+    model: { weightKg: 1000, maxSpeedValue: 200, maxSpeedUnit: 'kt' },
+  };
+  check(ectx.applyEngineSpeedTarget() === false, '主翼が無ければ断る');
+
+  // --- 垂直離陸に必要な推力 ----------------------------------------------------
+  const vtolEngine = (id, x, z, thrustKgf) => ({
+    id, type: 'engine', name: 'VTOL', position: { x, y: 0, z }, rotation: { x: 0, y: 0, z: 0 },
+    props: { thrustKgf, spinAxis: 'y' },
+  });
+  ectx.State = {
+    parts: [vtolEngine('v1', -1, -1, 500), vtolEngine('v2', 1, -1, 500),
+      vtolEngine('v3', -1, 1, 500), vtolEngine('v4', 1, 1, 500)],
+    cg: { position: { x: 0, y: 0, z: 0 }, gizmo: { position: new THREE.Vector3() } },
+    model: { weightKg: 8000 },
+  };
+  const vtolConfigOf = (state) => ({
+    name: 'vtol-test', modelWeightKg: state.model.weightKg, modelMaxSpeedValue: 300, modelMaxSpeedUnit: 'kt',
+    cg: state.cg.position, parts: state.parts,
+  });
+  const vtolBefore = buildAircraftModel(vtolConfigOf(ectx.State));
+  check(vtolBefore.vtolThrustN < vtolBefore.massKg * 9.80665,
+    '直す前：もとの推力のままでは自重を持ち上げられない',
+    `推力${(vtolBefore.vtolThrustN / 9.80665).toFixed(0)}kgf / 重量${vtolBefore.massKg}kg`);
+
+  toasts.length = 0;
+  check(ectx.applyVtolSpeedTarget() === true, '垂直離陸に必要な出力へ自動設定できる');
+  const vtolAfterModel = buildAircraftModel(vtolConfigOf(ectx.State));
+  const vtolTwrAfter = vtolAfterModel.vtolThrustN / (vtolAfterModel.massKg * 9.80665);
+  check(vtolTwrAfter > 1.15 && vtolTwrAfter < 1.5,
+    '直したあと：実際の飛行モデルでも、前後バランスで絞られたあとの使える推力が重量の120〜150%くらいになる',
+    vtolTwrAfter.toFixed(2));
+
+  // 本当に浮くか——実際に地面から垂直レバー全開で走らせて確かめる
+  const liftSt = createFlightState();
+  const liftC = createFlightControls();
+  placeAircraftOnGround(vtolAfterModel, liftSt, 0, 0, 0, flatGround);
+  liftC.vtolThrottle = 1;
+  liftC.throttle = 0;
+  liftC.gearDown = true;
+  liftC.parkingBrake = false;
+  const groundY = liftSt.position.y;
+  for (let i = 0; i < 180; i++) advanceFlight(vtolAfterModel, liftSt, liftC, noWind, flatGround, 1 / 60);
+  check(liftSt.position.y - groundY > 5, '実際に垂直レバー全開で走らせると、3秒で浮き上がる',
+    `+${(liftSt.position.y - groundY).toFixed(1)}m`);
+  check(Math.abs(liftSt.rollDeg) < 10 && Math.abs(liftSt.pitchDeg) < 10,
+    '浮き上がる間、姿勢が大きく崩れない（前後バランスが取れている）',
+    `roll=${liftSt.rollDeg.toFixed(1)}° pitch=${liftSt.pitchDeg.toFixed(1)}°`);
+
+  // 上向きのエンジンが無ければ断る
+  ectx.State = {
+    parts: [{ id: 'f1', type: 'engine', name: 'F', position: { x: 0, y: 0, z: -1 }, rotation: { x: 0, y: 0, z: 0 }, props: { thrustKgf: 500, spinAxis: 'z' } }],
+    cg: { position: { x: 0, y: 0, z: 0 }, gizmo: { position: new THREE.Vector3() } },
+    model: { weightKg: 1000 },
+  };
+  check(ectx.applyVtolSpeedTarget() === false, '上向きのエンジンが無ければ断る');
+
+  // --- 通常／垂直、それぞれ一括で倍率調整 --------------------------------------
+  ectx.State = {
+    parts: [vtolEngine('v1', -1, -1, 1000), vtolEngine('v2', 1, -1, 1000),
+      { id: 'f1', type: 'engine', name: 'F', position: { x: 0, y: 0, z: -1 }, rotation: { x: 0, y: 0, z: 0 }, props: { thrustKgf: 2000, spinAxis: 'z' } }],
+    cg: { position: { x: 0, y: 0, z: 0 }, gizmo: { position: new THREE.Vector3() } },
+    model: { weightKg: 8000 },
+  };
+  check(ectx.epScaleEngines(false, 1.5) === true, '通常エンジンの一括倍率が適用できる');
+  check(ectx.State.parts.find((p) => p.id === 'f1').props.thrustKgf === 3000,
+    '通常エンジンに倍率がかかる', String(ectx.State.parts.find((p) => p.id === 'f1').props.thrustKgf));
+  check(ectx.State.parts.find((p) => p.id === 'v1').props.thrustKgf === 1000,
+    '垂直エンジンは通常エンジンの倍率では変わらない（別レバー）');
+
+  check(ectx.epScaleEngines(true, 2) === true, '垂直エンジンの一括倍率が適用できる');
+  check(ectx.State.parts.find((p) => p.id === 'v1').props.thrustKgf === 2000,
+    '垂直エンジンに倍率がかかる', String(ectx.State.parts.find((p) => p.id === 'v1').props.thrustKgf));
+  check(ectx.State.parts.find((p) => p.id === 'f1').props.thrustKgf === 3000,
+    '通常エンジンは垂直エンジンの倍率では変わらない');
+
+  check(ectx.epScaleEngines(false, -1) === false, '倍率が0以下なら断る（マイナス推力を防ぐ）');
+  check(ectx.epScaleEngines(false, 0) === false, '倍率が0なら断る');
+}
+
 // --- 自動操縦：経路の組み立て ---------------------------------------------------
 {
   // 追い風では降りられないので、風上へ向かう側の末端から進入する

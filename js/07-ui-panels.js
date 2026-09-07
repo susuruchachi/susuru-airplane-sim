@@ -69,6 +69,8 @@ function renderModelSettingsPanel() {
       </div>
     </div>
     <div class="hint" id="maxSpeedConverted"></div>
+
+    ${typeof engineFleetPanelHtml === 'function' ? engineFleetPanelHtml() : ''}
   `;
 
   // 軸選択の初期値を推定値にし、各軸の実寸も表示して判断材料にする
@@ -151,6 +153,8 @@ function renderModelSettingsPanel() {
     updateSpeedReadout();
   });
   updateSpeedReadout();
+
+  if (typeof bindEngineFleetPanel === 'function') bindEngineFleetPanel();
 }
 
 // 入力された最高速度を、もう片方の単位に目安換算して表示する（音速は高度により変わるため海面高度の目安値を使用）
