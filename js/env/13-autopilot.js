@@ -198,8 +198,12 @@ function apSpeedSchedule(model) {
     stall,
     rotate: stall * 1.15,               // 機首を上げる速度
     climb: apClamp(stall * 1.35, stall * 1.2, vMax * 0.6),
-    cruise: apClamp(stall * 2.0, stall * 1.4, vMax * 0.75),
+    // 巡航はできるだけ速く——最高速度のすぐ下を狙う。ぴったり最高速度を目標に
+    // すると、推力と抵抗がほぼ釣り合ったところを延々スロットルで追いかけることに
+    // なるだけなので、97%で十分（届かなければ出力は自然に全開のまま張り付く）。
+    cruise: Math.max(vMax * 0.97, stall * 1.4),
     approach: stall * 1.3,
+    vMax,
   };
 }
 

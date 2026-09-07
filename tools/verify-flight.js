@@ -700,6 +700,20 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
   const sf = sm.surfaces.find((s) => s.role === 'main').fwd;
   check(sf.z < -0.9, '機体を180°回しても主翼の前方は機首(-Z)を向く',
     `fwd=(${sf.toArray().map((v) => v.toFixed(2)).join(',')})`);
+  // エンジンの推力も、翼と同じく機首(-Z)向きのまま揃っていること。
+  // ここが翼だけ直っていてエンジンが直っていないと、180°回した機体は
+  // 前へ進むはずが後ろへ押す機体になる（機首は正しく向くのに推力が逆）。
+  const se = sm.engines[0].axis;
+  check(se.z < -0.9, '機体を180°回してもエンジンの推力は機首(-Z)向きのまま',
+    `axis=(${se.toArray().map((v) => v.toFixed(2)).join(',')})`);
+
+  // エンジン自身の回転（Builderで傾けて取り付けた場合）も推力の向きに乗ること
+  const tilted = defaultAircraftConfig();
+  tilted.parts.find((p) => p.type === 'engine').rotation = { x: 10, y: 0, z: 0 };
+  const tm = buildAircraftModel(tilted);
+  const tiltDeg = Math.acos(THREE.MathUtils.clamp(-tm.engines[0].axis.z, -1, 1)) * 180 / Math.PI;
+  check(Math.abs(tiltDeg - 10) < 0.5, 'エンジンを傾けて取り付ければ、推力もその向きへ出る',
+    tiltDeg.toFixed(1) + '°');
 
   // 180°回した機体では、向きの補正（qFix）がそのぶん打ち消される。
   // 見た目には modelTransform と qFix の両方がかかるので、ここが噛み合っていないと食い違う。
@@ -957,6 +971,92 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
     (toasts[toasts.length - 1] || {}).msg || '—');
   check(bctx.vtolBalanceReport().engines.every((e) => e.props.thrustKgf === 1000),
     '断ったときは推力を書き換えない');
+}
+
+// --- Builderの「空力バランスを整える」------------------------------------------
+//
+// 「主翼から決定」で重心を主翼の空力中心へぴったり合わせると、水平尾翼を持たない
+// 機体（デルタ翼のエレボンなど）では舵に腕（モーメントの効き）が無くなり、操縦できない
+// 機体になる。この節では、重心を中立点から少し前へ・エンジンの角度で推力のずれを
+// 打ち消す自動修正（js/05e-pitch-balance.js）が、実際にそれを直すことを確かめる。
+{
+  // js/05e-pitch-balance.js もBuilder側のファイル。THREEは使うが、DOM/画面は無い。
+  const toasts = [];
+  const pctx = vm.createContext({
+    THREE, console, Math, Number, Array, Object, JSON,
+    WING_CORNER_KEYS: ['rootLeading', 'rootTrailing', 'tipLeading', 'tipTrailing'],
+    State: null, showToast: (m, e) => toasts.push({ msg: m, error: !!e }),
+    applyPartToGizmo: () => {}, renderPartList: () => {}, renderInspector: () => {},
+    updateInspectorNumbersOnly: () => {},
+  });
+  for (const f of ['05b-cg-system.js', '05e-pitch-balance.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'js', f), 'utf8');
+    vm.runInContext(src, pctx, { filename: f });
+  }
+
+  // 水平尾翼を持たない、デルタ翼のエレボン機。エンジンは重心の下・後ろに4基
+  // （実機のConcordeと同じ配置感）——これが実際にユーザーから来た機体の作り。
+  const pWing = (side, sign) => ({
+    id: 'w_' + side, type: 'wing', name: '主翼', position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 },
+    props: { role: 'main', side, corners: {
+      rootLeading: { x: 0, y: 0, z: -9 }, rootTrailing: { x: 0, y: 0, z: 2 },
+      tipLeading: { x: sign * 5, y: 0, z: 1 }, tipTrailing: { x: sign * 5, y: 0, z: 2 } } },
+  });
+  const pEngine = (id, x) => ({
+    id, type: 'engine', name: 'E', position: { x, y: -0.5, z: 6.75 }, rotation: { x: 0, y: 0, z: 0 },
+    props: { thrustKgf: 17250, spinAxis: 'z' },
+  });
+  const buildState = () => ({
+    parts: [pWing('right', 1), pWing('left', -1),
+      pEngine('e1', -1.9), pEngine('e2', 1.9), pEngine('e3', -2.4), pEngine('e4', 2.4)],
+    cg: { position: { x: 0, y: 0, z: 0 }, gizmo: { position: new THREE.Vector3() } },
+    model: { weightKg: 100000 },
+  });
+
+  // 重心を主翼の空力中心にぴったり合わせておく（「主翼から決定」を押した直後の状態）
+  pctx.State = buildState();
+  const ac = pctx.wingsAeroCenterByRole('main');
+  pctx.State.cg.position.x = ac.point.x;
+  pctx.State.cg.position.y = ac.point.y;
+  pctx.State.cg.position.z = ac.point.z;
+
+  const before = pctx.pbBalanceReport();
+  check(Math.abs(before.staticMarginPct) < 0.5, '整える前：静安定はほぼ0%（重心が空力中心にある）',
+    before.staticMarginPct.toFixed(1) + '%');
+  check(!before.momentOk, '整える前：エンジン推力のモーメントが打ち消せていない',
+    before.thrustPitchMoment.toFixed(0) + ' N·m');
+
+  toasts.length = 0;
+  check(pctx.balancePitchTrim() === true, '空力バランスを整えられる');
+
+  const after = pctx.pbBalanceReport();
+  check(after.staticMarginPct > 8 && after.staticMarginPct < 12,
+    '整えたあと：静安定が目標の10%付近になる', after.staticMarginPct.toFixed(1) + '%');
+  check(after.momentOk, '整えたあと：エンジン推力のモーメントが打ち消せている',
+    after.thrustPitchMoment.toFixed(2) + ' N·m');
+  const tilted = pctx.State.parts.filter((p) => p.type === 'engine').map((p) => p.rotation.x);
+  check(tilted.every((t) => Math.abs(t - tilted[0]) < 1e-6), 'エンジンは全基そろって同じ角度だけ傾く',
+    tilted.map((t) => t.toFixed(2)).join('/'));
+  check(Math.abs(tilted[0]) > 0.1 && Math.abs(tilted[0]) < 20, '傾ける角度は現実的な範囲に収まる',
+    tilted[0].toFixed(2) + '°');
+
+  // これを実際の飛行モデルへ通すと、ピッチ舵にちゃんと腕がつく
+  // （node tools/verify-flight.js は THREE 以外は自前で読むので、
+  //  Builderが直した config をそのまま buildAircraftModel に渡して確かめられる）
+  const fixedConfig = {
+    name: 'balanced', modelWeightKg: 100000, modelMaxSpeedValue: 500, modelMaxSpeedUnit: 'kt',
+    cg: pctx.State.cg.position, parts: pctx.State.parts,
+  };
+  const fixedModel = buildAircraftModel(fixedConfig);
+  const fixedPerf = analyzeAircraftPerformance(fixedModel);
+  check(fixedPerf.elevatorPower > 1e5, '実際の飛行モデルでも、ピッチ舵に大きな腕がつく',
+    fixedPerf.elevatorPower.toFixed(0));
+  check(fixedPerf.trimForClimb.reason !== 'no_elevator',
+    '実際の飛行モデルでも「舵に腕が無い」ではなくなる', String(fixedPerf.trimForClimb.reason));
+
+  // 主翼が無ければ、決めようがないので断る
+  pctx.State = { parts: [pEngine('e1', 0)], cg: { position: { x: 0, y: 0, z: 0 }, gizmo: { position: new THREE.Vector3() } }, model: { weightKg: 1000 } };
+  check(pctx.balancePitchTrim() === false, '主翼が無ければ断る');
 }
 
 // --- 自動操縦：経路の組み立て ---------------------------------------------------

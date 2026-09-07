@@ -116,18 +116,23 @@ function cgQuadArea(a, b, c, d) {
   return tri(a, b, c) + tri(a, c, d);
 }
 
-// 主翼の空力中心（揚力が実際にかかる点）を、面積で重み付けして求める。
+// 指定した役割（main / htail など）の翼を面積で重み付けして、空力中心（揚力が
+// 実際にかかる点）とそのあたりの翼弦を求める。
 //
 // 翼の4頂点の真ん中は「翼弦の中央」で、揚力がかかるのはそこではなく**前縁から1/4**。
 // 重心をここに置くと主翼が自分でひねる力を出さなくなる。パーツの原点は
 // 翼のどこにあってもいい（原点は形の基準でしかない）ので、原点で合わせると
 // 実際の揚力の位置と何メートルもずれることがある。
-function mainWingAeroCenter() {
-  const wings = State.parts.filter(p => p.type === 'wing' && p.props && p.props.role === 'main');
+//
+//   point … 空力中心（前縁から1/4翼弦）の位置。複数枚あれば面積で重み付け平均
+//   area  … その役割の翼の合計面積
+//   chord … いちばん大きい翼弦（静安定を「翼弦の何%」で言うときの基準）
+function wingsAeroCenterByRole(role) {
+  const wings = State.parts.filter(p => p.type === 'wing' && p.props && p.props.role === role);
   if (!wings.length) return null;
 
   const acc = new THREE.Vector3();
-  let area = 0, chordSum = 0;
+  let area = 0, chordSum = 0, chordMax = 0;
   for (const w of wings) {
     const m = cgPartMatrix(w);
     const c = (w.props && w.props.corners) || {};
@@ -144,11 +149,18 @@ function mainWingAeroCenter() {
     // 前縁→後縁の1/4の点
     const quarter = leading.clone().lerp(trailing, 0.25);
     acc.addScaledVector(quarter, a);
-    chordSum += new THREE.Vector3().subVectors(trailing, leading).length() * a;
+    const chord = new THREE.Vector3().subVectors(trailing, leading).length();
+    chordSum += chord * a;
+    chordMax = Math.max(chordMax, chord);
     area += a;
   }
   if (area <= 1e-9) return null;
-  return { point: acc.multiplyScalar(1 / area), area, chord: chordSum / area };
+  return { point: acc.multiplyScalar(1 / area), area, chord: chordSum / area, chordMax };
+}
+
+// 主翼の空力中心。「主翼から決定」ボタンが使う（従来どおりの名前で残してある）。
+function mainWingAeroCenter() {
+  return wingsAeroCenterByRole('main');
 }
 
 // 「主翼から決定」— 主翼の空力中心へ重心を合わせる（X・Y・Zとも）

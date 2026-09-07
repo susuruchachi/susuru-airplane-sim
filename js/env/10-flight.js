@@ -517,10 +517,19 @@ function solveLevelTrim(model, speedMps, altitudeM) {
   // 変わらない——「翼が足りない」という診断（liftOkの失敗が優先されて出る）では
   // この根本原因が隠れてしまう。トリムを両端まで振ってモーメントの変化を直接測り、
   // ほぼ変わらなければそれを優先して理由に出す。
+  //
+  // **測るのは alpha=0 で、探索が収束した alpha ではない**。翼が小さすぎて浮けない
+  // 機体は alpha 探索が上限に張り付いたまま返ってくる（liftOk がそもそも失敗する）。
+  // そこは主翼の一部がすでに失速ぎりぎりで、揚力係数の曲線が非線形に潰れているので、
+  // 「舵に腕はちゃんとあるのに、たまたま張り付いた alpha でだけモーメントが平らに見える」
+  // という誤診断が起きる（実際、翼を大きくして直したはずの機体が、たまたま浮上に
+  // 必要な速度が高いというだけの理由で「舵に腕が無い」と誤って報告された）。
+  // 舵の腕そのものは重心と舵の位置関係で決まる幾何の話で、alpha にはほぼ依らないので、
+  // 素直な alpha=0 で測るほうが的確に測れる。
   let reason = null;
   if (!liftOk || !momentOk) {
-    const mLo = trimResiduals(model, speedMps, altitudeM, alpha, -1, thr).moment;
-    const mHi = trimResiduals(model, speedMps, altitudeM, alpha, 1, thr).moment;
+    const mLo = trimResiduals(model, speedMps, altitudeM, 0, -1, thr).moment;
+    const mHi = trimResiduals(model, speedMps, altitudeM, 0, 1, thr).moment;
     reason = Math.abs(mHi - mLo) < model.massKg * 0.5 ? 'no_elevator' : (!liftOk ? 'wing' : 'elevator');
   }
   return {

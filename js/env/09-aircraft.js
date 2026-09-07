@@ -68,6 +68,15 @@ function acModelMatrix(config) {
   );
 }
 
+// modelMat の回転ぶんだけを取り出したクォータニオン。位置や翼の形は行列（scale込み）で
+// 変換して問題ないが、エンジンの推力の向きのような「大きさを持たない向き」に scale を
+// 掛けると値が壊れる（非一様scaleだと尚更）。回転だけの成分がここで別に要る。
+function acModelRotation(config) {
+  const t = config && config.modelTransform;
+  const r = (t && t.rotation) || {};
+  return new THREE.Quaternion().setFromEuler(new THREE.Euler(r.x || 0, r.y || 0, r.z || 0));
+}
+
 // パーツのローカル座標を機体座標へ移す行列（位置・回転・拡縮）。
 // **Builderのパーツ回転は「度」で保存されている**（applyPartToGizmo が degToRad してから
 // gizmo に入れている）。ラジアンとして読むと 180 が 28回転になり、脚も翼も明後日を向く。
@@ -328,17 +337,33 @@ function buildAircraftModel(config) {
   // 4) エンジン
   // 推力の向きは Builder の spinAxis（プロペラ/ファンの回転軸）から決める。
   // z＝前向き（ふつうの推進）、y＝上向き（垂直離陸用のリフトエンジン）、x＝横向き。
+  const modelRotQ = acModelRotation(config);
   const engines = parts.filter((p) => p.type === 'engine').map((p) => {
     const spin = (p.props && p.props.spinAxis) || 'z';
     const axis = spin === 'y' ? new THREE.Vector3(0, 1, 0)
       : (spin === 'x' ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, -1));
+    // パーツ自身の回転（度）も推力の向きに乗せる。Builderでエンジンを傾けて
+    // 取り付ければ、見た目どおり推力もその向きへ出る（傾けても真後ろへ推力を
+    // 出し続ける機体になっていた）。続けて modelMat の回転ぶん（機体まるごとの
+    // 反転・調整）も乗せる——ここが抜けていると、180°反転した機体で
+    // 主翼は正しく機首(-Z)を向くのに、エンジンの推力だけ後ろ向きのまま
+    // （＝前へ進むはずが後ろへ押す）という食い違いになる。
+    const r = p.rotation || {};
+    if (r.x || r.y || r.z) {
+      axis.applyEuler(new THREE.Euler(
+        THREE.MathUtils.degToRad(r.x || 0),
+        THREE.MathUtils.degToRad(r.y || 0),
+        THREE.MathUtils.degToRad(r.z || 0)
+      ));
+    }
+    axis.applyQuaternion(modelRotQ);
     return {
       name: p.name || 'エンジン',
       spinAxis: spin,
       // 上を向いているエンジンは垂直離陸用。前へ進むためのエンジンとは別のレバーで動かす。
       lift: spin === 'y',
       position: acVec(p.position || {}).applyMatrix4(modelMat).applyQuaternion(qFix).sub(cg),
-      // 回転軸そのものは機体に固定なので、向きの正規化ぶんだけ回しておく
+      // 向きの正規化ぶんだけ回しておく
       axis: axis.applyQuaternion(qFix).normalize(),
       thrustN: Math.max((p.props && p.props.thrustKgf) || 0, 0) * 9.80665,
     };

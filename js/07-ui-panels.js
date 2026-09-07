@@ -242,11 +242,14 @@ function renderCgInspector(el) {
       主翼から決定
     </button>
     ${!hasLeftRight ? '<div class="hint" style="color:var(--warn);margin-top:8px;">左翼・右翼それぞれ1つ以上必要です</div>' : ''}
+    ${typeof pbBalancePanelHtml === 'function' ? pbBalancePanelHtml() : ''}
   `;
 
   bindXyzFields('cg', State.cg.position, () => applyCgToGizmo());
 
   document.getElementById('btnCgFromWings').addEventListener('click', () => setCgFromWings());
+  const btnPb = document.getElementById('btnPitchBalance');
+  if (btnPb) btnPb.addEventListener('click', () => balancePitchTrim());
 }
 
 function renderInspector() {
