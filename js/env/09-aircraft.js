@@ -139,6 +139,38 @@ function acOrientationFix(wings) {
   return q;
 }
 
+// --- 垂直離陸用エンジンの前後バランス -------------------------------------------
+
+// 垂直離陸用のエンジンは、重心の前後どちらかに寄っているだけでそのまま機首を振る力になる。
+// ぴったり左右対称の位置に置くのは簡単でも、前後まで重心にきっちり合わせるのは難しい
+// （実際、前後の調整だけがやりにくいという声があった）。
+// 実機（F-35Bなど）は前後のノズルの配分を変えてこれを消しているので、ここでも同じことをする：
+// 前群・後群のうち、重心まわりのモーメントが小さいほうを基準にもう片方を絞り、
+// 均等に出力しても機首が振れないようにする。ぴったり位置を合わせなくても飛べるように
+// なるぶん、絞った側の出力は使い切れない（性能診断にその割合を出す）。
+function applyVtolTrim(engines) {
+  const lift = engines.filter((e) => e.lift);
+  for (const e of lift) e.trimScale = 1;
+  if (lift.length < 2) return;
+
+  const front = lift.filter((e) => e.position.z < -1e-6); // 重心より前
+  const rear = lift.filter((e) => e.position.z > 1e-6);   // 重心より後ろ
+  if (!front.length || !rear.length) return; // 前後どちらかにしか無ければ自動では釣り合わせられない
+
+  const sumThrust = (arr) => arr.reduce((s, e) => s + e.thrustN, 0);
+  const sumMoment = (arr) => arr.reduce((s, e) => s + e.thrustN * e.position.z, 0);
+  const frontThrust = sumThrust(front), frontMoment = sumMoment(front); // 負
+  const rearThrust = sumThrust(rear), rearMoment = sumMoment(rear);     // 正
+
+  // 弱いほうを1.0のまま使い切り、強いほうをちょうど釣り合う分だけ絞る
+  let kFront = 1, kRear = 1;
+  if (Math.abs(frontMoment) <= rearMoment) kRear = Math.abs(frontMoment) / rearMoment;
+  else kFront = rearMoment / Math.abs(frontMoment);
+
+  for (const e of front) e.trimScale = kFront;
+  for (const e of rear) e.trimScale = kRear;
+}
+
 // --- 飛行モデルを組み立てる ---------------------------------------------------
 
 // config は Builder の保存レコード（またはportable config）と同じ形:
@@ -268,6 +300,7 @@ function buildAircraftModel(config) {
       thrustN: Math.max((p.props && p.props.thrustKgf) || 0, 0) * 9.80665,
     };
   }).filter((e) => e.thrustN > 0);
+  applyVtolTrim(engines);
 
   // 5) 着陸脚の接地点。
   //    Builderの「地面にフィット」は脚の先端がモデル座標のY=0に来るように作るので、
@@ -315,7 +348,9 @@ function buildAircraftModel(config) {
     fuselageFrontArea: Math.max(0.022 * wingArea, 0.15),
     fuselageSideArea: Math.max(0.10 * wingArea, 0.6),
     totalThrustN: engines.reduce((a, e) => a + (e.lift ? 0 : e.thrustN), 0),
-    vtolThrustN: engines.reduce((a, e) => a + (e.lift ? e.thrustN : 0), 0),
+    // 前後バランスで絞ったぶんを差し引いた「実際に使える」垂直推力
+    vtolThrustN: engines.reduce((a, e) => a + (e.lift ? e.thrustN * e.trimScale : 0), 0),
+    vtolThrustNRaw: engines.reduce((a, e) => a + (e.lift ? e.thrustN : 0), 0),
     hasVtol: engines.some((e) => e.lift),
     // 車輪の高さ（接地点が重心からどれだけ下か）
     gearHeight: contacts.length ? -Math.min(...contacts.map((c) => c.position.y)) : 1,
@@ -439,11 +474,13 @@ function analyzeAircraftPerformance(model) {
   const liftoffMps = stallMps * AC_LIFTOFF_MARGIN;
   const thrustToWeight = model.totalThrustN / W;
 
-  // 前向きの推力だけを数える（垂直離陸用のリフトエンジンは滑走の役に立たない）
+  // 前向きの推力だけを数える（垂直離陸用のリフトエンジンは滑走の役に立たない）。
+  // リフトエンジンは前後バランスで絞った後の値（trimScale）を使う——
+  // 絞る前の定格で「浮ける」と出しても、実際に使える推力はそれより少ない。
   let fwdThrust = 0, liftThrust = 0;
   for (const e of model.engines) {
     fwdThrust += e.thrustN * Math.max(-e.axis.z, 0);
-    liftThrust += e.thrustN * Math.max(e.axis.y, 0);
+    liftThrust += e.thrustN * e.trimScale * Math.max(e.axis.y, 0);
   }
 
   // 滑走距離。浮上速度の7割あたりでの加速度から見積もる。
@@ -502,9 +539,12 @@ function analyzeAircraftPerformance(model) {
 
   // エンジンが重心を通っていないと、スロットルを開けただけで機体が回る。
   // 上下のずれはピッチに出る（下にあるエンジン＝機首上げ）。
+  // リフトエンジンは前後バランスで絞った後の値を使う——ここが釣り合っているのが
+  // 自動バランスの狙いなので、絞る前の定格で見ると直したはずのズレがまだ出ていることになる。
   let thrustPitchMoment = 0;
   for (const e of model.engines) {
-    thrustPitchMoment += e.position.y * (e.axis.z * e.thrustN) - e.position.z * (e.axis.y * e.thrustN);
+    const t = e.lift ? e.thrustN * e.trimScale : e.thrustN;
+    thrustPitchMoment += e.position.y * (e.axis.z * t) - e.position.z * (e.axis.y * t);
   }
   // 比べる相手はエレベーターの力（浮上速度のとき、重心まわり）
   let elevatorPower = 0;
@@ -569,6 +609,22 @@ function analyzeAircraftPerformance(model) {
   if (liftThrust > 0 && liftThrust < W * 0.9) {
     notes.push({ level: 'info', text:
       `垂直離陸用の推力は重量の ${Math.round((liftThrust / W) * 100)}% です（浮くには100%必要）。` });
+  }
+  {
+    const liftEngines = model.engines.filter((e) => e.lift);
+    const hasFront = liftEngines.some((e) => e.position.z < -0.05);
+    const hasRear = liftEngines.some((e) => e.position.z > 0.05);
+    if (liftEngines.length > 1 && (!hasFront || !hasRear)) {
+      notes.push({ level: 'warn', text:
+        '垂直離陸用エンジンが重心の前後どちらかにしか無く、出力の配分を自動では釣り合わせられません。'
+        + '反対側にも置くと、機体を傾けずに上がれるようになります。' });
+    } else if (hasFront && hasRear && model.vtolThrustNRaw > 0
+        && model.vtolThrustN < model.vtolThrustNRaw * 0.97) {
+      notes.push({ level: 'info', text:
+        `垂直離陸用エンジンの前後位置が重心からずれているため、出力を自動で調整し、`
+        + `使える推力を定格の${Math.round((model.vtolThrustN / model.vtolThrustNRaw) * 100)}%に`
+        + `抑えています。前後のエンジンを重心を挟んで対称に近づけるほど使える推力が増えます。` });
+    }
   }
 
   return {

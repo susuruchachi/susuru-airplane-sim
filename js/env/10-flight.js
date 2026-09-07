@@ -207,7 +207,9 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
   const mainScale = controls.throttle * envScale;
   let thrustTotal = 0, vtolTotal = 0;
   for (const e of model.engines) {
-    const t = e.thrustN * (e.lift ? vtolScale : mainScale);
+    // 垂直離陸用エンジンは前後バランス（trimScale）ぶん絞ってある。
+    // ここで掛け忘れると、モデル構築時に消したはずの機首振りが物理では復活する。
+    const t = e.lift ? e.thrustN * e.trimScale * vtolScale : e.thrustN * mainScale;
     if (e.lift) vtolTotal += t; else thrustTotal += t;
     out.force.addScaledVector(e.axis, t);
     out.torque.add(_fv.tmp.crossVectors(e.position, _fv.f.copy(e.axis).multiplyScalar(t)));

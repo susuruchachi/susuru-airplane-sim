@@ -553,6 +553,48 @@ function stallSpeedLevel(flap) {
 }
 function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
 
+// --- 垂直離陸エンジンの前後バランス ---------------------------------------------
+// 前後に離れた位置へ置いた垂直離陸用エンジンは、それだけで機首を振る力になる。
+// ぴったり重心に合わせなくても、自動で出力配分を釣り合わせて飛べることを確かめる。
+{
+  const cfg = JSON.parse(JSON.stringify(defaultAircraftConfig()));
+  cfg.cg = { x: 0, y: 1.05, z: 0 }; // 数字をきれいにするため、この試験だけ重心を原点に
+  cfg.parts = cfg.parts.concat([
+    {
+      id: 'e_front', type: 'engine', name: '前', position: { x: 0, y: 1.05, z: -10 },
+      rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, props: { thrustKgf: 100, spinAxis: 'y' },
+    },
+    {
+      id: 'e_rear', type: 'engine', name: '後', position: { x: 0, y: 1.05, z: 20 },
+      rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, props: { thrustKgf: 100, spinAxis: 'y' },
+    },
+  ]);
+  const vm = buildAircraftModel(cfg);
+  const front = vm.engines.find((e) => e.name === '前');
+  const rear = vm.engines.find((e) => e.name === '後');
+  // 重心までの腕は前10・後20で2倍。弱いほう（前）を基準に、強いほう（後）を半分に絞れば釣り合う。
+  check(Math.abs(front.trimScale - 1) < 0.01, '腕の短いほうは絞らない', front.trimScale.toFixed(3));
+  check(Math.abs(rear.trimScale - 0.5) < 0.01, '腕の長いほうを腕の比ぶんだけ絞る', rear.trimScale.toFixed(3));
+  check(Math.abs(vm.vtolThrustN / vm.vtolThrustNRaw - 0.75) < 0.01,
+    '使える推力の合計は定格の75%になる', (vm.vtolThrustN / vm.vtolThrustNRaw * 100).toFixed(1) + '%');
+
+  // 実際に飛ばしても、位置をぴったり合わせていないぶんで機首を振り続けたりしない
+  const st = createFlightState(), c = createFlightControls();
+  placeAircraftOnGround(vm, st, 0, 0, 0, flatGround);
+  c.parkingBrake = false;
+  const hoverThr = (vm.massKg * 9.80665) / vm.vtolThrustN;
+  let peakTilt = 0;
+  for (let i = 0; i < 60 * 40; i++) {
+    c.vtolThrottle = Math.max(0, Math.min(1,
+      hoverThr + (20 - st.altitudeAglM) * 0.02 - st.velocity.y * 0.05));
+    advanceFlight(vm, st, c, noWind, flatGround, 1 / 60);
+    if (st.altitudeAglM > 2) peakTilt = Math.max(peakTilt, Math.abs(st.pitchDeg), Math.abs(st.rollDeg));
+  }
+  check(peakTilt < 45, '前後の位置がずれていても引っくり返らずにホバリングできる', peakLabel(peakTilt));
+  check(Math.abs(st.pitchDeg) < 6 && Math.abs(st.rollDeg) < 6, '最終的に水平で落ち着く',
+    `ピッチ${st.pitchDeg.toFixed(1)}° ロール${st.rollDeg.toFixed(1)}°`);
+}
+
 // --- 計算の速さ ---------------------------------------------------------------
 {
   const st = createFlightState();
