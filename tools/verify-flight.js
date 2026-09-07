@@ -326,6 +326,49 @@ let takeoffRun = null;
     liftOffAt ? liftOffAt.toFixed(0) + 'm' : '—');
 }
 
+// --- 超音速機のフルパワー離陸で墜落判定にならないか ------------------------------
+//
+// 12-flight-mode.js の墜落判定（FLIGHT_CRASH_G=12）は、以前は速度ベクトル全体の
+// 変化量で見ていた。これだと推力そのものの加速度まで拾ってしまい、推力/重量比が
+// 18倍を超える超音速機（実際にユーザーから来たサンダーバード1号）がフルパワーで
+// 滑走を始めた瞬間、こけたわけでもないのに「墜落」になっていた。
+// 直した先は state.loadFactor（機体の上下方向のG。HUDの「G」計器と同じ）で、
+// これは推力の向き（ほぼ真後ろ）を拾わない。ここでは 12-flight-mode.js の
+// 判定式そのものは読み込めない（ブラウザ側のファイルのため）ので、
+// 判定に使っている loadFactor が、この状況で本当に閾値を超えないことを確かめる。
+{
+  const rocket = defaultAircraftConfig();
+  rocket.name = '超音速機テスト';
+  // 推力だけ極端に上げる（推力/重量18倍——実際の超音速機の報告値と同じくらい）
+  for (const p of rocket.parts) {
+    if (p.type === 'engine' && p.props) p.props.thrustKgf *= 60;
+  }
+  const rocketModel = buildAircraftModel(rocket);
+  const tw = rocketModel.totalThrustN / (rocketModel.massKg * 9.80665);
+  note('超音速機テスト', `推力/重量 ${tw.toFixed(1)}倍`);
+  check(tw > 12, 'この機体は「速度ベクトル全体」で見れば12Gを軽く超える推力を持つ',
+    tw.toFixed(1) + '倍');
+
+  const st = createFlightState();
+  const c = createFlightControls();
+  placeAircraftOnGround(rocketModel, st, 0, 0, 0, flatGround);
+  c.parkingBrake = false; c.throttle = 1;
+  let maxLoadFactor = 0, maxOldMetric = 0;
+  for (let i = 0; i < 60 * 3; i++) {
+    const before = st.velocity.clone();
+    advanceFlight(rocketModel, st, c, noWind, flatGround, 1 / 60);
+    if (!st.onGround) break;
+    maxLoadFactor = Math.max(maxLoadFactor, Math.abs(st.loadFactor));
+    maxOldMetric = Math.max(maxOldMetric, before.sub(st.velocity).length() * 60 / 9.80665);
+  }
+  note('超音速機テスト', `フルパワー滑走中：loadFactor最大${maxLoadFactor.toFixed(1)}G`
+    + `（旧判定なら${maxOldMetric.toFixed(1)}G）`);
+  check(maxOldMetric > 12, '旧判定（速度ベクトル全体）なら実際に12Gを超えていた',
+    maxOldMetric.toFixed(1) + 'G');
+  check(maxLoadFactor < 12, '新判定（loadFactor）なら、ただ加速しているだけでは墜落にならない',
+    maxLoadFactor.toFixed(1) + 'G');
+}
+
 // --- 手放しの安定 -------------------------------------------------------------
 {
   // 上空で舵を中立にして放置。落ち着くのが正しい（発散したら安定していない）。
@@ -1167,10 +1210,11 @@ function autopilotFlight(opts) {
   const wind = opts.wind || noWind;
   while (t < (opts.maxSeconds || 2200)) {
     stepAutopilot(model, st, c, ap, 1 / 60, {});
-    const before = st.velocity.clone();
     advanceFlight(model, st, c, wind, flatGround, 1 / 60);
+    // 接地の衝撃は loadFactor（機体の上下方向のG）で見る。全体の速度変化で見ると
+    // 推力そのものの加速度も拾ってしまう（12-flight-mode.js の墜落判定と同じ理由）。
     if (st.onGround) {
-      worstG = Math.max(worstG, before.sub(st.velocity).length() * 60 / 9.80665);
+      worstG = Math.max(worstG, Math.abs(st.loadFactor));
       if (!sink && ap.phase !== 'takeoff') sink = prevVs;
     }
     prevVs = st.verticalSpeed;
@@ -1294,9 +1338,8 @@ function autopilotFlight(opts) {
   let prev = '';
   while (t < 2500) {
     stepAutopilot(bigModel, st, c, ap, 1 / 60, {});
-    const before = st.velocity.clone();
     advanceFlight(bigModel, st, c, noWind, flatGround, 1 / 60);
-    if (st.onGround) worstG = Math.max(worstG, before.sub(st.velocity).length() * 60 / 9.80665);
+    if (st.onGround) worstG = Math.max(worstG, Math.abs(st.loadFactor));
     t += 1 / 60;
     if (ap.phase !== prev) { prev = ap.phase; seen.push(ap.phase); }
     if (ap.phase === 'done' || st.crashed) break;

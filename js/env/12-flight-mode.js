@@ -255,13 +255,20 @@ function updateFlight(dt) {
   if (typeof updateAutopilot === 'function') updateAutopilot(dt);
   const wind = flightWindVector(_flightWind);
 
-  const before = f.state.velocity.clone();
+  const sinkBefore = f.state.velocity.y;
   advanceFlight(f.aircraft.model, f.state, f.controls, wind, flightGroundHeightAt, dt);
 
-  // 墜落判定。接地の瞬間の沈下と、その1フレームの加速度で見る。
+  // 墜落判定。接地の瞬間の沈下と、機体にかかる上下方向のG（loadFactor）で見る。
+  //
+  // 前は速度ベクトル全体の変化量（進行方向も含む）で見ていた。これだと推力そのものの
+  // 加速度まで拾ってしまい、推力/重量比が18倍を超える超音速機（サンダーバード1号）が
+  // フルパワーで滑走を始めただけで「墜落」になっていた——前へ加速しているだけで、
+  // 機体にかかる荷重はふつうの1G程度のまま。loadFactor は機体の**上下方向**（重力を
+  // 除いた分）だけを見るので、推力の向き（ほぼ真後ろ）はほとんど出てこず、
+  // 接地の衝撃（車輪のばねが縮む向き＝上下方向）はちゃんと拾える。
   if (!f.state.crashed && f.state.onGround) {
-    const dv = before.sub(f.state.velocity).length() / Math.max(dt, 1e-4) / 9.80665;
-    if (dv > FLIGHT_CRASH_G || (before.y < -FLIGHT_CRASH_SINK_MPS && f.state.contactCount > 0)) {
+    if (Math.abs(f.state.loadFactor) > FLIGHT_CRASH_G
+        || (sinkBefore < -FLIGHT_CRASH_SINK_MPS && f.state.contactCount > 0)) {
       f.state.crashed = true;
       announceFlight('墜落しました — R で滑走路へ戻る');
     }
