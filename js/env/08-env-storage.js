@@ -51,6 +51,12 @@ function collectEnvSnapshot() {
       cameraMode: EnvState.flight.cameraMode,
       cgOffsets: EnvState.flight.cgOffsets,
       touchControls: document.body.classList.contains('touch-controls'),
+      // 自動操縦は入切そのものは保存しない（次に開いたとき勝手に飛び出さないように）。
+      // 目的地と目標高度だけを覚えておく。
+      autopilot: EnvState.flight.autopilot ? {
+        targetAltitudeM: EnvState.flight.autopilot.targetAltitudeM,
+        destAirportId: EnvState.flight.autopilot.destAirportId,
+      } : null,
     },
     selectedAirportId: EnvState.selectedAirportId,
     airports,
@@ -160,6 +166,20 @@ function applyFlightSnapshot(flight) {
   // （タッチ画面でも消せるし、マウスしか無い端末でも出せる）
   if (typeof flight.touchControls === 'boolean' && typeof setFlightTouchEnabled === 'function') {
     setFlightTouchEnabled(flight.touchControls);
+  }
+
+  // 自動操縦の行き先と高度。知らない空港IDは黙って捨てる（世界が変わっても壊れない）
+  if (flight.autopilot && typeof flightAutopilot === 'function') {
+    const ap = flightAutopilot();
+    const alt = flight.autopilot.targetAltitudeM;
+    if (Number.isFinite(alt)) ap.targetAltitudeM = Math.min(Math.max(alt, 100), 12000);
+    if (typeof flight.autopilot.destAirportId === 'string'
+        && worldAirportById(flight.autopilot.destAirportId)) {
+      ap.destAirportId = flight.autopilot.destAirportId;
+    }
+    if (typeof updateAutopilotUI === 'function') updateAutopilotUI();
+    const sel = document.getElementById('envApDestination');
+    if (sel) sel.value = ap.destAirportId || '';
   }
 }
 

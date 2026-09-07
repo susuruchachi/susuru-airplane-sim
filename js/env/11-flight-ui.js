@@ -77,6 +77,11 @@ function handleFlightKeyPress(code) {
     case 'KeyC': f.controls.flap = Math.max(f.controls.flap - 0.5, 0); announceFlight(`フラップ ${Math.round(f.controls.flap * 100)}%`); return true;
     case 'KeyP': f.controls.parkingBrake = !f.controls.parkingBrake; announceFlight(f.controls.parkingBrake ? '駐機ブレーキ' : '駐機ブレーキ解除'); return true;
     case 'KeyT': autoTrimFlight(); return true;
+    case 'KeyO': if (typeof toggleAltitudeHold === 'function') toggleAltitudeHold(); return true;
+    case 'KeyI':
+      if (typeof startFullAutopilot !== 'function') return false;
+      if (f.autopilot && f.autopilot.full) stopAutopilot(); else startFullAutopilot();
+      return true;
     case 'KeyR': resetFlightToRunway(); return true;
     case 'KeyF': if (typeof toggleFlightMode === 'function') toggleFlightMode(); return true;
     case 'Tab': cycleFlightCamera(); return true;
@@ -224,12 +229,14 @@ function initFlightHUD() {
       <div class="hud-tile sm"><span class="k">迎角</span><b id="hudAoa">0</b><span class="u">°</span></div>
       <div class="hud-tile sm"><span class="k">G</span><b id="hudG">1.0</b></div>
       <div class="hud-tile sm"><span class="k">対地</span><b id="hudAgl">--</b><span class="u">ft</span></div>
+      <div class="hud-tile sm" id="hudApTile" hidden><span class="k">自動</span><b id="hudAp">—</b></div>
     </div>
     <div id="hudWarn"></div>
     <div id="hudMsg"></div>
     <div id="hudHelp">
       W/S・↑↓ ピッチ ／ A/D・←→ ロール ／ Q/E ラダー ／ Shift・Ctrl 出力 ／ X/Z 垂直エンジン ／
       T トリムを取る ／ Y/H トリム微調整 ／ B・Space ブレーキ ／ G 脚 ／ V・C フラップ ／
+      O 高度維持 ／ I 全自動（離陸〜着陸） ／
       P 駐機 ／ Tab 視点 ／ R 滑走路へ戻る ／ F 飛行終了
     </div>`;
   host.appendChild(el);
@@ -275,6 +282,13 @@ function updateFlightHUD() {
   set('hudAoa', s.alphaDeg.toFixed(1));
   set('hudG', s.loadFactor.toFixed(1));
   set('hudAgl', s.altitudeAglM > 3000 ? '—' : Math.round(s.altitudeAglM * 3.28084).toLocaleString());
+
+  // 自動操縦。切れているあいだは枠ごと隠す（計器を増やしすぎないように）
+  const apText = typeof autopilotHudText === 'function' ? autopilotHudText() : null;
+  const apTile = document.getElementById('hudApTile');
+  if (apTile) apTile.hidden = !apText;
+  if (apText) set('hudAp', apText);
+  if (typeof updateAutopilotUI === 'function' && apText) updateAutopilotUI();
 
   // 警告。優先度の高いものだけを1行で出す。
   const warn = document.getElementById('hudWarn');

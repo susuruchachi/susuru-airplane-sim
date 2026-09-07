@@ -33,14 +33,16 @@ if (!THREE) {
 
 // ブラウザ用のファイルを1つのスコープに並べて読む（flight.html と同じ読み方）
 const ctx = vm.createContext({ THREE, console, module: undefined, Math, Number, Array, Object, JSON });
-for (const f of ['09-aircraft.js', '10-flight.js']) {
+for (const f of ['09-aircraft.js', '10-flight.js', '13-autopilot.js']) {
   const src = fs.readFileSync(path.join(__dirname, '..', 'js', 'env', f), 'utf8');
   vm.runInContext(src, ctx, { filename: f });
 }
 const {
   buildAircraftModel, defaultAircraftConfig, analyzeAircraftPerformance,
   createFlightState, createFlightControls, advanceFlight, placeAircraftOnGround,
-  airDensityAt, solveLevelTrim, vtolClimbSpeedLimit, accumulateAeroForces,
+  airDensityAt, solveLevelTrim, vtolClimbSpeedLimit, accumulateAeroForces, refreshFlightReadouts,
+  createAutopilotState, stepAutopilot, apSpeedSchedule, apMakeApproachPlan,
+  apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo,
 } = ctx;
 
 let failures = 0;
@@ -898,6 +900,256 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
     (toasts[toasts.length - 1] || {}).msg || '—');
   check(bctx.vtolBalanceReport().engines.every((e) => e.props.thrustKgf === 1000),
     '断ったときは推力を書き換えない');
+}
+
+// --- 自動操縦：経路の組み立て ---------------------------------------------------
+{
+  // 追い風では降りられないので、風上へ向かう側の末端から進入する
+  check(apPickRunwayHeading(90, 90) === 270, '向かい風になる側の滑走路を選ぶ（風が東へ吹く）',
+    String(apPickRunwayHeading(90, 90)));
+  check(apPickRunwayHeading(90, 270) === 90, '風向が反対なら反対の末端から',
+    String(apPickRunwayHeading(90, 270)));
+
+  // 方位0は-Z、90は+X（10-flight.js と同じ約束）
+  check(Math.abs(apBearingTo(0, 0, 0, -100) - 0) < 0.01, '真北(-Z)の方位は0°');
+  check(Math.abs(apBearingTo(0, 0, 100, 0) - 90) < 0.01, '真東(+X)の方位は90°');
+  check(Math.abs(apWrap180(350 - 10) - -20) < 1e-9, '方位の差は近いほうを回る', String(apWrap180(340)));
+
+  // 東西の滑走路（方位90）。進入は西端から東へ。
+  const plan = apMakeApproachPlan(
+    { id: 'TST', x: 0, z: 0, elevationM: 120 },
+    { runwayLengthM: 2400, headingDeg: 90 }, 270);
+  check(plan.heading === 90, '滑走路の向きが決まる', String(plan.heading));
+  check(Math.abs(plan.threshold.x - -1200) < 1 && Math.abs(plan.threshold.z) < 1,
+    '進入端は滑走路の手前側', `(${plan.threshold.x.toFixed(0)}, ${plan.threshold.z.toFixed(0)})`);
+  check(plan.aim.x > plan.threshold.x, '狙う接地点は進入端より先');
+  check(Math.abs(plan.faf.x - (plan.threshold.x - 9000)) < 1, '最終進入開始点は延長線上の手前9km');
+  // 標高120mの空港なら、進入開始点の高度も標高ぶん上がる
+  check(plan.fafAltM > 120 + 400 && plan.fafAltM < 120 + 600,
+    '進入開始点の高度は標高＋3°ぶん', plan.fafAltM.toFixed(0) + 'm');
+
+  // 経路上のどこにいるか
+  const on = apTrackPosition(plan, plan.aim.x - 5000, 0);
+  check(Math.abs(on.before - 5000) < 1 && Math.abs(on.cross) < 1,
+    '中心線上にいれば横ずれ0', `before=${on.before.toFixed(0)} cross=${on.cross.toFixed(0)}`);
+  const right = apTrackPosition(plan, plan.aim.x - 5000, 300);
+  check(right.cross > 299 && right.cross < 301, '中心線の右にいれば横ずれは+',
+    right.cross.toFixed(0) + 'm');
+}
+
+// --- 自動操縦：高度維持 ---------------------------------------------------------
+//
+// ユーザーの最初の要望がこれ（「設定した高度を飛び続ける機能」）。
+// 上げるほうと下げるほう、どちらもきっちり止まることを確かめる。
+{
+  const st = createFlightState();
+  const c = createFlightControls();
+  st.position.set(0, 600, 0);
+  st.velocity.set(0, 0, -50);
+  c.gearDown = false; c.parkingBrake = false; c.throttle = 0.7;
+  const ap = createAutopilotState();
+  ap.altHold = true; ap.targetAltitudeM = 1000;
+
+  const spd = apSpeedSchedule(model);
+  let minSpeed = Infinity;
+  const run = (seconds) => {
+    for (let i = 0; i < seconds * 60; i++) {
+      stepAutopilot(model, st, c, ap, 1 / 60, {});
+      advanceFlight(model, st, c, noWind, flatGround, 1 / 60);
+      minSpeed = Math.min(minSpeed, st.airspeed);
+    }
+  };
+
+  run(400);
+  check(Math.abs(st.altitudeM - 1000) < 15, '設定した高度まで上がって止まる',
+    st.altitudeM.toFixed(1) + 'm');
+  check(Math.abs(st.rollDeg) < 3, '翼が水平に戻っている', st.rollDeg.toFixed(1) + '°');
+  // 高度を追いかけて失速するのがいちばん危ない壊れ方（出力は操縦者が持ったままなので）
+  check(minSpeed > spd.stall, '高度を追いかけて失速速度を割らない',
+    `最低${minSpeed.toFixed(1)} / 失速${spd.stall.toFixed(1)} m/s`);
+
+  ap.targetAltitudeM = 400;
+  run(300);
+  check(Math.abs(st.altitudeM - 400) < 15, '下げるほうも設定した高度で止まる',
+    st.altitudeM.toFixed(1) + 'm');
+
+  // 揺れずに保てているか（最後の60秒の高度の振れ幅）
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < 60 * 60; i++) {
+    stepAutopilot(model, st, c, ap, 1 / 60, {});
+    advanceFlight(model, st, c, noWind, flatGround, 1 / 60);
+    lo = Math.min(lo, st.altitudeM); hi = Math.max(hi, st.altitudeM);
+  }
+  check(hi - lo < 5, '保っている間、高度が上下に揺れない', `振れ幅 ${(hi - lo).toFixed(2)}m`);
+}
+
+// --- 自動操縦：離陸から着陸まで --------------------------------------------------
+//
+// ここが本題。滑走路に置いた機体が、自分で浮いて、飛んで、降りて、止まるか。
+// 進む向きを変えて4通り試す——旋回が要る経路で初めて出るずれがあるため
+// （実際、90°横の滑走路へ回り込む経路で中心線に乗れない不具合が出た）。
+function autopilotFlight(opts) {
+  const st = createFlightState();
+  const c = createFlightControls();
+  const depHeading = opts.departHeading === undefined ? 90 : opts.departHeading;
+  const f = { x: Math.sin(depHeading * Math.PI / 180), z: -Math.cos(depHeading * Math.PI / 180) };
+  placeAircraftOnGround(model, st, -f.x * 1160, -f.z * 1160, depHeading, flatGround);
+
+  const dest = { id: 'DST', x: opts.destX, z: opts.destZ, elevationM: 0 };
+  const settings = { runwayLengthM: 2400, headingDeg: opts.destHeading };
+  const ap = createAutopilotState();
+  ap.full = true;
+  ap.targetAltitudeM = opts.altitudeM || 900;
+  ap.destAirportId = dest.id;
+  ap.plan = apMakeApproachPlan(dest, settings, 0);
+  ap.takeoffHeadingDeg = depHeading;
+  ap.phase = 'takeoff';
+
+  const seen = [];
+  let t = 0, prev = '', worstG = 0, sink = 0, prevVs = 0;
+  const wind = opts.wind || noWind;
+  while (t < (opts.maxSeconds || 2200)) {
+    stepAutopilot(model, st, c, ap, 1 / 60, {});
+    const before = st.velocity.clone();
+    advanceFlight(model, st, c, wind, flatGround, 1 / 60);
+    if (st.onGround) {
+      worstG = Math.max(worstG, before.sub(st.velocity).length() * 60 / 9.80665);
+      if (!sink && ap.phase !== 'takeoff') sink = prevVs;
+    }
+    prevVs = st.verticalSpeed;
+    t += 1 / 60;
+    if (ap.phase !== prev) { prev = ap.phase; seen.push(ap.phase); }
+    if (ap.phase === 'done' || st.crashed) break;
+  }
+  return { st, c, ap, t, seen, worstG, sink, track: apTrackPosition(ap.plan, st.position.x, st.position.z) };
+}
+
+{
+  const routes = [
+    { label: '東へ60km（旋回なし）', destX: 60000, destZ: 0, destHeading: 90 },
+    { label: '北東へ50km・滑走路は南北', destX: 35000, destZ: -35000, destHeading: 0 },
+    { label: '西へ40km（180°の旋回）', destX: -40000, destZ: 0, destHeading: 270 },
+    { label: '南へ35km・滑走路は東西', destX: 0, destZ: 35000, destHeading: 90 },
+  ];
+  for (const r of routes) {
+    const f = autopilotFlight(r);
+    note('自動操縦', `${r.label} … ${f.seen.join('→')} ${f.t.toFixed(0)}秒`);
+    check(f.ap.phase === 'done', `${r.label}：着陸まで通しでできる`,
+      `${f.ap.phase} / ${f.t.toFixed(0)}秒`);
+    check(!f.st.crashed, `${r.label}：墜落しない`);
+    // 中心線に乗れているか。滑走路の幅（45m）の半分より内側であること。
+    check(Math.abs(f.track.cross) < 22, `${r.label}：滑走路の中心線の上に降りる`,
+      f.track.cross.toFixed(1) + 'm');
+    // 狙った接地点から滑走路の中に収まっているか（滑走路は2400m、狙いは末端から200m）
+    check(f.track.before > -2000, `${r.label}：滑走路の中に降りる`,
+      `狙いの${(-f.track.before).toFixed(0)}m先`);
+    // 接地の衝撃。12-flight-mode.js の墜落判定（12G）に届いてはいけない
+    check(f.worstG < 6, `${r.label}：脚を壊さずに降りる`, f.worstG.toFixed(1) + 'G');
+    check(Math.abs(f.sink) < 3, `${r.label}：接地の沈下が穏やか`, f.sink.toFixed(1) + 'm/s');
+    check(f.st.groundSpeed < 2 && f.c.parkingBrake, `${r.label}：止まって駐機ブレーキまで入る`,
+      f.st.groundSpeed.toFixed(1) + 'm/s');
+  }
+}
+
+// --- 自動操縦：風の中でも降りられるか ---------------------------------------------
+{
+  // 横風。中心線に乗るには機首を風上へ向けたまま降りることになる。
+  const cross = autopilotFlight({
+    destX: 40000, destZ: 0, destHeading: 90,
+    wind: new THREE.Vector3(0, 0, 25 / 3.6), // 南へ25km/h＝滑走路に真横から
+    maxSeconds: 2600,
+  });
+  note('自動操縦', `横風25km/h … ${cross.seen.join('→')} ${cross.t.toFixed(0)}秒`);
+  check(cross.ap.phase === 'done' && !cross.st.crashed, '横風25km/hでも着陸できる',
+    `${cross.ap.phase} / ${cross.t.toFixed(0)}秒`);
+  check(Math.abs(cross.track.cross) < 30, '横風でも中心線から流されない',
+    cross.track.cross.toFixed(1) + 'm');
+}
+
+// --- 自動操縦：降りられなければやり直す ------------------------------------------
+//
+// 高すぎるところから進入に放り込む。そのまま突っ込むのでも素通りするのでもなく、
+// 上がり直してもう一度進入に入れること（ここで諦めると永遠に飛び続ける）。
+{
+  const st = createFlightState();
+  const c = createFlightControls();
+  const dest = { id: 'DST', x: 0, z: 0, elevationM: 0 };
+  const ap = createAutopilotState();
+  ap.full = true; ap.targetAltitudeM = 900; ap.destAirportId = 'DST';
+  ap.plan = apMakeApproachPlan(dest, { runwayLengthM: 2400, headingDeg: 90 }, 0);
+  ap.phase = 'approach';
+
+  // 接地点の1km手前・高度500m＝3°の進入線から450m高い
+  st.position.set(ap.plan.aim.x - 1000, 500, ap.plan.aim.z);
+  st.quaternion.setFromEuler(new THREE.Euler(0, THREE.MathUtils.degToRad(-90), 0, 'YXZ'));
+  st.velocity.set(45, 0, 0);
+  c.gearDown = true; c.parkingBrake = false; c.throttle = 0.5;
+  refreshFlightReadouts(model, st, flatGround); // 位置を直に置いたので計器を合わせる
+
+  const seen = [];
+  let t = 0, prev = 'approach';
+  while (t < 1400) {
+    stepAutopilot(model, st, c, ap, 1 / 60, {});
+    advanceFlight(model, st, c, noWind, flatGround, 1 / 60);
+    t += 1 / 60;
+    if (ap.phase !== prev) { prev = ap.phase; seen.push(ap.phase); }
+    if (ap.phase === 'done' || st.crashed) break;
+  }
+  note('自動操縦', `高すぎる進入 … approach→${seen.join('→')} ${t.toFixed(0)}秒`);
+  check(seen.indexOf('goaround') === 0, '降りられなければやり直しに入る', seen.join('→'));
+  check(seen[seen.length - 1] === 'done' && !st.crashed, 'やり直したあと着陸まで行ける',
+    `${ap.phase} / ${t.toFixed(0)}秒`);
+}
+
+// --- 自動操縦：機体が違っても飛ばせるか ------------------------------------------
+//
+// 練習機に合わせた数字を並べていないか。寸法4倍・重量150倍・推力200倍の
+// 大型機を作って、同じ制御で降りられることを確かめる。
+{
+  const big = defaultAircraftConfig();
+  big.name = '大型機'; big.modelWeightKg = 165000;
+  big.modelMaxSpeedValue = 480; big.modelMaxSpeedUnit = 'kt';
+  const S = 4;
+  const scale = (v) => { v.x *= S; v.y *= S; v.z *= S; };
+  scale(big.cg);
+  for (const p of big.parts) {
+    scale(p.position);
+    if (p.props && p.props.corners) for (const k in p.props.corners) scale(p.props.corners[k]);
+    if (p.props && p.props.span) p.props.span *= S;
+    if (p.props && p.props.thrustKgf) p.props.thrustKgf *= 200;
+  }
+  const bigModel = buildAircraftModel(big);
+  const spd = apSpeedSchedule(bigModel);
+  note('大型機', `${bigModel.massKg.toLocaleString()}kg / 翼${bigModel.wingArea.toFixed(0)}m²`
+    + ` / 失速${(spd.stall * KT).toFixed(0)}kt / 巡航${(spd.cruise * KT).toFixed(0)}kt`);
+
+  const st = createFlightState();
+  const c = createFlightControls();
+  placeAircraftOnGround(bigModel, st, -1160, 0, 90, flatGround);
+  const ap = createAutopilotState();
+  ap.full = true; ap.targetAltitudeM = 3000; ap.destAirportId = 'DST';
+  ap.plan = apMakeApproachPlan({ id: 'DST', x: 120000, z: 0, elevationM: 0 },
+    { runwayLengthM: 3500, headingDeg: 90 }, 0);
+  ap.takeoffHeadingDeg = 90; ap.phase = 'takeoff';
+
+  let t = 0, worstG = 0;
+  const seen = [];
+  let prev = '';
+  while (t < 2500) {
+    stepAutopilot(bigModel, st, c, ap, 1 / 60, {});
+    const before = st.velocity.clone();
+    advanceFlight(bigModel, st, c, noWind, flatGround, 1 / 60);
+    if (st.onGround) worstG = Math.max(worstG, before.sub(st.velocity).length() * 60 / 9.80665);
+    t += 1 / 60;
+    if (ap.phase !== prev) { prev = ap.phase; seen.push(ap.phase); }
+    if (ap.phase === 'done' || st.crashed) break;
+  }
+  const track = apTrackPosition(ap.plan, st.position.x, st.position.z);
+  note('自動操縦', `大型機で120km … ${seen.join('→')} ${t.toFixed(0)}秒`);
+  check(ap.phase === 'done' && !st.crashed, '大型機でも離陸から着陸まで通せる',
+    `${ap.phase} / ${t.toFixed(0)}秒`);
+  check(Math.abs(track.cross) < 30, '大型機でも中心線の上に降りる', track.cross.toFixed(1) + 'm');
+  check(worstG < 12, '大型機でも脚が壊れる衝撃にならない', worstG.toFixed(1) + 'G');
 }
 
 // --- 計算の速さ ---------------------------------------------------------------

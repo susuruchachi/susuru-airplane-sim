@@ -89,6 +89,9 @@ const EnvState = {
     // { 機体名: {x, y, z} }（機体座標。-Zが前・+Yが上・+Xが右）
     cgOffsets: {},
     cameraMode: 'chase',  // chase / cockpit / orbit / free
+    // 自動操縦（13-autopilot.js の createAutopilotState）。
+    // 高度維持と、離陸から着陸までの全自動をここに持つ。
+    autopilot: null,
   },
 
   // ミニマップ（2Dの世界地図）

@@ -306,6 +306,25 @@ body.touch-controls #hudHelp { display:none; }
       <button id="envBtnFlightReset" style="margin-top:8px;">滑走路へ戻る（R）</button>
     </div>
 
+    <div class="section-title">自動操縦</div>
+    <div class="env-group">
+      <div class="env-row">
+        <label for="envApAltHold">高度を維持（O）</label>
+        <input type="checkbox" id="envApAltHold">
+      </div>
+      <div class="hint" style="margin:2px 0 8px;">飛んでいる途中で入れると、そのときの高度を保ちます。</div>
+      <div class="env-row"><label>目標高度</label><span id="envApAltReadout" class="val">1,500 m</span></div>
+      <input type="range" id="envApAltitude" min="100" max="12000" step="50" value="1500">
+
+      <div class="env-row" style="margin-top:12px;"><label>目的地の空港</label></div>
+      <select id="envApDestination"></select>
+      <button id="envBtnApFull" class="primary" style="margin-top:8px;">🛫 全自動で離陸〜着陸（I）</button>
+      <div class="env-note" style="margin-top:6px;"><span id="envApReadout">—</span></div>
+      <div class="hint" style="margin-top:4px;">
+        出発はいまいる空港です。離陸・上昇・巡航・降下・進入・着陸まで通しでやります。
+      </div>
+    </div>
+
     <div class="section-title">空港</div>
     <div class="env-group">
       <div class="env-row"><label>空港</label></div>
@@ -411,6 +430,7 @@ body.touch-controls #hudHelp { display:none; }
 <script src="js/env/11-flight-ui.js" onerror="_markFailed('js/env/11-flight-ui.js')"></script>
 <script src="js/env/11b-flight-touch.js" onerror="_markFailed('js/env/11b-flight-touch.js')"></script>
 <script src="js/env/12-flight-mode.js" onerror="_markFailed('js/env/12-flight-mode.js')"></script>
+<script src="js/env/13-autopilot.js" onerror="_markFailed('js/env/13-autopilot.js')"></script>
 <script src="js/env/06-env-ui.js" onerror="_markFailed('js/env/06-env-ui.js')"></script>
 <script src="js/env/08-env-storage.js" onerror="_markFailed('js/env/08-env-storage.js')"></script>
 <script src="js/env/07-env-main.js" onerror="_markFailed('js/env/07-env-main.js')"></script>

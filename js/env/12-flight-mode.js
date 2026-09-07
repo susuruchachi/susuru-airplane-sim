@@ -37,6 +37,8 @@ async function initFlight() {
   initFlightHUD();
   initFlightTouch();
 
+  if (typeof setupAutopilotUI === 'function') setupAutopilotUI();
+
   const touchChk = document.getElementById('envFlightTouch');
   if (touchChk) {
     touchChk.checked = document.body.classList.contains('touch-controls');
@@ -98,6 +100,7 @@ async function toggleFlightMode() {
   const f = EnvState.flight;
   if (f.active) {
     f.active = false;
+    if (typeof stopAutopilot === 'function') stopAutopilot(null);
     if (f.aircraft) f.aircraft.group.visible = false;
     EnvState.orbitControls.enabled = true;
     document.body.classList.remove('flying');
@@ -172,6 +175,9 @@ function resetFlightToRunway() {
   const x = def.x - fx * back;
   const z = def.z - fz * back;
 
+  // 滑走路へ戻すのは「やり直す」ということなので、自動操縦も必ず切っておく
+  if (typeof stopAutopilot === 'function') stopAutopilot(null);
+
   placeAircraftOnGround(f.aircraft.model, f.state, x, z, heading, flightGroundHeightAt);
   f.state.crashed = false;
   f.controls.throttle = 0;
@@ -244,6 +250,9 @@ function updateFlight(dt) {
   if (!f.active || !f.aircraft) return;
 
   updateFlightInput(dt);
+  // 自動操縦は手の入力のあと。自分が受け持つ舵だけを上書きするので、
+  // 高度維持だけ入れているときは横と出力を手で操れる。
+  if (typeof updateAutopilot === 'function') updateAutopilot(dt);
   const wind = flightWindVector(_flightWind);
 
   const before = f.state.velocity.clone();
