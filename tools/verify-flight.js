@@ -40,7 +40,7 @@ for (const f of ['09-aircraft.js', '10-flight.js']) {
 const {
   buildAircraftModel, defaultAircraftConfig, analyzeAircraftPerformance,
   createFlightState, createFlightControls, advanceFlight, placeAircraftOnGround,
-  airDensityAt, solveLevelTrim,
+  airDensityAt, solveLevelTrim, vtolClimbSpeedLimit, accumulateAeroForces,
 } = ctx;
 
 let failures = 0;
@@ -552,6 +552,91 @@ function stallSpeedLevel(flap) {
     `${(tr.st.airspeed * KT).toFixed(0)}kt 高度${tr.st.altitudeAglM.toFixed(0)}m`);
 }
 function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
+
+// --- 垂直上昇できる速さの限界 ---------------------------------------------------
+// 前後・左右の位置と推力が完璧に釣り合っていても、上がる速さそのものが
+// 姿勢制御ノズルの手に負えないほど速ければ機体は回る。水平飛行のために向いている
+// 水平尾翼が真上からの風を受けると、面積と腕の長さがそのまま桁違いの
+// 抗力モーメントになり、ノズルでは追いつけなくなる——位置や推力の釣り合いとは別の限界。
+{
+  // 水平尾翼を大きく・後ろへ伸ばした機体（垂直上昇に弱いはず）
+  const heavy = defaultAircraftConfig();
+  for (const p of heavy.parts) {
+    if (p.type === 'wing' && p.props.role === 'htail') {
+      p.position.z += 2;
+      for (const k in p.props.corners) p.props.corners[k].x *= 2;
+    }
+  }
+  heavy.parts = heavy.parts.concat([{
+    id: 'e_lift', type: 'engine', name: '垂直離陸用',
+    position: { x: 0, y: 1.05, z: -0.35 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: { thrustKgf: 1500, spinAxis: 'y' },
+  }]);
+  const hm = buildAircraftModel(heavy);
+  const heavyLimit = vtolClimbSpeedLimit(hm);
+  note('尾翼を大きくした機体の上昇速度限界', heavyLimit === null ? '制限なし' : `${heavyLimit.toFixed(1)} m/s`);
+  check(heavyLimit !== null && heavyLimit < 20,
+    '尾翼が大きく後ろにある機体は、上昇速度の限界が低く出る', `${heavyLimit.toFixed(1)} m/s`);
+
+  // 内蔵機（尾翼が小さい）は同じ推力でも限界がずっと高いか、そもそも掛からない
+  const lightCfg = defaultAircraftConfig();
+  lightCfg.parts = lightCfg.parts.concat([{
+    id: 'e_lift', type: 'engine', name: '垂直離陸用',
+    position: { x: 0, y: 1.05, z: -0.35 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: { thrustKgf: 1500, spinAxis: 'y' },
+  }]);
+  const lightLimit = vtolClimbSpeedLimit(buildAircraftModel(lightCfg));
+  check(lightLimit === null || lightLimit > heavyLimit,
+    '尾翼が小さければ限界はもっと高いか、そもそも掛からない',
+    `${lightLimit === null ? '制限なし' : lightLimit.toFixed(1) + ' m/s'} > ${heavyLimit.toFixed(1)} m/s`);
+
+  const hoverThr = (hm.massKg * 9.80665) / hm.vtolThrustN;
+  const climb = (drive, secs) => {
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(hm, st, 0, 0, 0, flatGround);
+    c.parkingBrake = false;
+    let peakTilt = 0;
+    for (let i = 0; i < 60 * secs; i++) {
+      drive(c, st, i / 60);
+      advanceFlight(hm, st, c, noWind, flatGround, 1 / 60);
+      if (st.altitudeAglM > 2) peakTilt = Math.max(peakTilt, Math.abs(st.pitchDeg), Math.abs(st.rollDeg));
+    }
+    return peakTilt;
+  };
+  // 限界よりずっと遅い上昇率に抑えれば姿勢を保てる
+  const slowTilt = climb((c, s) => {
+    c.vtolThrottle = Math.max(0, Math.min(1, hoverThr + 0.06 - s.velocity.y * 0.02));
+  }, 20);
+  check(slowTilt < 15, '限界より十分遅く上昇すれば姿勢を保てる', peakLabel(slowTilt));
+  // 全開にすると、診断が示す限界をすぐ超えて姿勢を崩す
+  const fullTilt = climb((c) => { c.vtolThrottle = 1; }, 8);
+  check(fullTilt > 30, '全開で上昇すると診断どおり姿勢を崩す', peakLabel(fullTilt));
+}
+
+// --- 垂直離陸中は姿勢制御ノズルが総速度でなく前進速度でフェードする -------------------
+// まっすぐ上へ加速しているだけの機体（前向きの速度は0）を「総速度」で判定すると、
+// 一瞬で基準を超えてノズルを失う。姿勢が水平のままなら、どれだけ速く上がっても
+// ノズルは効き続けるべき。
+{
+  const cfg = defaultAircraftConfig();
+  cfg.parts = cfg.parts.concat([{
+    id: 'e_lift', type: 'engine', name: '垂直離陸用',
+    position: { x: 0, y: 1.05, z: -0.35 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: { thrustKgf: 1500, spinAxis: 'y' },
+  }]);
+  const vm2 = buildAircraftModel(cfg);
+  const st = createFlightState();
+  st.position.y = 500; st.altitudeM = 500;
+  st.quaternion.identity();
+  st.velocity.set(0, 90, 0); // 姿勢は水平のまま、真上へ90m/s
+  const c = createFlightControls();
+  c.vtolThrottle = 1;
+  const acc = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
+  accumulateAeroForces(vm2, st, c, noWind, acc);
+  check(Math.abs(st.forwardAirspeed) < 1 && st.airspeed > 80,
+    '姿勢が水平なら、真上へどれだけ速く上がっても前進速度は0のまま',
+    `前進速度${st.forwardAirspeed.toFixed(1)}m/s / 総速度${st.airspeed.toFixed(1)}m/s`);
+}
 
 // --- 垂直離陸エンジンの前後バランス ---------------------------------------------
 // 前後に離れた位置へ置いた垂直離陸用エンジンは、それだけで機首を振る力になる。

@@ -727,6 +727,26 @@ function analyzeAircraftPerformance(model) {
         + `抑えています。Builderで上向きエンジンを選び「推力を釣り合わせる」を押すと、`
         + `位置はそのままで推力を解き直して全部使えるようになります。` });
     }
+
+    // 位置も推力もぴったり釣り合っていても、上がる速さそのものが姿勢制御ノズルの
+    // 手に負えないほど速ければ機体は回る。水平飛行のために向いている水平尾翼が
+    // 真上からの風を受けると、面積と腕の長さがそのまま桁違いの抗力モーメントになり、
+    // ノズルでは追いつけなくなる——エンジンの位置や推力の釣り合いとは別の限界。
+    if (typeof vtolClimbSpeedLimit === 'function') {
+      const limit = vtolClimbSpeedLimit(model);
+      if (limit !== null && limit < 40) {
+        const accelFull = (liftThrust - W) / model.massKg;
+        const timeToLimit = accelFull > 0.1 ? limit / accelFull : null;
+        notes.push({ level: 'warn', text:
+          `垂直に毎秒${limit.toFixed(0)}m（${kt(limit)}kt）を超えて上昇すると、`
+          + `水平尾翼が真上からの風を受けて起こす力が姿勢制御ノズルの手に負えなくなり、`
+          + `姿勢を保てず回転します。`
+          + (timeToLimit !== null
+            ? `垂直の出力を全開にすると約${timeToLimit.toFixed(1)}秒でこの速度を超えます。`
+            : '')
+          + `垂直レバーはゆっくり操作するか、水平尾翼を小さく・重心に近づけてください。` });
+      }
+    }
   }
 
   return {

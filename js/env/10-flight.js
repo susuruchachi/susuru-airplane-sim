@@ -76,6 +76,7 @@ function createFlightState() {
 
     // 読み出し用（HUDと検証が使う）
     airspeed: 0,        // 対気速度 m/s
+    forwardAirspeed: 0, // 機首方向の速度成分 m/s（垂直離着陸の姿勢制御ノズルの判定に使う）
     groundSpeed: 0,
     altitudeM: 0,       // 平均海面から
     altitudeAglM: 0,    // 地表から
@@ -222,6 +223,12 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
   state.thrustN = thrustTotal;
   state.vtolThrustN = vtolTotal;
   state.airspeed = airspeed;
+  // 機首方向へどれだけ飛んでいるか（後ろ向きなら0扱い）。姿勢制御ノズルが
+  // 手を引くタイミングをこれで決める——total speedで決めると、まっすぐ上へ
+  // 加速しているだけの機体（前向きの速度は0）が一瞬で基準を超えてしまい、
+  // 水平飛行用に向いた水平尾翼が真上からの風を受けて暴れるだけの状態に
+  // 取り残される（姿勢が大きく傾いていないのにノズルだけ先に消える）。
+  state.forwardAirspeed = Math.max(-vAirBody.z, 0);
   // 迎角と横滑り角も、止まっているうちは意味を持たない
   const flying = airspeed > 8;
   state.alphaDeg = flying ? THREE.MathUtils.radToDeg(Math.atan2(-vAirBody.y, -vAirBody.z)) : 0;
@@ -246,7 +253,7 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
 const VTOL_RCS_DEG = { pitch: 14, roll: 34, yaw: 10 }; // 舵一杯のときの角加速度（°/s²）
 const VTOL_RCS_DAMP = 1.3;      // 角速度を戻す強さ（1/s）
 const VTOL_RCS_LEVEL = 0.7;     // 水平へ戻す強さ（rad/s² / 傾きのsin）
-const VTOL_RCS_FADE_MPS = 60;   // この速度まででノズルの効きを0にし、舵に任せる
+const VTOL_RCS_FADE_MPS = 60;   // 機首方向の速度がこれに達するまででノズルの効きを0にし、舵に任せる
 
 const _vtolUp = new THREE.Vector3();
 
@@ -254,7 +261,7 @@ function accumulateVtolControl(model, state, controls, out) {
   if (!model.hasVtol) return;
   const power = controls.vtolThrottle || 0;
   if (power < 0.02) return;
-  const fade = THREE.MathUtils.clamp(1 - state.airspeed / VTOL_RCS_FADE_MPS, 0, 1);
+  const fade = THREE.MathUtils.clamp(1 - (state.forwardAirspeed || 0) / VTOL_RCS_FADE_MPS, 0, 1);
   const auth = power * fade;
   if (auth <= 1e-4) return;
 
@@ -520,6 +527,47 @@ function trimToCurrentFlight(model, state) {
   return solveLevelTrim(model, v, Math.max(state.altitudeM, 0));
 }
 
+// --- 垂直上昇できる速さの限界 ---------------------------------------------------
+//
+// 姿勢制御ノズル（accumulateVtolControl）は、位置のずれから来るモーメントは消せても、
+// 「水平飛行のために向いている翼が真上からの風を受けて起こす」モーメントには
+// 追いつけないことがある。水平尾翼は水平飛行では小さな力で効けばよいので、
+// 面積を大きく・重心から遠くに置くほど強く効くよう作られている。ところが
+// 真上への風（迎角ほぼ90°）に対しては、その面積と腕の長さがそのまま
+// 桁違いに大きな抗力モーメントに化ける——本来の使われかたの外側なので、
+// ノズルの出せる力（I×VTOL_RCS_LEVEL 程度）ではまったく足りなくなる。
+//
+// ここでは実際の空力計算（accumulateAeroForces）そのものを使って、
+// 「姿勢は水平のまま、真上への速度だけを上げていったとき、モーメントが
+// ノズルの持ち分を超える速度」を挟み撃ちで探す。エンジンの推力は姿勢に
+// 効かない（釣り合っていれば）ので、この限界はスロットルに関係なく機体の
+// 形だけで決まる。
+function vtolClimbMomentAt(model, climbMps) {
+  const s = _trimScratch;
+  if (!s.state) { s.state = createFlightState(); s.controls = createFlightControls(); }
+  const st = s.state, c = s.controls;
+  st.position.set(0, 500, 0);
+  st.altitudeM = 500;
+  st.quaternion.identity();
+  st.velocity.set(0, climbMps, 0);
+  st.angularVelocity.set(0, 0, 0);
+  c.pitch = c.roll = c.yaw = c.flap = c.brake = c.trim = 0;
+  c.throttle = 0;
+  c.vtolThrottle = 0;
+  c.gearDown = false;
+  c.parkingBrake = false;
+  accumulateAeroForces(model, st, c, s.wind, s.out);
+  return s.out.torque.x;
+}
+
+function vtolClimbSpeedLimit(model) {
+  if (!model.hasVtol) return null;
+  const budget = Math.max(model.inertia.x, 1) * VTOL_RCS_LEVEL;
+  const over = (v) => Math.abs(vtolClimbMomentAt(model, v)) - budget;
+  if (over(200) <= 0) return null; // 200 m/sまで安全（現実的にはまず起きない）
+  return trimBisect(over, 0.2, 200);
+}
+
 // 地面へ機体を置く（滑走路の上に出すときと、リセットのとき）
 function placeAircraftOnGround(model, state, x, z, headingDeg, groundHeightAt) {
   state.velocity.set(0, 0, 0);
@@ -535,7 +583,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     createFlightState, createFlightControls, advanceFlight, flightStep,
     refreshFlightReadouts, placeAircraftOnGround, airDensityAt, liftCoefficient,
-    solveLevelTrim, trimToCurrentFlight,
+    solveLevelTrim, trimToCurrentFlight, vtolClimbSpeedLimit,
     FLIGHT_SUBSTEP, GEAR_SQUASH_M,
   };
 }
