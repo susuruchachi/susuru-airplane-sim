@@ -804,6 +804,63 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
     `${down.toFixed(1)}°/s → ${up.toFixed(1)}°/s`);
 }
 
+// --- ピッチ舵に腕が無い機体（デルタ翼のエレボンなど）--------------------------------
+//
+// 水平尾翼を持たず、主翼のエルロンだけで飛ばす機体（デルタ翼・エレボン機）で、
+// 重心を主翼の空力中心にぴったり合わせると、主翼をひねっても力の掛かる点が
+// 重心の真上になり、トリムを一杯まで振っても回転モーメントがまったく変わらない。
+// 実際にユーザーの機体（Concorde型）でこれが起き、原因の分からないまま
+// 「うまく飛べない」という報告になった——「翼が足りない」に埋もれず、
+// この根本原因（ピッチ舵に腕が無い）が理由としてちゃんと出ることを確かめる。
+{
+  const wing = (side, sign) => ({
+    id: 'w_' + side, type: 'wing', name: '主翼', position: { x: 0, y: 0, z: 0 },
+    rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: {
+      span: 5, role: 'main', side,
+      corners: {
+        rootLeading: { x: 0, y: 0, z: -9 },
+        rootTrailing: { x: 0, y: 0, z: 2 },
+        tipLeading: { x: sign * 5, y: 0, z: 1 },
+        tipTrailing: { x: sign * 5, y: 0, z: 2 },
+      },
+    },
+  });
+  const aileron = (side, sign) => ({
+    id: 'a_' + side, type: 'control_surface', name: 'エルロン', position: { x: sign * 4, y: 0, z: 1.5 },
+    rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: { kind: 'aileron', hingeAxis: 'x', minDeg: -20, maxDeg: 20, parentWingId: 'w_' + side, spanS: 0.7 },
+  });
+  const deltaConfig = (cgZ) => ({
+    name: 'デルタ翼テスト機', modelWeightKg: 50000, modelMaxSpeedValue: 400, modelMaxSpeedUnit: 'kt',
+    cg: { x: 0, y: 0, z: cgZ },
+    parts: [wing('right', 1), wing('left', -1), aileron('right', 1), aileron('left', -1)],
+  });
+
+  // まず重心z=0で組んで、主翼の空力中心のz位置を読む（このモデルはcg基準の相対座標なので、
+  // cg=0で組んだときの surface.center.z がそのまま「重心0の場合のAC位置」になる）
+  const probe = buildAircraftModel(deltaConfig(0));
+  const acZ = probe.surfaces.find((s) => s.role === 'main').center.z;
+  note('デルタ翼テスト機', `主翼の空力中心 z=${acZ.toFixed(2)}m（Builderの「主翼から重心を決定」が置く位置）`);
+
+  // 重心をぴったりその位置に合わせる
+  const onAc = buildAircraftModel(deltaConfig(acZ));
+  const perfOnAc = analyzeAircraftPerformance(onAc);
+  check(!perfOnAc.flyable, '重心が主翼の空力中心と一致すると、飛行不能と判定される');
+  check(perfOnAc.trimForClimb.reason === 'no_elevator',
+    '「翼が足りない」に埋もれず、ピッチ舵に腕が無いことが理由として出る', String(perfOnAc.trimForClimb.reason));
+  check(perfOnAc.notes.some((n) => n.level === 'error' && n.text.includes('ピッチ舵')),
+    'エラーとして「ピッチ舵」の説明が出る');
+
+  // 重心を主翼より少し前へ出せば、同じ主翼・同じエルロンのままモーメントの腕がつく
+  const ahead = buildAircraftModel(deltaConfig(acZ - 2));
+  const perfAhead = analyzeAircraftPerformance(ahead);
+  check(perfAhead.elevatorPower > 1e-3, '重心を主翼より前へ出せば、同じ機体でもピッチ舵に腕がつく',
+    perfAhead.elevatorPower.toFixed(0));
+  check(perfAhead.trimForClimb.reason !== 'no_elevator',
+    '理由も「腕が無い」ではなくなる', String(perfAhead.trimForClimb.reason));
+}
+
 // --- ロールの速さ -------------------------------------------------------------
 // 舵は「親の翼をまるごとひねる」扱いなので、翼の一部にしか付かないエルロンを
 // そのまま扱うとロールが実機の何倍にもなる（実際に毎秒310°で転がっていた）。

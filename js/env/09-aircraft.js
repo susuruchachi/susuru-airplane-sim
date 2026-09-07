@@ -670,7 +670,15 @@ function analyzeAircraftPerformance(model) {
   if (typeof solveLevelTrim === 'function') {
     const sol = solveLevelTrim(model, liftoffMps * 1.25, 300);
     trimForClimb = sol;
-    if (!sol.ok && sol.reason === 'elevator') {
+    if (!sol.ok && sol.reason === 'no_elevator') {
+      notes.push({ level: 'error', text:
+        `ピッチ舵（エレベーター）を一杯まで振っても、機体を回すモーメントがほとんど`
+        + `変わりません。舵面が重心とほぼ同じ前後位置にあり、力を出しても腕（重心からの`
+        + `距離）が無いためです。水平尾翼を持たずエルロンだけの機体（デルタ翼のエレボンなど）で、`
+        + `重心を主翼の空力中心にぴったり合わせると起きます——`
+        + `重心を主翼より少し前へずらす（そのぶん主翼の力に腕がつきます）か、`
+        + `重心から前後に離れた位置に水平尾翼とエレベーターを追加してください。` });
+    } else if (!sol.ok && sol.reason === 'elevator') {
       notes.push({ level: 'warn', text:
         `トリムを一杯まで取っても、上昇速度（${kt(liftoffMps * 1.25)} kt）で釣り合いません。`
         + `水平尾翼に対してエレベーターの舵角が足りないか、水平尾翼そのものが大きすぎます。`

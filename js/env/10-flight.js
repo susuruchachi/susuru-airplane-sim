@@ -509,6 +509,20 @@ function solveLevelTrim(model, speedMps, altitudeM) {
   const r = trimResiduals(model, speedMps, altitudeM, alpha, trim, thr);
   const liftOk = Math.abs(r.lift) < model.massKg * FLIGHT_GRAVITY * 0.05;
   const momentOk = Math.abs(r.moment) < model.massKg * 0.5;
+
+  // 「舵が足りない」と「舵に腕（モーメントの効き）がそもそも無い」は別の壊れ方で、
+  // 直しかたも違う。水平尾翼を持たずエルロンしか無い機体（デルタ翼のエレボンなど）で、
+  // 重心を主翼の空力中心にぴったり合わせると、主翼をひねっても力の掛かる点が重心の
+  // 真上（前後のずれ0）になり、トリムを一杯まで振っても回転モーメントがまったく
+  // 変わらない——「翼が足りない」という診断（liftOkの失敗が優先されて出る）では
+  // この根本原因が隠れてしまう。トリムを両端まで振ってモーメントの変化を直接測り、
+  // ほぼ変わらなければそれを優先して理由に出す。
+  let reason = null;
+  if (!liftOk || !momentOk) {
+    const mLo = trimResiduals(model, speedMps, altitudeM, alpha, -1, thr).moment;
+    const mHi = trimResiduals(model, speedMps, altitudeM, alpha, 1, thr).moment;
+    reason = Math.abs(mHi - mLo) < model.massKg * 0.5 ? 'no_elevator' : (!liftOk ? 'wing' : 'elevator');
+  }
   return {
     // 釣り合わない機体に探索の途中の値を当てると、かえって逆向きに舵を切ってしまう。
     // 解けなかったときは中立のまま返し、警告のほうで理由を伝える。
@@ -516,8 +530,8 @@ function solveLevelTrim(model, speedMps, altitudeM) {
     alphaDeg: THREE.MathUtils.radToDeg(alpha),
     throttle: thr,
     ok: liftOk && momentOk,
-    // 釣り合わない理由。翼が足りないのか、舵が足りないのかで直しかたが違う
-    reason: (liftOk && momentOk) ? null : (!liftOk ? 'wing' : 'elevator'),
+    // 釣り合わない理由。翼が足りない／舵が弱い／舵に腕が無い、で直しかたが違う
+    reason,
   };
 }
 
