@@ -1,17 +1,19 @@
 // 11b-flight-touch.js — 画面の上の操縦装置（キーボードのない端末で飛ばすため）
 //
-// スマホには Shift も Tab も無い。指で触れる操縦桿とレバーを画面に重ねる。
+// スマホには Shift も Tab も無い。指で触れるレバーとボタンを画面に重ねる。
 //
 // 作りの決めごと：
-//   ・操縦桿（ピッチ・ロール）は離すと中央へ戻る。キーボードのばね戻りと同じ扱い。
+//   ・エレベーター（ピッチ）とエルロン（ロール）は別々のレバー。実機のスティックのように
+//     1本にまとめると、片方だけを微妙に動かしたいときに反対側も一緒に動いてしまう。
+//     指で細かく操作するにはそれぞれ別に触れたほうがいい。
+//   ・エレベーター・エルロンは離すと中央へ戻る。キーボードのばね戻りと同じ扱い。
 //   ・出力レバーは離しても位置が残る。実機のスロットルと同じで、
 //     指を離すたびに全閉になったら離陸もできない。
 //   ・レバーは controls.throttle を直接書く。キーボードは「毎秒どれだけ動かすか」を
 //     足し込む作りなので、どちらを触っても同じ値が動き、取り合いにならない。
 //   ・pointer イベントを1本ずつ捕まえる（setPointerCapture）。
-//     こうしないと、操縦桿を握ったまま出力を上げる——という当たり前のことができない。
-
-const FLIGHT_TOUCH_STICK_R = 52;   // 操縦桿を倒しきる距離（px）
+//     こうしないと、エレベーターを握ったままエルロンも操作する——という当たり前の
+//     ことができない。
 
 const _flightTouch = {
   el: null,
@@ -21,7 +23,6 @@ const _flightTouch = {
   // 指で押さえている間だけ真になる。離れていればキーボード側の値を使う。
   hold: { pitch: false, roll: false, yaw: 0, brake: false },
   pitch: 0, roll: 0,
-  stickPointer: null,
 };
 
 // 触る端末か。マウスしか無いPCに操縦桿を出しても邪魔なだけなので、既定は自動判定。
@@ -38,9 +39,17 @@ function initFlightTouch() {
   el.id = 'flightTouch';
   el.innerHTML = `
     <div class="ft-left">
-      <div class="ft-stick" id="ftStick">
-        <div class="ft-cross"></div>
-        <div class="ft-knob" id="ftKnob"></div>
+      <div class="ft-attitude">
+        <div class="ft-lever ft-elevator" id="ftElevator">
+          <div class="ft-center-line ft-center-h"></div>
+          <div class="ft-fill"></div>
+          <div class="ft-lever-label"><span>昇降舵</span><b>0%</b></div>
+        </div>
+        <div class="ft-lever ft-aileron" id="ftAileron">
+          <div class="ft-center-line ft-center-v"></div>
+          <div class="ft-fill"></div>
+          <div class="ft-lever-label"><span>補助翼</span><b>0%</b></div>
+        </div>
       </div>
       <div class="ft-rudder">
         <button type="button" class="ft-btn" data-hold="yawLeft">◀ 旋回</button>
@@ -71,7 +80,8 @@ function initFlightTouch() {
   host.appendChild(el);
   _flightTouch.el = el;
 
-  bindFlightTouchStick(el.querySelector('#ftStick'));
+  bindFlightAxisLever(el.querySelector('#ftElevator'), 'vertical', 'pitch');
+  bindFlightAxisLever(el.querySelector('#ftAileron'), 'horizontal', 'roll');
   for (const lever of el.querySelectorAll('[data-lever]')) bindFlightTouchLever(lever);
   for (const b of el.querySelectorAll('[data-hold]')) bindFlightTouchHold(b);
   for (const b of el.querySelectorAll('[data-tap]')) bindFlightTouchTap(b);
@@ -96,55 +106,71 @@ function releaseFlightTouch() {
   t.hold.pitch = t.hold.roll = t.hold.brake = false;
   t.hold.yaw = 0;
   t.pitch = t.roll = 0;
-  t.stickPointer = null;
-  const knob = document.getElementById('ftKnob');
-  if (knob) knob.style.transform = 'translate(-50%,-50%)';
   if (_flightTouch.el) {
+    paintAxisLever(_flightTouch.el.querySelector('#ftElevator'), 0);
+    paintAxisLever(_flightTouch.el.querySelector('#ftAileron'), 0);
     for (const b of _flightTouch.el.querySelectorAll('.ft-btn.on')) b.classList.remove('on');
   }
 }
 
-// --- 操縦桿 -------------------------------------------------------------------
+// --- エレベーター・エルロン（中央へ戻るレバー） --------------------------------
 
-function bindFlightTouchStick(pad) {
-  if (!pad) return;
-  const knob = pad.querySelector('#ftKnob');
+// v（-1〜1）を中央から伸びる帯として描く。中央からの距離で舵の大きさが、
+// 伸びている向きで舵の方向がひと目でわかる。要素の大きさをJS側で測らずに済むよう、
+// すべて%で位置決めする（レスポンシブでレバーの寸法が変わっても計算し直さなくていい）。
+function paintAxisLever(el, v) {
+  if (!el) return;
+  const fill = el.querySelector('.ft-fill');
+  const label = el.querySelector('.ft-lever-label b');
+  const pct = Math.abs(v) * 50;
+  if (fill) {
+    if (el.classList.contains('ft-aileron')) {
+      if (v >= 0) { fill.style.left = '50%'; fill.style.right = (50 - pct) + '%'; }
+      else { fill.style.right = '50%'; fill.style.left = (50 - pct) + '%'; }
+    } else {
+      if (v >= 0) { fill.style.top = '50%'; fill.style.bottom = (50 - pct) + '%'; }
+      else { fill.style.bottom = '50%'; fill.style.top = (50 - pct) + '%'; }
+    }
+  }
+  if (label) label.textContent = `${v >= 0 ? '+' : ''}${Math.round(v * 100)}%`;
+}
+
+function bindFlightAxisLever(el, orientation, axis) {
+  if (!el) return;
   const t = _flightTouch;
+  let pointer = null;
 
   const move = (e) => {
-    const r = pad.getBoundingClientRect();
-    let dx = e.clientX - (r.left + r.width / 2);
-    let dy = e.clientY - (r.top + r.height / 2);
-    const len = Math.hypot(dx, dy);
-    const max = FLIGHT_TOUCH_STICK_R;
-    if (len > max) { dx *= max / len; dy *= max / len; }
-    // 手前に引く（下へ動かす）と機首上げ。実機の操縦桿と同じ向き。
-    t.pitch = THREE.MathUtils.clamp(dy / max, -1, 1);
-    t.roll = THREE.MathUtils.clamp(dx / max, -1, 1);
-    t.hold.pitch = t.hold.roll = true;
-    if (knob) knob.style.transform = `translate(calc(-50% + ${dx.toFixed(1)}px), calc(-50% + ${dy.toFixed(1)}px))`;
+    const r = el.getBoundingClientRect();
+    const v = orientation === 'vertical'
+      ? ((e.clientY - r.top) / Math.max(r.height, 1) - 0.5) * 2
+      : ((e.clientX - r.left) / Math.max(r.width, 1) - 0.5) * 2;
+    t[axis] = THREE.MathUtils.clamp(v, -1, 1);
+    t.hold[axis] = true;
+    paintAxisLever(el, t[axis]);
   };
 
-  pad.addEventListener('pointerdown', (e) => {
-    if (t.stickPointer !== null) return;
-    t.stickPointer = e.pointerId;
-    pad.setPointerCapture(e.pointerId);
+  el.addEventListener('pointerdown', (e) => {
+    if (pointer !== null) return;
+    pointer = e.pointerId;
+    el.setPointerCapture(e.pointerId);
     move(e);
     e.preventDefault();
   });
-  pad.addEventListener('pointermove', (e) => {
-    if (t.stickPointer !== e.pointerId) return;
+  el.addEventListener('pointermove', (e) => {
+    if (pointer !== e.pointerId) return;
     move(e);
     e.preventDefault();
   });
   const up = (e) => {
-    if (t.stickPointer !== e.pointerId) return;
-    t.stickPointer = null;
-    t.hold.pitch = t.hold.roll = false;
-    if (knob) knob.style.transform = 'translate(-50%,-50%)';
+    if (pointer !== e.pointerId) return;
+    pointer = null;
+    t.hold[axis] = false;
+    t[axis] = 0;
+    paintAxisLever(el, 0);
   };
-  pad.addEventListener('pointerup', up);
-  pad.addEventListener('pointercancel', up);
+  el.addEventListener('pointerup', up);
+  el.addEventListener('pointercancel', up);
 }
 
 // --- 出力レバー ---------------------------------------------------------------
@@ -257,4 +283,9 @@ function updateFlightTouchReadout() {
   };
   paint('#ftThrottle', f.controls.throttle);
   paint('#ftVtol', f.controls.vtolThrottle || 0);
+
+  // 指で触れていない間は、キーボードで動かした値もレバーの表示に映す
+  // （触れた瞬間に自分の値へ戻すので、取り合いにはならない）
+  if (!t.hold.pitch) paintAxisLever(t.el.querySelector('#ftElevator'), f.controls.pitch);
+  if (!t.hold.roll) paintAxisLever(t.el.querySelector('#ftAileron'), f.controls.roll);
 }

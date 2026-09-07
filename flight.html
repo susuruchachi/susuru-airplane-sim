@@ -125,18 +125,10 @@ body.flying.touch-controls #flightTouch { display:block; }
 body.touch-controls #flightHud .hud-bottom { bottom:150px; }
 /* 指で飛ばしているあいだはキーの一覧を出さない（ボタンと重なるうえに読む相手がいない） */
 body.touch-controls #hudHelp { display:none; }
-/* 操縦桿は親指が届く画面の隅に置き、ラダーはその上に重ねる */
+/* 昇降舵・補助翼は親指が届く画面の隅に置き、ラダーはその下に並べる */
 #flightTouch .ft-left { position:absolute; left:14px; bottom:16px;
   display:flex; flex-direction:column-reverse; align-items:center; gap:8px; pointer-events:auto; }
-#flightTouch .ft-stick { position:relative; width:132px; height:132px; border-radius:50%;
-  background:rgba(8,14,22,0.55); border:1px solid rgba(120,170,220,0.28);
-  backdrop-filter:blur(3px); }
-#flightTouch .ft-cross { position:absolute; inset:14px; border-radius:50%;
-  border:1px dashed rgba(120,170,220,0.18); }
-#flightTouch .ft-knob { position:absolute; left:50%; top:50%; width:52px; height:52px;
-  margin:0; border-radius:50%; background:rgba(63,140,220,0.55);
-  border:1px solid rgba(160,205,245,0.7); transform:translate(-50%,-50%);
-  box-shadow:0 2px 10px rgba(0,0,0,.45); }
+#flightTouch .ft-attitude { display:flex; flex-direction:column; align-items:center; gap:8px; }
 #flightTouch .ft-rudder { display:flex; gap:6px; }
 #flightTouch .ft-right { position:absolute; right:14px; bottom:16px;
   display:flex; gap:8px; pointer-events:auto; }
@@ -146,6 +138,17 @@ body.touch-controls #hudHelp { display:none; }
 #flightTouch .ft-fill { position:absolute; left:0; right:0; bottom:0; height:0%;
   background:linear-gradient(180deg,rgba(63,140,220,0.75),rgba(63,140,220,0.35)); }
 #flightTouch .ft-vtol .ft-fill { background:linear-gradient(180deg,rgba(90,200,140,0.75),rgba(90,200,140,0.35)); }
+/* 昇降舵・補助翼は中央から伸びる帯で舵の向きと大きさを示す（0からの塗りつぶしではない） */
+#flightTouch .ft-elevator, #flightTouch .ft-aileron { background:rgba(8,14,22,0.55); }
+#flightTouch .ft-elevator { width:58px; height:150px; }
+#flightTouch .ft-aileron { width:150px; height:58px; }
+#flightTouch .ft-elevator .ft-fill, #flightTouch .ft-aileron .ft-fill {
+  left:0; right:0; top:auto; bottom:auto; height:auto;
+  background:rgba(240,190,90,0.55); }
+#flightTouch .ft-aileron .ft-fill { left:auto; right:auto; top:0; bottom:0; }
+#flightTouch .ft-center-line { position:absolute; background:rgba(200,220,240,0.4); }
+#flightTouch .ft-center-h { left:6px; right:6px; top:50%; height:1px; }
+#flightTouch .ft-center-v { top:6px; bottom:6px; left:50%; width:1px; }
 #flightTouch .ft-lever-label { position:absolute; inset:0; display:flex; flex-direction:column;
   align-items:center; justify-content:space-between; padding:6px 0; pointer-events:none; }
 #flightTouch .ft-lever-label span { font-size:10px; color:#cfe0f0; letter-spacing:.06em; }
@@ -158,18 +161,18 @@ body.touch-controls #hudHelp { display:none; }
   backdrop-filter:blur(3px); cursor:pointer; touch-action:none; }
 #flightTouch .ft-btn.on { background:rgba(63,140,220,0.6); border-color:rgba(160,205,245,0.7); }
 @media (max-width:640px){
-  #flightTouch .ft-stick { width:112px; height:112px; }
-  #flightTouch .ft-knob { width:44px; height:44px; }
   #flightTouch .ft-lever { width:46px; height:140px; }
+  #flightTouch .ft-elevator { width:48px; height:128px; }
+  #flightTouch .ft-aileron { width:128px; height:48px; }
   #flightTouch .ft-actions { max-width:38vw; }
   body.touch-controls #flightHud .hud-bottom { bottom:126px; }
 }
 /* 横向きのスマホは縦が足りない。下段の計器は上段の下へ移し、操縦装置に場所を譲る */
 @media (max-height:560px){
   body.touch-controls #flightHud .hud-bottom { top:60px; bottom:auto; }
-  #flightTouch .ft-stick { width:104px; height:104px; }
-  #flightTouch .ft-knob { width:40px; height:40px; }
   #flightTouch .ft-lever { width:44px; height:118px; }
+  #flightTouch .ft-elevator { width:44px; height:104px; }
+  #flightTouch .ft-aileron { width:104px; height:44px; }
   #flightTouch .ft-btn { padding:7px 9px; font-size:10.5px; }
   #flightTouch .ft-actions { max-width:min(40vw,300px); bottom:10px; }
   #flightTouch .ft-left, #flightTouch .ft-right { bottom:10px; }
