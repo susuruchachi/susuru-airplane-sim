@@ -178,6 +178,9 @@ function resetFlightToRunway() {
   f.controls.brake = 0;
   f.controls.gearDown = true;
   f.controls.parkingBrake = true;
+  // 上昇していく速度でトリムを取っておく。ここを0のまま出すと、機体によって
+  // 手を離した瞬間に機首が上がったり下がったりして、まっすぐ飛ぶことすらできない。
+  setFlightTrimForClimb();
 
   // 周りの地形・街・空港をその場でそろえる（飛んだ先が空っぽにならないように）
   EnvState.camera.position.set(x, f.state.position.y + 30, z + 60);
@@ -187,6 +190,29 @@ function resetFlightToRunway() {
   placeAircraftOnGround(f.aircraft.model, f.state, x, z, heading, flightGroundHeightAt);
   syncAircraftVisual();
   announceFlight(`${def.id} ${runwayDesignatorFor(heading)} — 出力を上げて離陸`);
+}
+
+// --- トリム -------------------------------------------------------------------
+
+// 離陸したあとの上昇速度でトリムを取っておく。滑走路に出すたびに呼ぶ。
+function setFlightTrimForClimb() {
+  const f = EnvState.flight;
+  if (!f.aircraft) return;
+  const perf = analyzeAircraftPerformance(f.aircraft.model);
+  // 空気の濃さで釣り合いは変わるので、滑走路の高さを基準にする（高地の空港もある）
+  const sol = solveLevelTrim(f.aircraft.model, perf.liftoffMps * 1.25, f.state.altitudeM + 300);
+  f.controls.trim = sol.trim;
+}
+
+// いま飛んでいる速度・高度に合わせてトリムを取り直す（Tキー／画面のボタン）
+function autoTrimFlight() {
+  const f = EnvState.flight;
+  if (!f.active || !f.aircraft) return;
+  const sol = trimToCurrentFlight(f.aircraft.model, f.state);
+  f.controls.trim = sol.trim;
+  announceFlight(sol.ok
+    ? `トリム ${sol.trim >= 0 ? '+' : ''}${Math.round(sol.trim * 100)}%（迎角 ${sol.alphaDeg.toFixed(1)}° で釣り合い）`
+    : `トリムを一杯まで取っても釣り合いません（水平尾翼が大きすぎます）`);
 }
 
 // 方位から滑走路の呼称（09/27など）を作る

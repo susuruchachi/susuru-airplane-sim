@@ -33,8 +33,14 @@ const FLIGHT_KEYMAP = {
   // 浮かせようとしただけで前へ走り出してしまう。
   vtolUp: ['KeyX'],
   vtolDown: ['KeyZ'],
+  // トリム＝舵の中立位置。手を離したときにどの姿勢で釣り合うかを決める。
+  // キーの上下がそのまま機首の上下になるよう Y（上）と H（下）に置く。
+  trimUp: ['KeyY'],
+  trimDown: ['KeyH'],
   brake: ['KeyB', 'Space'],
 };
+
+const FLIGHT_TRIM_RATE = 0.35; // トリムが端から端まで動く速さ（毎秒）
 
 function setupFlightControls() {
   if (_flightKeyHandlersBound) return;
@@ -70,6 +76,7 @@ function handleFlightKeyPress(code) {
     case 'KeyV': f.controls.flap = Math.min(f.controls.flap + 0.5, 1); announceFlight(`フラップ ${Math.round(f.controls.flap * 100)}%`); return true;
     case 'KeyC': f.controls.flap = Math.max(f.controls.flap - 0.5, 0); announceFlight(`フラップ ${Math.round(f.controls.flap * 100)}%`); return true;
     case 'KeyP': f.controls.parkingBrake = !f.controls.parkingBrake; announceFlight(f.controls.parkingBrake ? '駐機ブレーキ' : '駐機ブレーキ解除'); return true;
+    case 'KeyT': autoTrimFlight(); return true;
     case 'KeyR': resetFlightToRunway(); return true;
     case 'KeyF': if (typeof toggleFlightMode === 'function') toggleFlightMode(); return true;
     case 'Tab': cycleFlightCamera(); return true;
@@ -108,6 +115,11 @@ function updateFlightInput(dt) {
     c.throttle = THREE.MathUtils.clamp(c.throttle + dThrottle * FLIGHT_THROTTLE_RATE * dt, 0, 1);
     if (c.throttle > 0.02) c.parkingBrake = false; // 出力を入れたら駐機ブレーキは外す
   }
+  const dTrim = (_keyDown(FLIGHT_KEYMAP.trimUp) ? 1 : 0) - (_keyDown(FLIGHT_KEYMAP.trimDown) ? 1 : 0);
+  if (dTrim !== 0) {
+    c.trim = THREE.MathUtils.clamp((c.trim || 0) + dTrim * FLIGHT_TRIM_RATE * dt, -1, 1);
+  }
+
   const dVtol = (_keyDown(FLIGHT_KEYMAP.vtolUp) ? 1 : 0) - (_keyDown(FLIGHT_KEYMAP.vtolDown) ? 1 : 0);
   if (dVtol !== 0) {
     c.vtolThrottle = THREE.MathUtils.clamp((c.vtolThrottle || 0) + dVtol * FLIGHT_THROTTLE_RATE * dt, 0, 1);
@@ -206,6 +218,7 @@ function initFlightHUD() {
     <div class="hud-row hud-bottom">
       <div class="hud-tile sm"><span class="k">出力</span><b id="hudThr">0</b><span class="u">%</span></div>
       <div class="hud-tile sm" id="hudVtolTile" hidden><span class="k">垂直</span><b id="hudVtol">0</b><span class="u">%</span></div>
+      <div class="hud-tile sm"><span class="k">トリム</span><b id="hudTrim">0</b><span class="u">%</span></div>
       <div class="hud-tile sm"><span class="k">フラップ</span><b id="hudFlap">0</b><span class="u">%</span></div>
       <div class="hud-tile sm"><span class="k">脚</span><b id="hudGear">下</b></div>
       <div class="hud-tile sm"><span class="k">迎角</span><b id="hudAoa">0</b><span class="u">°</span></div>
@@ -216,7 +229,8 @@ function initFlightHUD() {
     <div id="hudMsg"></div>
     <div id="hudHelp">
       W/S・↑↓ ピッチ ／ A/D・←→ ロール ／ Q/E ラダー ／ Shift・Ctrl 出力 ／ X/Z 垂直エンジン ／
-      B・Space ブレーキ ／ G 脚 ／ V・C フラップ ／ P 駐機 ／ Tab 視点 ／ R 滑走路へ戻る ／ F 飛行終了
+      T トリムを取る ／ Y/H トリム微調整 ／ B・Space ブレーキ ／ G 脚 ／ V・C フラップ ／
+      P 駐機 ／ Tab 視点 ／ R 滑走路へ戻る ／ F 飛行終了
     </div>`;
   host.appendChild(el);
   _hudEl = el;
@@ -255,6 +269,7 @@ function updateFlightHUD() {
   const hasVtol = !!(f.aircraft && f.aircraft.model && f.aircraft.model.hasVtol);
   if (vtolTile) vtolTile.hidden = !hasVtol;
   if (hasVtol) set('hudVtol', Math.round((c.vtolThrottle || 0) * 100));
+  set('hudTrim', `${(c.trim || 0) >= 0 ? '+' : ''}${Math.round((c.trim || 0) * 100)}`);
   set('hudFlap', Math.round(c.flap * 100));
   set('hudGear', c.gearDown ? '下' : '上');
   set('hudAoa', s.alphaDeg.toFixed(1));

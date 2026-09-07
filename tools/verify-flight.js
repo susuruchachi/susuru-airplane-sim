@@ -40,7 +40,7 @@ for (const f of ['09-aircraft.js', '10-flight.js']) {
 const {
   buildAircraftModel, defaultAircraftConfig, analyzeAircraftPerformance,
   createFlightState, createFlightControls, advanceFlight, placeAircraftOnGround,
-  airDensityAt,
+  airDensityAt, solveLevelTrim,
 } = ctx;
 
 let failures = 0;
@@ -593,6 +593,88 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
   check(peakTilt < 45, '前後の位置がずれていても引っくり返らずにホバリングできる', peakLabel(peakTilt));
   check(Math.abs(st.pitchDeg) < 6 && Math.abs(st.rollDeg) < 6, '最終的に水平で落ち着く',
     `ピッチ${st.pitchDeg.toFixed(1)}° ロール${st.rollDeg.toFixed(1)}°`);
+}
+
+// --- トリム -------------------------------------------------------------------
+// 尾翼が大きい機体ほど迎角が0°付近に張り付き、手を離すと高度と速度を交換しながら
+// うねり続ける。実機と同じで、これはトリム（舵の中立位置）で解く。
+{
+  const perf = analyzeAircraftPerformance(model);
+  const alt = 1500;
+  const v = perf.liftoffMps * 1.25;
+  const sol = solveLevelTrim(model, v, alt);
+  note('内蔵機のトリム', `${sol.trim >= 0 ? '+' : ''}${(sol.trim * 100).toFixed(0)}%`
+    + ` / 迎角 ${sol.alphaDeg.toFixed(1)}° / スロットル ${(sol.throttle * 100).toFixed(0)}%`);
+  check(sol.ok, '水平飛行のトリムが解ける');
+  check(sol.trim > 0 && sol.trim < 1, 'トリムは機首上げ側の途中に収まる', sol.trim.toFixed(3));
+
+  // トリムを当てて舵から手を離す。高度を保てるのが目的。
+  const st = createFlightState(), c = createFlightControls();
+  placeAircraftOnGround(model, st, 0, 0, 0, flatGround);
+  st.position.y = alt;
+  st.quaternion.setFromEuler(
+    new THREE.Euler(THREE.MathUtils.degToRad(sol.alphaDeg), 0, 0, 'YXZ'));
+  st.velocity.set(0, 0, -v);
+  c.parkingBrake = false; c.gearDown = false;
+  c.trim = sol.trim; c.throttle = sol.throttle;
+  let lo = alt, hi = alt;
+  for (let i = 0; i < 60 * 60; i++) {
+    advanceFlight(model, st, c, noWind, flatGround, 1 / 60);
+    lo = Math.min(lo, st.position.y); hi = Math.max(hi, st.position.y);
+  }
+  note('トリムしたまま60秒', `高度差 ${(st.position.y - alt).toFixed(0)}m / 振れ幅 ${(hi - lo).toFixed(0)}m`);
+  check(Math.abs(st.position.y - alt) < 60, 'トリムを取れば手を離しても高度を保てる',
+    (st.position.y - alt).toFixed(0) + 'm');
+  check(Math.abs(st.pitchDeg) < 15, '手を離しても姿勢が暴れない', st.pitchDeg.toFixed(1) + '°');
+
+  // 遅く飛ぶほど機首上げのトリムが要る（実機と同じ）。長周期の振動に紛れないよう、
+  // 飛ばして測るのではなく釣り合いそのもので見る。
+  const slow = solveLevelTrim(model, perf.liftoffMps * 1.05, alt);
+  const fast = solveLevelTrim(model, perf.liftoffMps * 2.0, alt);
+  note('速度とトリム', `${(perf.liftoffMps * 1.05 * KT).toFixed(0)}kt→${(slow.trim * 100).toFixed(0)}%`
+    + ` / ${(perf.liftoffMps * 2.0 * KT).toFixed(0)}kt→${(fast.trim * 100).toFixed(0)}%`);
+  check(slow.trim > fast.trim, '遅く飛ぶほど機首上げのトリムが要る',
+    `${(slow.trim * 100).toFixed(0)}% > ${(fast.trim * 100).toFixed(0)}%`);
+  check(slow.alphaDeg > fast.alphaDeg, '遅く飛ぶほど迎角が大きくなる',
+    `${slow.alphaDeg.toFixed(1)}° > ${fast.alphaDeg.toFixed(1)}°`);
+
+  // 同じ状態から、トリムを機首上げ側へ振れば機首が上がりはじめる
+  const rate = (trim) => {
+    const s2 = createFlightState(), c2 = createFlightControls();
+    placeAircraftOnGround(model, s2, 0, 0, 0, flatGround);
+    s2.position.y = alt; s2.velocity.set(0, 0, -v);
+    c2.parkingBrake = false; c2.gearDown = false; c2.throttle = sol.throttle; c2.trim = trim;
+    for (let i = 0; i < 60 * 2; i++) advanceFlight(model, s2, c2, noWind, flatGround, 1 / 60);
+    return s2.angularVelocity.x * 180 / Math.PI;
+  };
+  const up = rate(1), down = rate(-1);
+  check(up > down + 1, 'トリムを機首上げ側へ振ると機首が上がりはじめる',
+    `${down.toFixed(1)}°/s → ${up.toFixed(1)}°/s`);
+}
+
+// --- ロールの速さ -------------------------------------------------------------
+// 舵は「親の翼をまるごとひねる」扱いなので、翼の一部にしか付かないエルロンを
+// そのまま扱うとロールが実機の何倍にもなる（実際に毎秒310°で転がっていた）。
+{
+  const rollRate = (vMps) => {
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(model, st, 0, 0, 0, flatGround);
+    st.position.y = 1500; st.velocity.set(0, 0, -vMps);
+    c.parkingBrake = false; c.gearDown = false; c.throttle = 0.6; c.roll = 1;
+    let sum = 0, n = 0;
+    for (let i = 0; i < 60 * 6; i++) {
+      advanceFlight(model, st, c, noWind, flatGround, 1 / 60);
+      if (i > 60 * 4) { sum += Math.abs(st.angularVelocity.z) * 180 / Math.PI; n++; }
+    }
+    return sum / n;
+  };
+  const slow = rollRate(50), fast = rollRate(90);
+  note('エルロン全開のロール率', `${(50 * KT).toFixed(0)}kt で ${slow.toFixed(0)}°/s`
+    + ` / ${(90 * KT).toFixed(0)}kt で ${fast.toFixed(0)}°/s`);
+  // 軽single（セスナ172くらい）の実機は毎秒45〜60°ほど。ゲームとして少し軽快でも、
+  // 桁が違えば操縦できない。
+  check(slow > 25 && slow < 120, 'ロール率が実機の桁に収まっている', slow.toFixed(0) + '°/s');
+  check(fast > slow, '速度が上がるとロールも速くなる', `${slow.toFixed(0)} → ${fast.toFixed(0)}°/s`);
 }
 
 // --- 計算の速さ ---------------------------------------------------------------

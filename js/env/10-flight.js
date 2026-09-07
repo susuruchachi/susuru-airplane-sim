@@ -93,6 +93,7 @@ function createFlightState() {
 function createFlightControls() {
   return {
     pitch: 0, roll: 0, yaw: 0,   // -1〜1
+    trim: 0,                     // -1〜1。舵の中立位置。手を離したときの姿勢を決める
     throttle: 0,                 // 0〜1（前へ進むエンジン）
     vtolThrottle: 0,             // 0〜1（垂直離陸用のリフトエンジン。別のレバー）
     flap: 0,                     // 0〜1
@@ -153,7 +154,10 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
 
     // 舵角を足す
     const flapPart = s.flap * controls.flap;
-    const deflect = s.pitch * controls.pitch + s.roll * controls.roll
+    // トリムは舵と同じところへ足す。実機のトリムタブも結局は舵を動かすものなので、
+    // 「手を離しているときの舵の中立位置をずらす」のがいちばん近い。
+    const pitchCmd = THREE.MathUtils.clamp(controls.pitch + (controls.trim || 0), -1, 1);
+    const deflect = s.pitch * pitchCmd + s.roll * controls.roll
       + s.yaw * controls.yaw + flapPart;
     const alphaEff = alpha + deflect;
 
@@ -419,6 +423,103 @@ function advanceFlight(model, state, controls, windWorld, groundHeightAt, dtFram
   return steps;
 }
 
+// --- トリム（舵の中立位置）を求める ---------------------------------------------
+//
+// 尾翼が大きい機体ほど迎角が0°に張り付く。重心を主翼の空力中心へ合わせると
+// 主翼のモーメントが消えるので、釣り合う迎角は「水平尾翼の取付角の裏返し」だけで決まり、
+// 取付角0°の尾翼なら**揚力の出ない迎角**で釣り合ってしまう。そのまま手を離せば、
+// 機体は高度を速度に替えながら長周期でうねる——TB1もTB2も内蔵機もこれだった。
+//
+// 実機はこれをトリムで解いている。ここでも同じで、
+// 「その速度で水平飛行するのに必要な舵の中立位置」を、飛行モデルそのものを使って解く。
+// 近似式を別に持つと本体の物理と食い違っていくので、力の計算は本番と同じものを呼ぶ。
+
+// 探索は何百回も力を計算するので、状態と入れ物は使い回す。
+// 毎回 createFlightState() すると Vector3 の生成だけで10ミリ秒近くかかり、
+// 重心スライダーを動かすたびに画面が引っかかる。
+const _trimScratch = {
+  out: { force: new THREE.Vector3(), torque: new THREE.Vector3() },
+  world: new THREE.Vector3(),
+  euler: new THREE.Euler(),
+  wind: new THREE.Vector3(),
+  state: null, controls: null,
+};
+
+// 迎角 alphaRad・トリム trim・スロットル thr で釣り合いを見る。
+// 返すのは「上向きの余り（＋なら浮きすぎ）」「機首上げモーメント」「前向きの余り」。
+function trimResiduals(model, speedMps, altitudeM, alphaRad, trim, thr) {
+  const s = _trimScratch;
+  if (!s.state) { s.state = createFlightState(); s.controls = createFlightControls(); }
+  const st = s.state, c = s.controls;
+  st.position.set(0, altitudeM, 0);
+  st.altitudeM = altitudeM;
+  st.angularVelocity.set(0, 0, 0);
+  // 速度は水平のまま、機体だけを迎角ぶん持ち上げる（＝水平飛行の姿勢）
+  st.quaternion.setFromEuler(s.euler.set(alphaRad, 0, 0, 'YXZ'));
+  st.velocity.set(0, 0, -speedMps);
+  c.pitch = c.roll = c.yaw = c.flap = c.brake = 0;
+  c.vtolThrottle = 0;
+  c.trim = trim;
+  c.throttle = thr;
+  c.gearDown = false;
+  c.parkingBrake = false;
+  accumulateAeroForces(model, st, c, s.wind, s.out);
+  const world = s.world.copy(s.out.force).applyQuaternion(st.quaternion);
+  return {
+    lift: world.y - model.massKg * FLIGHT_GRAVITY,
+    moment: s.out.torque.x,
+    thrust: -world.z, // 機首方向（水平）の余り
+  };
+}
+
+// 単調な関数を挟み撃ちで解く。範囲内に解が無ければ、いちばん惜しい端を返す
+// （釣り合わない機体でも「どちらへ倒せばマシか」は返したい）。
+function trimBisect(f, lo, hi) {
+  let a = f(lo), b = f(hi);
+  if ((a < 0) === (b < 0)) return Math.abs(a) <= Math.abs(b) ? lo : hi;
+  for (let i = 0; i < 20; i++) {
+    const mid = (lo + hi) / 2;
+    const v = f(mid);
+    if ((v < 0) === (a < 0)) { lo = mid; a = v; } else { hi = mid; b = v; }
+  }
+  return (lo + hi) / 2;
+}
+
+// その速度で水平飛行するトリム・迎角・スロットルを返す。
+function solveLevelTrim(model, speedMps, altitudeM) {
+  // 失速したところで探すと意味のない答えが出る。失速角のすこし手前で頭打ちにする——
+  // 翼が小さすぎて失速角まで引かないと重さを支えられない機体は、
+  // そもそも水平飛行できないので「解けなかった」と答えるのが正しい。
+  const maxAlpha = THREE.MathUtils.degToRad(AERO_DEFAULTS.stallDeg * 0.75);
+  let alpha = 0, trim = 0, thr = 0.5;
+  // 3つは互いに影響し合うので、順に解いて数回まわす
+  for (let i = 0; i < 4; i++) {
+    alpha = trimBisect((a) => trimResiduals(model, speedMps, altitudeM, a, trim, thr).lift,
+      -maxAlpha, maxAlpha);
+    trim = trimBisect((t) => trimResiduals(model, speedMps, altitudeM, alpha, t, thr).moment, -1, 1);
+    thr = trimBisect((p) => trimResiduals(model, speedMps, altitudeM, alpha, trim, p).thrust, 0, 1);
+  }
+  const r = trimResiduals(model, speedMps, altitudeM, alpha, trim, thr);
+  const liftOk = Math.abs(r.lift) < model.massKg * FLIGHT_GRAVITY * 0.05;
+  const momentOk = Math.abs(r.moment) < model.massKg * 0.5;
+  return {
+    // 釣り合わない機体に探索の途中の値を当てると、かえって逆向きに舵を切ってしまう。
+    // 解けなかったときは中立のまま返し、警告のほうで理由を伝える。
+    trim: (liftOk && momentOk) ? THREE.MathUtils.clamp(trim, -1, 1) : 0,
+    alphaDeg: THREE.MathUtils.radToDeg(alpha),
+    throttle: thr,
+    ok: liftOk && momentOk,
+    // 釣り合わない理由。翼が足りないのか、舵が足りないのかで直しかたが違う
+    reason: (liftOk && momentOk) ? null : (!liftOk ? 'wing' : 'elevator'),
+  };
+}
+
+// いま飛んでいる状態に合わせてトリムを取り直す（実機で「トリムを取る」のと同じ操作）
+function trimToCurrentFlight(model, state) {
+  const v = Math.max(state.airspeed, 10);
+  return solveLevelTrim(model, v, Math.max(state.altitudeM, 0));
+}
+
 // 地面へ機体を置く（滑走路の上に出すときと、リセットのとき）
 function placeAircraftOnGround(model, state, x, z, headingDeg, groundHeightAt) {
   state.velocity.set(0, 0, 0);
@@ -434,6 +535,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     createFlightState, createFlightControls, advanceFlight, flightStep,
     refreshFlightReadouts, placeAircraftOnGround, airDensityAt, liftCoefficient,
+    solveLevelTrim, trimToCurrentFlight,
     FLIGHT_SUBSTEP, GEAR_SQUASH_M,
   };
 }

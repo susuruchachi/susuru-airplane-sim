@@ -28,6 +28,21 @@ const AERO_DEFAULTS = {
   propDecay: 0.75,       // 推力の速度低下。最高速度で静止推力の(1-この値)倍になる
 };
 
+// 舵面が「その翼のどれだけを占めるか」。
+//
+// この飛行モデルは舵を「親の翼まるごとを少しひねる」ものとして扱う。エレベーターと
+// ラダーは尾翼のほぼ全幅にわたって付くので、それでほぼ合っている。ところが
+// **エルロンは外翼の一部にしか付かない**。同じ扱いにすると「エルロンを20°切る＝主翼を
+// まるごと11°ひねる」ことになり、ロールが実機の5倍以上速くなる。
+// 実際そうなっていて、内蔵の練習機が毎秒310°（実機の6倍）で転がっていた。
+// 数字は内蔵機（セスナ172くらいの機体）が実機並みの毎秒60°前後で転がるように合わせてある。
+const CONTROL_SPAN_FRACTION = {
+  elevator: 1.00,  // 水平尾翼の全幅
+  rudder: 1.00,    // 垂直尾翼の全高
+  aileron: 0.20,   // 外翼の一部だけ
+  spoiler: 0.20,
+};
+
 // --- 小さなベクトル道具 -------------------------------------------------------
 
 function acVec(o) { return new THREE.Vector3(o.x || 0, o.y || 0, o.z || 0); }
@@ -264,7 +279,8 @@ function buildAircraftModel(config) {
       Math.abs((p.props && p.props.maxDeg) || 0),
       Math.abs((p.props && p.props.minDeg) || 0)
     ) || AERO_DEFAULTS.controlMaxDeg;
-    const gain = THREE.MathUtils.degToRad(maxDeg) * AERO_DEFAULTS.surfaceEffect;
+    const gain = THREE.MathUtils.degToRad(maxDeg) * AERO_DEFAULTS.surfaceEffect
+      * (CONTROL_SPAN_FRACTION[kind] || CONTROL_SPAN_FRACTION.aileron);
 
     // 符号は操縦桿の向きに合わせる。エレベーターは「引く＝機首上げ」なので、
     // 尾翼の迎角は下がる向き（尾を押し下げる向き）に動かす。
@@ -393,8 +409,9 @@ function ensureDefaultControls(surfaces) {
     for (const s of surfaces.filter((s) => s.role === 'vtail')) s.yaw += g;
   }
   if (!has('roll')) {
+    // 舵面を置いていない機体でも、エルロンは翼の一部ぶんの効きに留める（上の表と同じ理由）
     for (const s of surfaces.filter((s) => s.role === 'main' && s.side !== 'center')) {
-      s.roll += g * (s.side === 'left' ? 1 : -1);
+      s.roll += g * CONTROL_SPAN_FRACTION.aileron * (s.side === 'left' ? 1 : -1);
     }
   }
 }
@@ -557,6 +574,7 @@ function analyzeAircraftPerformance(model) {
   }
 
   const notes = [];
+  let trimForClimb = null;
   const kt = (mps) => Math.round(mps * 1.94384);
   if (wingLoading > 900) {
     notes.push({ level: 'error', text:
@@ -583,7 +601,27 @@ function analyzeAircraftPerformance(model) {
     notes.push({ level: 'warn', text:
       `安定しすぎです（静安定 ${staticMarginPct.toFixed(0)}% MAC、ふつうは5〜20%）。`
       + `水平尾翼が主翼に対して大きすぎるか後ろすぎて、迎角がほとんど0°に固定され、`
-      + `舵を引いても機首が上がりません。水平尾翼を小さくしてください。` });
+      + `舵を引いても機首が上がりにくくなります。水平尾翼を小さくしてください。` });
+  }
+  // トリムを一杯まで取っても水平飛行に釣り合わない機体は、飛ばす前に分かる
+  if (typeof solveLevelTrim === 'function') {
+    const sol = solveLevelTrim(model, liftoffMps * 1.25, 300);
+    trimForClimb = sol;
+    if (!sol.ok && sol.reason === 'elevator') {
+      notes.push({ level: 'warn', text:
+        `トリムを一杯まで取っても、上昇速度（${kt(liftoffMps * 1.25)} kt）で釣り合いません。`
+        + `水平尾翼に対してエレベーターの舵角が足りないか、水平尾翼そのものが大きすぎます。`
+        + `舵角を増やすか、水平尾翼を小さくしてください。` });
+    } else if (!sol.ok && sol.reason === 'wing') {
+      notes.push({ level: 'warn', text:
+        `上昇速度（${kt(liftoffMps * 1.25)} kt）では、失速しない迎角のままだと重さを支えられません。`
+        + `主翼を大きくするか、重量を減らしてください。` });
+    } else if (Math.abs(sol.trim) > 0.7) {
+      notes.push({ level: 'info', text:
+        `水平飛行にトリムを ${Math.round(sol.trim * 100)}% 使います。`
+        + `舵の残りが少ないので、水平尾翼の取付角を ${sol.trim > 0 ? 'マイナス' : 'プラス'}側へ`
+        + `少し振ると操縦しやすくなります。` });
+    }
   }
   if (Math.abs(wingAcOffsetMac) > 0.15) {
     const ahead = wingAcOffsetMac < 0;
@@ -630,7 +668,7 @@ function analyzeAircraftPerformance(model) {
   return {
     wingLoading, stallMps, liftoffMps, thrustToWeight,
     fwdThrust, liftThrust, takeoffM, staticMarginPct, rotateRatio, notes,
-    wingAcZ, wingAcOffsetMac, thrustPitchMoment, elevatorPower,
+    wingAcZ, wingAcOffsetMac, thrustPitchMoment, elevatorPower, trimForClimb,
     flyable: !notes.some((n) => n.level === 'error'),
   };
 }

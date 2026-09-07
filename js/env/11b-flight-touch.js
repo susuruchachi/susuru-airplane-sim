@@ -73,6 +73,7 @@ function initFlightTouch() {
       <button type="button" class="ft-btn" data-tap="gear">脚</button>
       <button type="button" class="ft-btn" data-tap="flapDown">FLAP ▼</button>
       <button type="button" class="ft-btn" data-tap="flapUp">FLAP ▲</button>
+      <button type="button" class="ft-btn" data-tap="trim">トリム</button>
       <button type="button" class="ft-btn" data-tap="park">駐機</button>
       <button type="button" class="ft-btn" data-tap="camera">視点</button>
       <button type="button" class="ft-btn" data-tap="reset">滑走路へ</button>
@@ -239,7 +240,7 @@ function bindFlightTouchHold(btn) {
 function bindFlightTouchTap(btn) {
   const what = btn.getAttribute('data-tap');
   const codes = {
-    gear: 'KeyG', flapDown: 'KeyV', flapUp: 'KeyC',
+    gear: 'KeyG', flapDown: 'KeyV', flapUp: 'KeyC', trim: 'KeyT',
     park: 'KeyP', camera: 'Tab', reset: 'KeyR',
   };
   btn.addEventListener('click', (e) => {
