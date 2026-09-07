@@ -1413,6 +1413,49 @@ function autopilotFlight(opts) {
   check(worstG < 12, '大型機でも脚が壊れる衝撃にならない', worstG.toFixed(1) + 'G');
 }
 
+// --- 自動操縦：最高速度が桁外れな機体でも旋回できるか ------------------------------
+//
+// フィクションの超音速機には最高速度に「マッハ21」のような桁外れな値が
+// 入ることがある（実際にユーザーの機体がそうだった）。巡航をできるだけ
+// 速くする仕組み（前の節）は、この値をそのまま使うと秒速数kmまで加速してしまい、
+// 旋回半径が v²/(g·tanθ) で速度の2乗に効くぶん数千kmに膨れ上がって、
+// バンク角を目一杯使っても目的地へ向き直せず、直進しかできなくなっていた
+// （手動操縦はできるのに自動操縦だけ曲がれない、という報告になった）。
+{
+  const hyper = defaultAircraftConfig();
+  hyper.name = '極超音速機テスト';
+  hyper.modelMaxSpeedValue = 20; hyper.modelMaxSpeedUnit = 'mach'; // 秒速6800m相当
+  const hm = buildAircraftModel(hyper);
+  const hspd = apSpeedSchedule(hm);
+  note('極超音速機テスト', `vMax=${(hm.vMaxMps * 1.94384).toFixed(0)}kt / 巡航=${(hspd.cruise * 1.94384).toFixed(0)}kt`);
+  check(hspd.cruise < hm.vMaxMps * 0.5, '最高速度が桁外れでも、巡航速度はそのまま追従しない',
+    `巡航${hspd.cruise.toFixed(0)}m/s ≪ 最高${hm.vMaxMps.toFixed(0)}m/s`);
+  // その巡航速度・最大バンク角なら、旋回半径は十分に小さい（世界の広さに対して）
+  const AP_BANK_MAX_DEG = 25;
+  const radius = (hspd.cruise * hspd.cruise) / (9.80665 * Math.tan(AP_BANK_MAX_DEG * Math.PI / 180));
+  check(radius < 60000, '巡航速度での旋回半径が実用的な範囲に収まる', (radius / 1000).toFixed(0) + 'km');
+
+  // 実際に、旋回が要る経路（横へ40km）を自動操縦で飛ばして確かめる
+  const st = createFlightState(), c = createFlightControls();
+  placeAircraftOnGround(hm, st, 0, 0, 90, flatGround);
+  const ap = createAutopilotState();
+  ap.full = true; ap.targetAltitudeM = 2000; ap.destAirportId = 'DST';
+  ap.plan = apMakeApproachPlan({ id: 'DST', x: 0, z: 40000, elevationM: 0 },
+    { runwayLengthM: 2400, headingDeg: 0 }, 0);
+  ap.takeoffHeadingDeg = 90; ap.phase = 'takeoff';
+  let t = 0; const seen = []; let prev = '';
+  while (t < 2000) {
+    stepAutopilot(hm, st, c, ap, 1 / 60, {});
+    advanceFlight(hm, st, c, noWind, flatGround, 1 / 60);
+    t += 1 / 60;
+    if (ap.phase !== prev) { prev = ap.phase; seen.push(ap.phase); }
+    if (ap.phase === 'done' || st.crashed) break;
+  }
+  note('自動操縦', `極超音速機・横へ90°旋回 … ${seen.join('→')} ${t.toFixed(0)}秒`);
+  check(ap.phase === 'done' && !st.crashed, '最高速度が桁外れでも、旋回して目的地へ着陸できる',
+    `${ap.phase} / ${t.toFixed(0)}秒`);
+}
+
 // --- 計算の速さ ---------------------------------------------------------------
 {
   const st = createFlightState();

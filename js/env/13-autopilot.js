@@ -187,6 +187,15 @@ function apRudderForCoordination(state) {
 
 // --- 機体ごとの速度の目安 -------------------------------------------------------
 
+// 巡航中に許す旋回半径の上限（m）。バンクさせる旋回の半径は v²/(g·tanθ) で
+// 速度の2乗に効くので、最高速度が桁外れな機体（フィクションの超音速機で
+// マッハ21のように入力されることがある）をそのまま97%まで加速させると、
+// バンク角を目一杯（AP_BANK_MAX）使っても半径が数千kmになり、
+// 事実上まっすぐにしか飛べなくなる——実際、マッハ10まで出ていた機体が
+// 目的地へ旋回できず素通りし続けた。「できるだけ速く」は「実際に着ける
+// 速さで」という意味のはずなので、曲がれる速さを上限にする。
+const AP_CRUISE_TURN_RADIUS_MAX = 40000;
+
 // 失速速度から、離陸・上昇・巡航・進入の速度を決める。
 // analyzeAircraftPerformance と同じ式で失速速度を出す（重い呼び出しは避ける）。
 function apSpeedSchedule(model) {
@@ -194,14 +203,17 @@ function apSpeedSchedule(model) {
   const S = Math.max(model.wingArea, 0.01);
   const stall = Math.sqrt((2 * W) / (1.225 * S * 1.5));
   const vMax = Math.max(model.vMaxMps || 0, stall * 2);
+  const turnableV = Math.sqrt(AP_CRUISE_TURN_RADIUS_MAX * 9.80665
+    * Math.tan(AP_BANK_MAX * Math.PI / 180));
   return {
     stall,
     rotate: stall * 1.15,               // 機首を上げる速度
     climb: apClamp(stall * 1.35, stall * 1.2, vMax * 0.6),
-    // 巡航はできるだけ速く——最高速度のすぐ下を狙う。ぴったり最高速度を目標に
-    // すると、推力と抵抗がほぼ釣り合ったところを延々スロットルで追いかけることに
-    // なるだけなので、97%で十分（届かなければ出力は自然に全開のまま張り付く）。
-    cruise: Math.max(vMax * 0.97, stall * 1.4),
+    // 巡航はできるだけ速く——ただし旋回できる速さを超えない範囲で。
+    // ぴったり最高速度を目標にすると、推力と抵抗がほぼ釣り合ったところを
+    // 延々スロットルで追いかけることになるだけなので、97%で十分
+    // （届かなければ出力は自然に全開のまま張り付く）。
+    cruise: apClamp(Math.min(vMax * 0.97, turnableV), stall * 1.4, vMax),
     approach: stall * 1.3,
     vMax,
   };
