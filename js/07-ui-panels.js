@@ -383,6 +383,7 @@ function renderTypeSpecificFields(part) {
       <div class="hint">位置は推力の作用点（機体重心からのオフセット）として飛行モデルに使用されます。</div>
       <div class="divider"></div>
       <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
+      ${part.props.spinAxis === 'y' ? vtolBalancePanelHtml() : ''}
     `;
     document.getElementById('fThrust').addEventListener('change', (e) => {
       part.props.thrustKgf = parseFloat(e.target.value) || 0;
@@ -391,6 +392,8 @@ function renderTypeSpecificFields(part) {
       part.props.spinAxis = e.target.value;
     });
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
+    const vtolBtn = document.getElementById('btnVtolBalance');
+    if (vtolBtn) vtolBtn.addEventListener('click', () => balanceVtolThrust());
 
   } else if (part.type === 'wing') {
     const center = wingCornersCenter(part.props.corners);

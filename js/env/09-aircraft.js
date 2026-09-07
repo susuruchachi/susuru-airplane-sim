@@ -724,7 +724,8 @@ function analyzeAircraftPerformance(model) {
       notes.push({ level: 'info', text:
         `垂直離陸用エンジンの前後位置が重心からずれているため、出力を自動で調整し、`
         + `使える推力を定格の${Math.round((model.vtolThrustN / model.vtolThrustNRaw) * 100)}%に`
-        + `抑えています。前後のエンジンを重心を挟んで対称に近づけるほど使える推力が増えます。` });
+        + `抑えています。Builderで上向きエンジンを選び「推力を釣り合わせる」を押すと、`
+        + `位置はそのままで推力を解き直して全部使えるようになります。` });
     }
   }
 

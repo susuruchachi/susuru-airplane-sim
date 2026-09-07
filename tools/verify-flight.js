@@ -742,6 +742,79 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
   check(fast > slow, '速度が上がるとロールも速くなる', `${slow.toFixed(0)} → ${fast.toFixed(0)}°/s`);
 }
 
+// --- Builderの「推力を釣り合わせる」------------------------------------------
+// 複数エンジンで垂直離着陸させる機体は、推力の中心が重心を通っていないと浮いた瞬間に
+// 機首が振れる。飛行側は強いほうを絞って釣り合わせるが、絞ったぶんは使えない推力になる。
+// Builderで推力そのものを解き直しておけば、位置を動かさずに全部使えるようになる。
+{
+  // js/05d-vtol-balance.js は Builder 側のファイル。THREE を使わない素の計算なので、
+  // Builderのグローバルを最小限だけ用意すればここで動かせる。
+  const toasts = [];
+  const bctx = vm.createContext({
+    console, Math, Number, Array, Object, JSON,
+    State: null, showToast: (m, e) => toasts.push({ msg: m, error: !!e }), renderInspector: () => {},
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'js', '05d-vtol-balance.js'), 'utf8'),
+    bctx, { filename: '05d-vtol-balance.js' });
+
+  const setup = (engines, cg) => {
+    bctx.State = {
+      parts: engines.map((e, i) => ({
+        id: 'e' + i, type: 'engine', name: 'E' + i,
+        position: { x: e.x || 0, y: 0, z: e.z },
+        props: { thrustKgf: e.t, spinAxis: 'y' },
+      })).concat([{
+        // 機首の向きを読ませるための主翼（前縁が-Z＝機首-Z）
+        id: 'w', type: 'wing', name: '主翼', position: { x: 0, y: 0, z: 0 },
+        props: { role: 'main', side: 'left', corners: {
+          rootLeading: { x: 0, y: 0, z: -1 }, rootTrailing: { x: 0, y: 0, z: 1 },
+          tipLeading: { x: 5, y: 0, z: -1 }, tipTrailing: { x: 5, y: 0, z: 1 } } },
+      }]),
+      cg: { position: cg || { x: 0, y: 0, z: 0 } },
+      model: { weightKg: 10000 },
+    };
+    toasts.length = 0;
+  };
+
+  // 腕の長さが違う前後2群。前10m・後20mなら、推力は逆比の2:1で釣り合う。
+  setup([{ z: -10, x: 2, t: 1000 }, { z: -10, x: -2, t: 1000 },
+    { z: 20, x: 2, t: 1000 }, { z: 20, x: -2, t: 1000 }]);
+  const before = bctx.vtolBalanceReport();
+  check(Math.abs(before.aheadM - 5) < 0.01, '推力中心のずれを機首側からの距離で出す',
+    before.aheadM.toFixed(2) + 'm');
+  check(Math.abs(before.usableRatio - 0.75) < 0.01, '絞られたあとに使える割合が出る',
+    (before.usableRatio * 100).toFixed(0) + '%');
+
+  check(bctx.balanceVtolThrust() === true, '推力を釣り合わせられる');
+  const after = bctx.vtolBalanceReport();
+  const t = after.engines.map((e) => e.props.thrustKgf);
+  check(Math.abs(after.aheadM) < 0.01 && Math.abs(after.offsetX) < 0.01,
+    '釣り合わせると推力中心が重心の真上に来る',
+    `前後${after.aheadM.toFixed(3)}m 左右${after.offsetX.toFixed(3)}m`);
+  check(Math.abs(after.total - before.total) < 2, '合計推力は変えない',
+    `${before.total} → ${after.total}`);
+  check(Math.abs(t[0] / t[2] - 2) < 0.02, '腕の長さの逆比で推力が決まる',
+    `${t[0]} : ${t[2]}`);
+  check(t[0] === t[1] && t[2] === t[3], '左右のミラーは同じ推力のまま', t.join('/'));
+  check(after.usableRatio > 0.999, '絞られるぶんが無くなる',
+    (after.usableRatio * 100).toFixed(0) + '%');
+
+  // 左右のずれも一緒に消える
+  setup([{ z: -10, x: 3, t: 1000 }, { z: -10, x: -1, t: 1000 }, { z: 10, x: 0, t: 1000 }]);
+  check(Math.abs(bctx.vtolBalanceReport().offsetX) > 0.5, '左右のずれも見えている');
+  bctx.balanceVtolThrust();
+  check(Math.abs(bctx.vtolBalanceReport().offsetX) < 0.01, '左右のずれも同時に消える',
+    bctx.vtolBalanceReport().offsetX.toFixed(3) + 'm');
+
+  // 前後どちらかにしか無い配置は、無理に触らず断る
+  setup([{ z: -10, x: 2, t: 1000 }, { z: -12, x: -2, t: 1000 }]);
+  check(bctx.balanceVtolThrust() === false, '片側にしか無ければ断る');
+  check(toasts.length > 0 && toasts[toasts.length - 1].error, '断るときは理由を出す',
+    (toasts[toasts.length - 1] || {}).msg || '—');
+  check(bctx.vtolBalanceReport().engines.every((e) => e.props.thrustKgf === 1000),
+    '断ったときは推力を書き換えない');
+}
+
 // --- 計算の速さ ---------------------------------------------------------------
 {
   const st = createFlightState();
