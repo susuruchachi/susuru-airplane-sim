@@ -11,9 +11,14 @@
 //
 // 階層は aircraftGroup（＝機体座標そのもの。物理の姿勢がここに入る）
 //   └ orientGroup（09-aircraft.js が求めた向きの補正。モデルの前後を標準に合わせる）
-//       └ modelRoot（Builderの root.rotation / root.scale）
-//           └ GLBのメッシュ、または内蔵機の形
-// 舵面・脚・灯火は modelRoot の下に置き、操縦に合わせて動かす。
+//       └ modelRoot（重心が原点に来るように戻す）
+//           └ modelXform（Builderの root.rotation / root.scale）
+//               └ GLBのメッシュ、または内蔵機の形／Builderで置いた航行灯
+//
+// **modelXform は Builder の `State.model.root` と同じ役割**で、メッシュもパーツ由来の
+// 灯火もその下に入る。Builderでは機体全体を回すとメッシュもパーツも一緒に回るので、
+// こちらでも同じ形にしないと食い違う。実際、以前はメッシュにだけ root.rotation を
+// 掛けていて、前後を反転させた機体は「物理は反転しているのに見た目は元のまま」だった。
 
 const AIRCRAFT_DB_NAME = 'flightSimDB';
 const AIRCRAFT_STORE_CONFIGS = 'configs';
@@ -194,10 +199,23 @@ async function createAircraft(config, cgOverride) {
   orient.quaternion.copy(model.qFix);
   group.add(orient);
 
-  // 重心が原点に来るように、モデル全体を重心ぶん戻す
+  // 重心が原点に来るように、モデル全体を重心ぶん戻す。
+  // ここで引くのは**機体まるごとの回転を掛けたあとの重心**（model.cgModel）。
+  // 回す前の値を引くと、機体を回した機体だけ重心の位置がずれる。
+  const cgModel = model.cgModel || acVec(cg);
   const modelRoot = new THREE.Group();
-  modelRoot.position.set(-(cg.x || 0), -(cg.y || 0), -(cg.z || 0));
+  modelRoot.position.set(-cgModel.x, -cgModel.y, -cgModel.z);
   orient.add(modelRoot);
+
+  // Builderの `State.model.root` にあたる入れ物。メッシュもパーツ由来の航行灯も
+  // ここの子にする——Builderで機体全体を回したとき、両方が一緒に回るのと同じ形にする。
+  const modelXform = new THREE.Group();
+  const t = config.modelTransform;
+  if (t) {
+    if (t.rotation) modelXform.rotation.set(t.rotation.x || 0, t.rotation.y || 0, t.rotation.z || 0);
+    if (t.scale) modelXform.scale.set(t.scale.x || 1, t.scale.y || 1, t.scale.z || 1);
+  }
+  modelRoot.add(modelXform);
 
   let visual = null;
   let source = 'builtin';
@@ -205,11 +223,6 @@ async function createAircraft(config, cgOverride) {
     try {
       visual = await parseAircraftGLB(config.modelBuffer);
       source = 'builder';
-      const t = config.modelTransform;
-      if (t) {
-        if (t.rotation) visual.rotation.set(t.rotation.x || 0, t.rotation.y || 0, t.rotation.z || 0);
-        if (t.scale) visual.scale.set(t.scale.x || 1, t.scale.y || 1, t.scale.z || 1);
-      }
       const off = config.modelMeshOffset;
       if (off) visual.position.set(off.x || 0, off.y || 0, off.z || 0);
       visual.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.receiveShadow = false; } });
@@ -222,13 +235,13 @@ async function createAircraft(config, cgOverride) {
     visual = buildBuiltinAircraftMesh();
     visual.add(buildBuiltinGear());
   }
-  modelRoot.add(visual);
+  modelXform.add(visual);
 
   // 航行灯。Builderの定義があればその位置に、無ければ翼端と尾に置く。
-  const lights = buildAircraftLights(config, model, modelRoot);
+  const lights = buildAircraftLights(config, model, modelXform, group);
 
   return {
-    model, group, orient, modelRoot, visual, lights,
+    model, group, orient, modelRoot, modelXform, visual, lights,
     source,
     name: config.name || (source === 'builder' ? '機体' : '内蔵の練習機'),
     propeller: visual.userData ? visual.userData.propeller : null,
@@ -238,10 +251,16 @@ async function createAircraft(config, cgOverride) {
 }
 
 // 航行灯（左舷赤・右舷緑・尾白・ビーコン・ストロボ）
-function buildAircraftLights(config, model, parent) {
+//
+// Builderで置いた灯りは**パーツの座標のまま**なので、メッシュと同じ入れ物
+// （機体まるごとの回転がかかる modelXform）へ入れる。
+// 定義が無い機体に付ける代わりの灯りは「左翼端・右翼端・尾」という**機体基準**の
+// 置き方なので、向きを直したあとの機体座標（bodyParent、機首が-Z・重心が原点）へ入れる。
+// 同じ入れ物に混ぜると、前後を反転させた機体で尾灯が機首に付く。
+function buildAircraftLights(config, model, modelParent, bodyParent) {
   const defs = (config.parts || []).filter((p) => p.type === 'light');
   const out = [];
-  const mk = (kind, x, y, z) => {
+  const mk = (parent, kind, x, y, z) => {
     const info = LIGHT_KINDS_FALLBACK[kind] || LIGHT_KINDS_FALLBACK.nav_white_tail;
     const mesh = new THREE.Mesh(
       new THREE.SphereGeometry(0.09, 8, 8),
@@ -255,18 +274,18 @@ function buildAircraftLights(config, model, parent) {
 
   if (defs.length) {
     for (const d of defs) {
-      mk((d.props && d.props.kind) || 'nav_white_tail', d.position.x, d.position.y, d.position.z);
+      mk(modelParent, (d.props && d.props.kind) || 'nav_white_tail',
+        d.position.x, d.position.y, d.position.z);
     }
   } else {
-    // 定義が無い機体（内蔵機など）は翼端と尾に付ける
+    // 定義が無い機体（内蔵機など）は翼端と尾に付ける（重心が原点、機首が-Z）
     const half = model.wingSpan / 2;
-    const cg = model.cg;
-    mk('nav_red', cg.x - half, cg.y + 0.9, cg.z + 0.05);
-    mk('nav_green', cg.x + half, cg.y + 0.9, cg.z + 0.05);
-    mk('nav_white_tail', cg.x, cg.y + 1.4, cg.z + 4.9);
-    mk('beacon', cg.x, cg.y + 1.05, cg.z + 0.6);
-    mk('strobe', cg.x - half, cg.y + 0.9, cg.z + 0.1);
-    mk('strobe', cg.x + half, cg.y + 0.9, cg.z + 0.1);
+    mk(bodyParent, 'nav_red', -half, 0.9, 0.05);
+    mk(bodyParent, 'nav_green', half, 0.9, 0.05);
+    mk(bodyParent, 'nav_white_tail', 0, 1.4, 4.9);
+    mk(bodyParent, 'beacon', 0, 1.05, 0.6);
+    mk(bodyParent, 'strobe', -half, 0.9, 0.1);
+    mk(bodyParent, 'strobe', half, 0.9, 0.1);
   }
   return out;
 }

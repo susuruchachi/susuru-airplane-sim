@@ -595,6 +595,71 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
     `ピッチ${st.pitchDeg.toFixed(1)}° ロール${st.rollDeg.toFixed(1)}°`);
 }
 
+// --- 機体まるごとの向き・大きさ（modelTransform）---------------------------------
+// Builderでは GLBのメッシュもパーツも同じ root の子なので、機体全体を回すと両方が回る。
+// 飛行側もそう扱わないと「物理は反転しているのに見た目は元のまま」になる。
+{
+  const base = buildAircraftModel(defaultAircraftConfig());
+
+  // 180°回した機体は、**飛ばしたときの姿は変わらない**（向きの正規化が吸収する）
+  const spun = defaultAircraftConfig();
+  spun.modelTransform = { rotation: { x: 0, y: Math.PI, z: 0 }, scale: { x: 1, y: 1, z: 1 } };
+  const sm = buildAircraftModel(spun);
+  const sameContacts = base.contacts.every((c, i) =>
+    c.position.distanceTo(sm.contacts[i].position) < 1e-6);
+  check(sameContacts, '機体を180°回しても接地点は同じ場所に来る',
+    sm.contacts.map((c) => `z${c.position.z.toFixed(2)}`).join(' '));
+  check(Math.abs(sm.wingArea - base.wingArea) < 1e-6, '機体を180°回しても翼面積は変わらない');
+  const sf = sm.surfaces.find((s) => s.role === 'main').fwd;
+  check(sf.z < -0.9, '機体を180°回しても主翼の前方は機首(-Z)を向く',
+    `fwd=(${sf.toArray().map((v) => v.toFixed(2)).join(',')})`);
+
+  // 180°回した機体では、向きの補正（qFix）がそのぶん打ち消される。
+  // 見た目には modelTransform と qFix の両方がかかるので、ここが噛み合っていないと食い違う。
+  const spunYaw = new THREE.Euler().setFromQuaternion(sm.qFix, 'YXZ').y;
+  const baseYaw = new THREE.Euler().setFromQuaternion(base.qFix, 'YXZ').y;
+  check(Math.abs(Math.abs(spunYaw - baseYaw) - Math.PI) < 1e-6,
+    '機体を回したぶんだけ向きの補正が打ち消される',
+    `${(baseYaw * 180 / Math.PI).toFixed(0)}° → ${(spunYaw * 180 / Math.PI).toFixed(0)}°`);
+
+  // 大きさも root にかかっている。2倍にすれば翼幅は2倍・面積は4倍。
+  const big = defaultAircraftConfig();
+  big.modelTransform = { rotation: { x: 0, y: 0, z: 0 }, scale: { x: 2, y: 2, z: 2 } };
+  const bm = buildAircraftModel(big);
+  check(Math.abs(bm.wingSpan / base.wingSpan - 2) < 0.01, '2倍に拡大すると翼幅も2倍',
+    `${base.wingSpan.toFixed(1)}m → ${bm.wingSpan.toFixed(1)}m`);
+  check(Math.abs(bm.wingArea / base.wingArea - 4) < 0.02, '2倍に拡大すると翼面積は4倍',
+    `${base.wingArea.toFixed(1)}m² → ${bm.wingArea.toFixed(1)}m²`);
+}
+
+// --- 車輪の並び ---------------------------------------------------------------
+// 重心を前後で挟んでいないと、置いただけで倒れる
+{
+  // 機首が-Zなので、dzを負にすると車輪は前へ、正にすると後ろへ動く
+  const tip = (dz) => {
+    const cfg = defaultAircraftConfig();
+    cfg.parts = cfg.parts.map((p) => (p.type === 'landing_gear'
+      ? Object.assign({}, p, { position: { x: p.position.x, y: p.position.y, z: p.position.z + dz } })
+      : p));
+    return analyzeAircraftPerformance(buildAircraftModel(cfg)).notes
+      .filter((n) => /車輪がすべて重心より/.test(n.text));
+  };
+  check(tip(0).length === 0, '素直な脚の並びには何も言わない');
+  check(tip(-8).some((n) => n.level === 'error' && /すべて重心より前/.test(n.text)),
+    '車輪が全部重心より前なら止める（尻もち）', (tip(-8)[0] || {}).text || '—');
+  check(tip(8).some((n) => n.level === 'error' && /すべて重心より後ろ/.test(n.text)),
+    '車輪が全部重心より後ろなら止める（前のめり）', (tip(8)[0] || {}).text || '—');
+
+  // ミラーしたつもりでX位置が反転していない脚
+  const lop = defaultAircraftConfig();
+  lop.parts = lop.parts.map((p) => (p.type === 'landing_gear' && p.position.x < -0.1
+    ? Object.assign({}, p, { position: { x: -p.position.x, y: p.position.y, z: p.position.z } })
+    : p));
+  const lopNotes = analyzeAircraftPerformance(buildAircraftModel(lop)).notes;
+  check(lopNotes.some((n) => /片側にしか/.test(n.text)), '車輪が片側に寄っていたら止める',
+    (lopNotes.find((n) => /片側にしか/.test(n.text)) || {}).text || '—');
+}
+
 // --- トリム -------------------------------------------------------------------
 // 尾翼が大きい機体ほど迎角が0°付近に張り付き、手を離すと高度と速度を交換しながら
 // うねり続ける。実機と同じで、これはトリム（舵の中立位置）で解く。

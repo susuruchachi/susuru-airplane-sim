@@ -127,7 +127,10 @@ function applyCgOffset() {
 
   const cg = cgWithOffset(ac.config, currentCgOffset());
   ac.model = buildAircraftModel(Object.assign({}, ac.config, { cg }));
-  ac.modelRoot.position.set(-cg.x, -cg.y, -cg.z);
+  // 戻すのは「機体まるごとの回転を掛けたあとの重心」。回す前の値を引くと、
+  // 機体を回してある機体だけ見た目が重心からずれる。
+  const cgm = ac.model.cgModel;
+  ac.modelRoot.position.set(-cgm.x, -cgm.y, -cgm.z);
 
   // 重心を上下に動かすと車輪までの距離も変わるので、接地しているなら置き直す
   if (f.active && f.state.onGround) {

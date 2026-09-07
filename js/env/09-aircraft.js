@@ -47,12 +47,33 @@ const CONTROL_SPAN_FRACTION = {
 
 function acVec(o) { return new THREE.Vector3(o.x || 0, o.y || 0, o.z || 0); }
 
+// 機体まるごとにかかっている向きと大きさ（Builderの `State.model.root` の変換）。
+//
+// Builderでは**GLBのメッシュもパーツも同じ root の子**なので、機体全体を回すと
+// 両方が一緒に回る。したがってこちらでも両方に同じだけ掛けないと食い違う。
+// メッシュにだけ掛けてパーツに掛けていなかったせいで、前後を反転させた機体は
+// 「パーツ（＝物理）は反転しているのに、見た目だけ元の向き」になっていた。
+//
+// **この回転だけは「ラジアン」で保存されている**（root.rotation をそのまま書き出しているため）。
+// パーツの回転が「度」なのとは違うので、同じつもりで読むと壊れる。
+function acModelMatrix(config) {
+  const t = config && config.modelTransform;
+  if (!t) return new THREE.Matrix4();
+  const r = t.rotation || {};
+  const s = t.scale || {};
+  return new THREE.Matrix4().compose(
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Quaternion().setFromEuler(new THREE.Euler(r.x || 0, r.y || 0, r.z || 0)),
+    new THREE.Vector3(s.x || 1, s.y || 1, s.z || 1)
+  );
+}
+
 // パーツのローカル座標を機体座標へ移す行列（位置・回転・拡縮）。
 // **Builderのパーツ回転は「度」で保存されている**（applyPartToGizmo が degToRad してから
 // gizmo に入れている）。ラジアンとして読むと 180 が 28回転になり、脚も翼も明後日を向く。
-function acPartMatrix(part) {
+function acPartMatrix(part, modelMat) {
   const r = part.rotation || {};
-  return new THREE.Matrix4().compose(
+  const m = new THREE.Matrix4().compose(
     acVec(part.position || {}),
     new THREE.Quaternion().setFromEuler(new THREE.Euler(
       THREE.MathUtils.degToRad(r.x || 0),
@@ -61,6 +82,7 @@ function acPartMatrix(part) {
     )),
     part.scale ? acVec(part.scale) : new THREE.Vector3(1, 1, 1)
   );
+  return modelMat ? new THREE.Matrix4().multiplyMatrices(modelMat, m) : m;
 }
 
 // 着陸脚の先端（車輪）が、脚の付け根からどこにあるか。
@@ -105,8 +127,8 @@ function acQuadArea(a, b, c, d) {
 // --- 翼1枚ぶんの幾何 ---------------------------------------------------------
 
 // 4頂点を機体座標へ移し、前縁・後縁・付け根・翼端の中点から翼弦と翼幅を出す
-function acWingGeometry(part) {
-  const m = acPartMatrix(part);
+function acWingGeometry(part, modelMat) {
+  const m = acPartMatrix(part, modelMat);
   const P = {};
   for (const k of AIRCRAFT_WING_CORNER_KEYS) {
     const c = (part.props && part.props.corners && part.props.corners[k]) || { x: 0, y: 0, z: 0 };
@@ -199,14 +221,19 @@ function buildAircraftModel(config) {
   const maxVal = (config && config.modelMaxSpeedValue) || 200;
   const vMaxMps = maxUnit === 'mach' ? maxVal * 340 : maxVal * 0.514444;
 
+  // 0) 機体まるごとの向き・大きさ。パーツもメッシュもこの下にぶら下がっているので、
+  //    どのパーツ座標を読むときも最初にこれを掛ける。
+  const modelMat = acModelMatrix(config);
+
   // 1) 翼の幾何をいったん素の機体座標で作り、機首の向きを読む
   const rawWings = parts.filter((p) => p.type === 'wing').map((p) => ({
-    part: p, role: (p.props && p.props.role) || 'main', geo: acWingGeometry(p),
+    part: p, role: (p.props && p.props.role) || 'main', geo: acWingGeometry(p, modelMat),
   }));
   const qFix = acOrientationFix(rawWings);
 
   // 2) 重心。以降すべての位置は「重心からの相対」で持つ（モーメントがそのまま出せる）
-  const cg = acVec((config && config.cg) || {}).applyQuaternion(qFix);
+  const cgModel = acVec((config && config.cg) || {}).applyMatrix4(modelMat);
+  const cg = cgModel.clone().applyQuaternion(qFix);
   const toBody = (v) => v.clone().applyQuaternion(qFix).sub(cg);
   const dirBody = (v) => v.clone().applyQuaternion(qFix);
 
@@ -265,7 +292,7 @@ function buildAircraftModel(config) {
     let target = p.props && p.props.parentWingId ? wingById.get(p.props.parentWingId) : null;
     if (!target) {
       // 親指定が無ければ、いちばん近い翼を親にする
-      const pos = acVec(p.position || {}).applyQuaternion(qFix).sub(cg);
+      const pos = acVec(p.position || {}).applyMatrix4(modelMat).applyQuaternion(qFix).sub(cg);
       let best = null, bestD = Infinity;
       for (const s of surfaces) {
         const d = s.center.distanceToSquared(pos);
@@ -310,7 +337,7 @@ function buildAircraftModel(config) {
       spinAxis: spin,
       // 上を向いているエンジンは垂直離陸用。前へ進むためのエンジンとは別のレバーで動かす。
       lift: spin === 'y',
-      position: acVec(p.position || {}).applyQuaternion(qFix).sub(cg),
+      position: acVec(p.position || {}).applyMatrix4(modelMat).applyQuaternion(qFix).sub(cg),
       // 回転軸そのものは機体に固定なので、向きの正規化ぶんだけ回しておく
       axis: axis.applyQuaternion(qFix).normalize(),
       thrustN: Math.max((p.props && p.props.thrustKgf) || 0, 0) * 9.80665,
@@ -325,7 +352,7 @@ function buildAircraftModel(config) {
   let contacts = gearParts.map((p) => {
     const kind = (p.props && p.props.gearPosition) || 'other';
     // 脚を出しきったときの車輪の位置を、関節と伸縮節をたどって実際に求める
-    const tip = acGearTipLocal(p.props).applyMatrix4(acPartMatrix(p));
+    const tip = acGearTipLocal(p.props).applyMatrix4(acPartMatrix(p, modelMat));
     return {
       name: p.name || kind,
       kind,
@@ -354,7 +381,7 @@ function buildAircraftModel(config) {
   const wingSpan = Math.max(...surfaces.filter((s) => s.role === 'main').map((s) => Math.abs(s.center.x) * 2 + s.span), 1);
 
   return {
-    massKg, cg, qFix, vMaxMps,
+    massKg, cg, cgModel, qFix, modelMat, vMaxMps,
     surfaces, engines, contacts, inertia, extent,
     wingArea, wingSpan,
     // 胴体の抗力。境界箱から出すと**翼幅を胴体の幅として数えてしまい**、
@@ -592,6 +619,42 @@ function analyzeAircraftPerformance(model) {
     notes.push({ level: 'error', text:
       '地上で機首を上げられません。水平尾翼が後ろの車輪の真上にあると、'
       + '舵を切っても機体を回すてこが働きません。尾翼を後ろへ、または車輪を前へ。' });
+  }
+  // 車輪の並びが重心を挟んでいないと、駐機しているだけで前か後ろへ倒れる。
+  // 機体座標では**機首が-Z**なので、zが小さいほど前。重心はz=0。
+  if (model.contacts.length >= 2) {
+    const cz = model.contacts.map((c) => c.position.z);
+    const cx = model.contacts.map((c) => c.position.x);
+    const nose = Math.min(...cz);   // いちばん前の車輪
+    const main = Math.max(...cz);   // いちばん後ろの車輪
+    const wheelbase = main - nose;
+    if (main < -0.05) {
+      notes.push({ level: 'error', text:
+        `車輪がすべて重心より前にあります（いちばん後ろの車輪でも ${(-main).toFixed(1)} m 前）。`
+        + `後ろを支えるものが無いので、置いただけで尻もちをつきます。`
+        + `主脚を重心より後ろへ下げるか、重心を前へ動かしてください。` });
+    } else if (nose > 0.05) {
+      notes.push({ level: 'error', text:
+        `車輪がすべて重心より後ろにあります（いちばん前の車輪でも ${nose.toFixed(1)} m 後ろ）。`
+        + `前を支えるものが無いので、機首から突っ込みます。`
+        + `前脚を重心より前へ出すか、重心を後ろへ動かしてください。` });
+    } else if (wheelbase > 0.1 && main < wheelbase * 0.04) {
+      // 主脚が重心の真下だと、少しの揺れで尻もちをつく（実機は重心の少し後ろに置く）
+      notes.push({ level: 'warn', text:
+        `いちばん後ろの車輪が重心のほぼ真下（${main.toFixed(2)} m）です。`
+        + `少しの揺れで尻もちをつくので、主脚をもう少し後ろへ下げてください。` });
+    }
+    // 左右も同じ。片側に寄っていれば横へ倒れる。
+    const right = Math.max(...cx), left = -Math.min(...cx);
+    if (right < 0.05 || left < 0.05) {
+      notes.push({ level: 'error', text:
+        '車輪が左右どちらか片側にしかありません。横に倒れます。'
+        + 'ミラー複製した脚のX位置が反転しているか確かめてください。' });
+    } else if (Math.min(right, left) < Math.max(right, left) * 0.5) {
+      notes.push({ level: 'warn', text:
+        `車輪の左右の張り出しが揃っていません（右 ${right.toFixed(1)} m / 左 ${left.toFixed(1)} m）。`
+        + `狭いほうへ傾きます。ミラー複製した脚のX位置が反転しているか確かめてください。` });
+    }
   }
   if (staticMarginPct < 0) {
     notes.push({ level: 'warn', text:
