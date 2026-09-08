@@ -835,6 +835,88 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
   for (let i = 0; i < 60 * 2; i++) advanceFlight(fm, st, c, noWind, flatGround, 1 / 60);
   check(st.velocity.z < -1, '直した機体はフルパワーで前(-Z)へ進む（後ろへ進まない）',
     'velocity.z=' + st.velocity.z.toFixed(1));
+
+  // --- Builder側のエンジン系ツール（05e/05f）も、この機体で同じように正しく判定できるか ---
+  //
+  // 実際にユーザーから「Boeing 747の推力調整ボタンが、エンジンの向きが変って
+  // いって推力を変えられない」という報告があった。09-aircraft.js（実際の飛行
+  // モデル）は上のテストの通りmodelTransformを正しく扱えているが、Builder側の
+  // 05e/05f（pbNoseDirection経由でqFixを作る）は modelTransform を掛けずに
+  // 「生の座標での前」を返していた。エンジンの spinAxis は「Builderの画面に
+  // 見えている向き」（＝modelTransform適用後の見た目）を指す約束なので、これに
+  // 合わせるqFixも modelTransform適用後の翼から作らないと、前向きエンジンが
+  // 「前を向いていない」と誤判定される——実際、推力調整ボタンが「エンジンが
+  // 前向きを向いていません」と断り続け、推力を変えられなくなっていた。
+  {
+    const toasts = [];
+    const ectx = vm.createContext({
+      THREE, console, Math, Number, Array, Object, JSON,
+      WING_CORNER_KEYS: ['rootLeading', 'rootTrailing', 'tipLeading', 'tipTrailing'],
+      State: null, showToast: (m, e) => toasts.push({ msg: m, error: !!e }),
+      renderPartList: () => {}, renderInspector: () => {}, renderModelSettingsPanel: () => {},
+      applyCgToGizmo: () => {}, applyPartToGizmo: () => {}, updateInspectorNumbersOnly: () => {},
+    });
+    for (const f of ['05b-cg-system.js', '05d-vtol-balance.js', '05e-pitch-balance.js', '05f-engine-power.js']) {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'js', f), 'utf8');
+      vm.runInContext(src, ectx, { filename: f });
+    }
+    ectx.State = {
+      parts: JSON.parse(JSON.stringify(fixed.parts)),
+      cg: { position: { ...fixed.cg }, gizmo: { position: new THREE.Vector3() } },
+      model: {
+        weightKg: fixed.modelWeightKg, maxSpeedValue: fixed.modelMaxSpeedValue, maxSpeedUnit: fixed.modelMaxSpeedUnit,
+        root: { rotation: new THREE.Euler(0, Math.PI, 0), scale: new THREE.Vector3(1, 1, 1) },
+      },
+    };
+
+    const rawNose = ectx.pbNoseDirection();
+    const worldNose = ectx.pbNoseDirection(true);
+    check(rawNose.z > 0.9, '生の座標だけ見ると「前」は+Z（機体は逆さに作られている）',
+      `(${rawNose.toArray().map((v) => v.toFixed(2)).join(',')})`);
+    check(worldNose.z < -0.9, 'modelTransform込みで見ると「前」は正しく-Z',
+      `(${worldNose.toArray().map((v) => v.toFixed(2)).join(',')})`);
+
+    const rep = ectx.epSpeedThrustReport();
+    check(rep.engines.every((e) => e.fwd > 0.9),
+      'エンジン出力の自動設定：この機体でも、前向きエンジンをちゃんと前向きと判定できる',
+      rep.engines.map((e) => e.fwd.toFixed(2)).join('/'));
+
+    toasts.length = 0;
+    const thrustBefore = ectx.State.parts.filter((p) => p.type === 'engine').map((p) => p.props.thrustKgf);
+    check(ectx.applyEngineSpeedTarget() === true,
+      'エンジン出力の自動設定：「前向きエンジンが無い」と誤って断らず、推力を変更できる');
+    const thrustAfter = ectx.State.parts.filter((p) => p.type === 'engine').map((p) => p.props.thrustKgf);
+    check(thrustAfter.every((t, i) => t !== thrustBefore[i]),
+      '実際に推力の値が変わっている（同じ値のまま=何もしていない、ではない）',
+      `${thrustBefore.join(',')} → ${thrustAfter.join(',')}`);
+
+    // 空力バランスを整えるほうも、エンジンのモーメント判定に同じqFixの取り違えがあった。
+    // 直前でエンジン出力の自動設定が推力を大きく変えているので、独立に確かめるため
+    // 機体を作り直す（さもないと、推力が増えたぶんモーメントも増えて、
+    // ティルトの上限（PB_ENGINE_TILT_MAX_DEG=20°）内で打ち消しきれず、
+    // 「qFixが正しいか」とは無関係な理由で失敗する）。
+    ectx.State = {
+      parts: JSON.parse(JSON.stringify(fixed.parts)),
+      cg: { position: { ...fixed.cg }, gizmo: { position: new THREE.Vector3() } },
+      model: {
+        weightKg: fixed.modelWeightKg, maxSpeedValue: fixed.modelMaxSpeedValue, maxSpeedUnit: fixed.modelMaxSpeedUnit,
+        root: { rotation: new THREE.Euler(0, Math.PI, 0), scale: new THREE.Vector3(1, 1, 1) },
+      },
+    };
+    const beforeReport = ectx.pbBalanceReport();
+    toasts.length = 0;
+    check(ectx.balancePitchTrim() === true, '空力バランスを整える：この機体でも実行できる');
+    const afterReport = ectx.pbBalanceReport();
+    // このエンジン配置は推力に対して腕が短く、ティルトの上限（20°）だけでは
+    // 完全には打ち消しきれない（momentOkの基準では足りない）——それ自体は
+    // このテスト機の形状の問題であって、qFixの向きが正しいかどうかとは別の話。
+    // ここで確かめたいのは「正しい向きへ（＝モーメントが減る向きに）ティルトが
+    // 効いているか」——qFixが180°ずれていれば、逆向きに効いてモーメントは
+    // 減らずむしろ増える。
+    check(Math.abs(afterReport.thrustPitchMoment) < Math.abs(beforeReport.thrustPitchMoment) * 0.8,
+      '空力バランスを整える：エンジンのティルトが正しい向きに効いて、モーメントが減っている',
+      `${beforeReport.thrustPitchMoment.toFixed(0)} → ${afterReport.thrustPitchMoment.toFixed(0)} N·m`);
+  }
 }
 
 // --- 車輪の並び ---------------------------------------------------------------

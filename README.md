@@ -236,6 +236,24 @@ Three.js (r128, jsDelivr CDN) + vanilla JS。ビルドツールなし、ロー�
   パーツが本当に無い場合は正しく出ない、という自然な見た目だったため気付き
   にくかった）。パーツ・重心を反映し終えたあとにパネルを描画するよう順序を
   入れ替えて直した。
+- **`modelTransform` でまるごと反転している機体（実際に来たBoeing 747）で、
+  ボタンが「前向きエンジンが無い」と誤って断り続け、推力を変えられなかった**。
+  `pbNoseDirection`（`js/05e-pitch-balance.js`）は `State.cg.position` に
+  合わせて**生の座標のまま**「前」を返す設計だった——重心は保存時に
+  `modelTransform` を掛ける前の値として持つので、CGがらみの計算はこれで
+  正しい（空力中心はアフィン変換で可換なので、生の頂点から出した値をそのまま
+  CGに使えば、あとで `buildAircraftModel` が `modelTransform` を掛けたときに
+  正しい位置に来る）。ところが**エンジンの `spinAxis` は「Builderの画面に
+  見えている向き」（＝`modelTransform` 適用後の見た目）を指す約束**
+  （`js/env/09-aircraft.js` 参照）なので、これに合わせる `qFix` は逆に
+  `modelTransform` 適用後の翼から作る必要がある——生の向きのまま使うと、
+  前後逆さに作られたモデルを `modelTransform` で直している機体で、翼は
+  正しく判定できるのにエンジンの向きの基準だけ180°ずれ、前向きエンジンが
+  「前を向いていない」と誤診断されていた。`pbNoseDirection` に
+  `worldSpace` 引数を足し、エンジンの向き判定（`js/05f-engine-power.js` の
+  推力自動設定、`js/05e-pitch-balance.js` の空力バランス）はそちらを、
+  CGの位置決め（「主翼から決定」など）は生の値のほうを、と使い分けるように
+  直した。
 
 ### 原点調整
 - `centerModelOnAxis(axis)` の `axis` は **画面上の見た目の軸（ワールド座標系）**。

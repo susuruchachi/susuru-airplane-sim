@@ -26,16 +26,27 @@ const PB_MOMENT_OK = () => Math.max(State.model.weightKg, 1) * 0.5; // solveLeve
 // 主翼（無ければ水平尾翼、それも無ければ全部の翼）の翼弦から「前」の向きを読む。
 // 上下の情報は翼弦には無いので、水平成分だけを使う——機体を傾けて作っていても
 // 前後だけは正しく決まる。翼が無ければ null（決めようがない）。
-function pbNoseDirection() {
+//
+// worldSpace（既定false）… trueにすると、機体まるごとの向き（modelTransform）も
+// 掛けた「実際の見た目の前」を返す。エンジンの spinAxis は「Builderの画面に
+// 見えている向き」を指す約束（09-aircraft.js と同じ）なので、エンジンの向きに
+// 掛ける qFix（pbFixQuaternion経由）はこちらを使う——素の値のままだと、
+// 前後逆さに作られたモデルを modelTransform で直している機体（実際に来た
+// Boeing 747がそう）で、翼は正しく直っているのにエンジンの向きの基準だけ
+// 逆になり、推力の向きの判定を丸ごと誤る（「前向きエンジンが無い」と
+// 誤診断される）。CGの計算（wingsAeroCenterByRoleなど）はState.cg.positionが
+// modelTransformを掛ける前の値として保存されるため、必ずfalse（既定）で使うこと。
+function pbNoseDirection(worldSpace) {
   const wings = State.parts.filter(p => p.type === 'wing' && p.props && p.props.corners);
   const pick = wings.filter(w => w.props.role === 'main');
   const use = pick.length ? pick
     : (wings.filter(w => w.props.role === 'htail').length ? wings.filter(w => w.props.role === 'htail') : wings);
   if (!use.length) return null;
 
+  const modelMat = worldSpace ? cgModelMatrix() : null;
   const chord = new THREE.Vector3();
   for (const w of use) {
-    const m = cgPartMatrix(w);
+    const m = modelMat ? new THREE.Matrix4().multiplyMatrices(modelMat, cgPartMatrix(w)) : cgPartMatrix(w);
     const c = w.props.corners || {};
     const v = (k) => { const p = c[k] || { x: 0, y: 0, z: 0 }; return new THREE.Vector3(p.x || 0, p.y || 0, p.z || 0).applyMatrix4(m); };
     const leading = v('rootLeading').add(v('tipLeading')).multiplyScalar(0.5);
@@ -90,8 +101,11 @@ function pbEngineMoment(engines, cgPos, fixQ, tiltDeltaDeg) {
     ));
     axis.applyQuaternion(fixQ).normalize();
     const thrustN = e.props.thrustKgf * 9.80665;
+    // 位置は機体まるごとの向き（cgModelMatrix）を先に掛けてからqFix——
+    // 09-aircraft.js のエンジン位置の扱いと同じ（向き=spinAxisとは違い、
+    // 位置は本当にroot基準のローカル値なので、modelTransformの復元が要る）。
     const posVec = new THREE.Vector3(e.position.x || 0, e.position.y || 0, e.position.z || 0);
-    const arm = posVec.sub(cgPos).applyQuaternion(fixQ);
+    const arm = posVec.sub(cgPos).applyMatrix4(cgModelMatrix()).applyQuaternion(fixQ);
     const force = axis.multiplyScalar(thrustN);
     total += arm.y * force.z - arm.z * force.y; // 09-aircraft.js の thrustPitchMoment と同じ式
   }
@@ -124,7 +138,8 @@ function pbBalanceReport() {
   const staticMarginPct = neutral.mac > 1e-6 ? (marginM / neutral.mac) * 100 : 0;
 
   const engines = pbForwardEngines();
-  const fixQ = pbFixQuaternion(noseDir);
+  // エンジンの向き判定は「見た目の前」（modelTransform込み）基準で行う
+  const fixQ = pbFixQuaternion(pbNoseDirection(true) || noseDir);
   const moment = engines.length ? pbEngineMoment(engines, State.cg.position, fixQ, 0) : 0;
 
   return {
@@ -154,7 +169,8 @@ function balancePitchTrim() {
   const engines = pbForwardEngines();
   let tiltDeg = 0;
   if (engines.length) {
-    const fixQ = pbFixQuaternion(noseDir);
+    // エンジンの向き判定は「見た目の前」（modelTransform込み）基準で行う
+    const fixQ = pbFixQuaternion(pbNoseDirection(true) || noseDir);
     const residual = pbEngineMoment(engines, State.cg.position, fixQ, 0);
     if (Math.abs(residual) >= PB_MOMENT_OK()) {
       tiltDeg = pbBisect(

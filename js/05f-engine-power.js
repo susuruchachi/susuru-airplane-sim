@@ -89,7 +89,11 @@ function epWingAeroStats() {
 //   currentN … いま前向きエンジンが実際に出している（機首方向へ投影した）推力の合計
 //   neededN  … 最高速度で釣り合う（＋余裕ぶん）ために必要な合計
 function epSpeedThrustReport() {
-  const noseDir = pbNoseDirection();
+  // エンジンの向き判定なので「見た目の前」（modelTransform込み）基準で求める
+  // （pbNoseDirectionのworldSpace引数を参照。前後逆さに作られたモデルを
+  // modelTransformで直している機体で、そのままだと前向きエンジンが
+  // 無いと誤判定してしまう）。
+  const noseDir = pbNoseDirection(true);
   if (!noseDir) return null;
   const wing = epWingAeroStats();
   if (!wing) return null;

@@ -93,6 +93,32 @@ function deselectCg() {
 
 // --- 主翼の空力中心 -----------------------------------------------------------
 
+// 機体まるごとにかかっている向き・大きさ（Builderでは State.model.root の変換）。
+// 09-aircraft.js の acModelMatrix と同じもの。**root.rotation はラジアンのまま**
+// （THREE.Object3Dのプロパティをそのまま読むため）。
+//
+// これは cgPartMatrix には**掛けない**——State.cg.position は「まだ
+// modelTransformを掛けていない、パーツと同じ素のroot基準の値」として保存・
+// 復元されるので（buildAircraftModelがconfig.cgへ自分でmodelMatを掛ける）、
+// wingsAeroCenterByRole が返す位置もその空間のままでないと、「主翼から決定」で
+// 書き込んだCGが二重にmodelMatを受けることになる。実際、ここへ足しても
+// 数学的には無意味だった——空力中心（前縁から1/4翼弦の面積加重平均）は
+// アフィン変換で可換（modelMat(f(素の頂点)) = f(modelMat(頂点))）なので、
+// 「素の頂点から出した空力中心」をそのままCGに使えば、あとでbuildAircraftModel
+// がmodelMatを掛けたときに正しい位置に来る。
+// 一方、**エンジンの向き（spinAxis）はBuilderの画面に見えている向きを指す約束**
+// なので、これに掛けるqFixは逆にmodelTransform適用後の翼から出す必要がある
+// （pbNoseDirectionの引数 worldSpace 参照）。
+function cgModelMatrix() {
+  const root = State.model.root;
+  if (!root) return new THREE.Matrix4();
+  return new THREE.Matrix4().compose(
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Quaternion().setFromEuler(root.rotation),
+    new THREE.Vector3(root.scale.x, root.scale.y, root.scale.z)
+  );
+}
+
 // パーツのローカル座標→機体座標の行列。rotation は「度」で持っているので直して使う。
 function cgPartMatrix(part) {
   const r = part.rotation || { x: 0, y: 0, z: 0 };
