@@ -42,7 +42,7 @@ const {
   createFlightState, createFlightControls, advanceFlight, placeAircraftOnGround,
   airDensityAt, solveLevelTrim, vtolClimbSpeedLimit, accumulateAeroForces, refreshFlightReadouts,
   createAutopilotState, stepAutopilot, apSpeedSchedule, apMakeApproachPlan,
-  apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo,
+  apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo, apBankMaxFor,
 } = ctx;
 
 let failures = 0;
@@ -1551,6 +1551,43 @@ function autopilotFlight(opts) {
   check(worstG < 12, '大型機でも脚が壊れる衝撃にならない', worstG.toFixed(1) + 'G');
 }
 
+// --- 自動操縦：高速機ほどバンク角を深くして旋回性能を上げる -----------------------
+//
+// バンク角の上限（25°）は民間機の常用域を基準にした値で、遅い機体はそれで十分だが、
+// 速い機体ほど「バンクを目一杯使っても曲がりきれない」影響を強く受ける
+// （旋回半径 v²/(g·tanθ) が速度の2乗で効くため）。実機の戦闘機のように、
+// 速い機体はもっと深く傾けられるようにして、旋回半径を詰められるようにする。
+{
+  // 13-autopilot.js の同名の定数と同じ値。vmコンテキストの外からはトップレベルの
+  // constを直接読めない（関数と違ってグローバルオブジェクトに乗らない）ので、
+  // 比較用にここでも複製する（下の旋回半径のテストで25°を複製していたのと同じ理由）。
+  const BANK_SLOW = 25, BANK_FAST = 60, SPEED_LO = 100, SPEED_HI = 680, RADIUS_MAX = 40000;
+
+  check(Math.abs(apBankMaxFor(50) - BANK_SLOW) < 0.01,
+    '低速機（100m/s以下）はバンク角の上限がそのまま', apBankMaxFor(50).toFixed(1) + '°');
+  check(Math.abs(apBankMaxFor(2000) - BANK_FAST) < 0.01,
+    '極端に速い機体でも60°で頭打ちになる（実機の常用域を外れる深いバンクにはしない）',
+    apBankMaxFor(2000).toFixed(1) + '°');
+  const mid = apBankMaxFor((SPEED_LO + SPEED_HI) / 2);
+  check(mid > BANK_SLOW && mid < BANK_FAST,
+    '中間の速さでは上限も中間になる（速いほど滑らかに深くなる）', mid.toFixed(1) + '°');
+
+  // マッハ2級の機体で、実際に巡航速度が上がる（＝曲がれる速さの上限が上がる）ことを確かめる
+  const fast = defaultAircraftConfig();
+  fast.name = '高速機テスト';
+  fast.modelMaxSpeedValue = 2; fast.modelMaxSpeedUnit = 'mach';
+  const fastModel = buildAircraftModel(fast);
+  const fastSpd = apSpeedSchedule(fastModel);
+  // 「以前の固定25°バンクなら、曲がれる速さの上限は何m/sだったか」を計算し直して比べる
+  const oldTurnableV = Math.sqrt(RADIUS_MAX * 9.80665 * Math.tan(BANK_SLOW * Math.PI / 180));
+  check(fastSpd.bankMax > BANK_SLOW + 10,
+    'マッハ2級の機体は、バンク角の上限が民間機の常用域よりだいぶ深くなる',
+    fastSpd.bankMax.toFixed(1) + '°');
+  check(fastSpd.cruise > oldTurnableV * 1.3,
+    'そのぶん、以前の固定25°より速く巡航できる（旋回性能が上がる）',
+    `${(fastSpd.cruise * KT).toFixed(0)}kt > ${(oldTurnableV * KT).toFixed(0)}kt(旧上限)`);
+}
+
 // --- 自動操縦：最高速度が桁外れな機体でも旋回できるか ------------------------------
 //
 // フィクションの超音速機には最高速度に「マッハ21」のような桁外れな値が
@@ -1569,8 +1606,7 @@ function autopilotFlight(opts) {
   check(hspd.cruise < hm.vMaxMps * 0.5, '最高速度が桁外れでも、巡航速度はそのまま追従しない',
     `巡航${hspd.cruise.toFixed(0)}m/s ≪ 最高${hm.vMaxMps.toFixed(0)}m/s`);
   // その巡航速度・最大バンク角なら、旋回半径は十分に小さい（世界の広さに対して）
-  const AP_BANK_MAX_DEG = 25;
-  const radius = (hspd.cruise * hspd.cruise) / (9.80665 * Math.tan(AP_BANK_MAX_DEG * Math.PI / 180));
+  const radius = (hspd.cruise * hspd.cruise) / (9.80665 * Math.tan(hspd.bankMax * Math.PI / 180));
   check(radius < 60000, '巡航速度での旋回半径が実用的な範囲に収まる', (radius / 1000).toFixed(0) + 'km');
 
   // 実際に、旋回が要る経路（横へ40km）を自動操縦で飛ばして確かめる

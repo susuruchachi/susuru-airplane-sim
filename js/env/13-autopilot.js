@@ -30,7 +30,7 @@ const AP_TRIM_RATE = 0.22;     // 残った舵をトリムへ逃がす速さ（�
 const AP_ROLL_KP = 0.055;      // バンク角のずれ1°あたりのエルロン
 const AP_ROLL_KD = 0.9;        // ロール角速度(rad/s)への戻し（符号は+：上のコメント参照）
 const AP_HDG_KP = 1.5;         // 方位のずれ1°あたり、何度傾けるか
-const AP_BANK_MAX = 25;        // 自動操縦が使うバンク角の上限(°)
+const AP_BANK_MAX = 25;        // 自動操縦が使うバンク角の上限(°)。低速機（〜194kt）はここまで
 const AP_VS_KP = 0.10;         // 高度のずれ1mあたりの昇降率(m/s)
 const AP_PITCH_FROM_VS = 0.9;  // 昇降率のずれ1m/sあたり、何度ピッチを足すか
 const AP_THR_KP = 0.10;        // 速度のずれ1m/sあたり、毎秒どれだけスロットルを動かすか
@@ -196,6 +196,22 @@ function apRudderForCoordination(state) {
 // 速さで」という意味のはずなので、曲がれる速さを上限にする。
 const AP_CRUISE_TURN_RADIUS_MAX = 40000;
 
+// バンク角の上限は、機体の最高速度が上がるほど引き上げる。
+// AP_BANK_MAX（25°）は民間機の常用域——乗客がいる想定でゆったり曲がる角度で、
+// 遅い機体はそのまま使う。実機の戦闘機はもっと深く傾けて旋回半径を詰めており
+// （tanθが効くので、25°→60°で半径は1/3強になる）、速い機体ほどそちらへ寄せる。
+// ここを上げないと、速い機体ほど「バンクを目一杯使っても曲がりきれない」影響を
+// 強く受ける（AP_CRUISE_TURN_RADIUS_MAXのコメント参照）——上限そのものを
+// 引き上げれば、同じ半径でもっと速く巡航でき、旋回性能が上がる。
+// マッハ2見当（680m/s）より速い機体（フィクションの超音速機）は60°で頭打ちにする。
+const AP_BANK_MAX_FAST = 60;   // 高速機のバンク角上限(°)
+const AP_BANK_SPEED_LO = 100;  // この速さ(m/s、約194kt)以下は低速機としてAP_BANK_MAXのまま
+const AP_BANK_SPEED_HI = 680;  // この速さ(m/s、マッハ2見当)でAP_BANK_MAX_FASTに達する
+function apBankMaxFor(vMax) {
+  const t = apClamp((vMax - AP_BANK_SPEED_LO) / (AP_BANK_SPEED_HI - AP_BANK_SPEED_LO), 0, 1);
+  return AP_BANK_MAX + t * (AP_BANK_MAX_FAST - AP_BANK_MAX);
+}
+
 // 失速速度から、離陸・上昇・巡航・進入の速度を決める。
 // analyzeAircraftPerformance と同じ式で失速速度を出す（重い呼び出しは避ける）。
 function apSpeedSchedule(model) {
@@ -203,8 +219,9 @@ function apSpeedSchedule(model) {
   const S = Math.max(model.wingArea, 0.01);
   const stall = Math.sqrt((2 * W) / (1.225 * S * 1.5));
   const vMax = Math.max(model.vMaxMps || 0, stall * 2);
+  const bankMax = apBankMaxFor(vMax);
   const turnableV = Math.sqrt(AP_CRUISE_TURN_RADIUS_MAX * 9.80665
-    * Math.tan(AP_BANK_MAX * Math.PI / 180));
+    * Math.tan(bankMax * Math.PI / 180));
   return {
     stall,
     rotate: stall * 1.15,               // 機首を上げる速度
@@ -216,6 +233,7 @@ function apSpeedSchedule(model) {
     cruise: apClamp(Math.min(vMax * 0.97, turnableV), stall * 1.4, vMax),
     approach: stall * 1.3,
     vMax,
+    bankMax, // 巡航中（nav()）が実際に使うバンク角の上限。進入・引き起こしはこれより浅い固定値のまま
   };
 }
 
@@ -352,7 +370,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   const nav = () => {
     const want = plan ? apBearingTo(state.position.x, state.position.z, tx, tz) : state.headingDeg;
     ap.targetHeadingDeg = want;
-    controls.roll = apAileronForTrack(state, want);
+    controls.roll = apAileronForTrack(state, want, spd.bankMax);
     controls.yaw = apRudderForCoordination(state);
   };
 
