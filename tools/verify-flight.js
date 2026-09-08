@@ -1588,6 +1588,57 @@ function autopilotFlight(opts) {
     `${(fastSpd.cruise * KT).toFixed(0)}kt > ${(oldTurnableV * KT).toFixed(0)}kt(旧上限)`);
 }
 
+// --- 自動操縦：推力重量比が桁外れな機体でも、旋回して着陸できるか -----------------------
+//
+// サンダーバード1号（実機の報告値で推力/重量20倍超）を自動操縦で飛ばすと、
+// 上昇中に姿勢を目一杯（15°）まで上げても速度が青天井に伸び続け、
+// 旋回できる速さ（spd.cruise）を秒速2,000kt以上も超えて目的地をはるかに
+// 通り過ぎてしまい、目的地の周りを永遠に旋回し続けて（＝旋回できず、
+// 巡航中フラフラする）一生降りられなくなっていた。
+//   1. 上昇中、速度が「曲がれる速さの1.5倍」を超えたら出力を絞る
+//      （climb フェーズの overCruise 判定）
+//   2. 旋回半径は世界の大きさだけでなく、いま飛んでいるルートの長さにも
+//      合わせて絞る（apCruiseTurnRadiusMax）
+// の2つを直したことで、それでも実際に旋回して着陸できることを確かめる。
+{
+  const rocket = defaultAircraftConfig();
+  rocket.name = '推力過剰機テスト';
+  rocket.modelMaxSpeedValue = 3; rocket.modelMaxSpeedUnit = 'mach';
+  for (const p of rocket.parts) { if (p.type === 'engine' && p.props) p.props.thrustKgf *= 60; }
+  const rocketModel = buildAircraftModel(rocket);
+  const tw = rocketModel.totalThrustN / (rocketModel.massKg * 9.80665);
+  check(tw > 15, 'この機体も、実際に報告のあった超音速機と同じくらい推力が桁外れ',
+    tw.toFixed(1) + '倍');
+
+  const noRouteSpd = apSpeedSchedule(rocketModel);
+  const st = createFlightState();
+  const c = createFlightControls();
+  placeAircraftOnGround(rocketModel, st, 0, 0, 90, flatGround);
+  const ap = createAutopilotState();
+  ap.full = true; ap.targetAltitudeM = 2000; ap.destAirportId = 'DST';
+  // 90°の旋回が要る経路（出発は東向き、目的地は北東40km）
+  ap.plan = apMakeApproachPlan({ id: 'DST', x: 40000, z: 40000, elevationM: 0 },
+    { runwayLengthM: 2400, headingDeg: 0 }, 0);
+  ap.takeoffHeadingDeg = 90; ap.phase = 'takeoff';
+  let t = 0; const seen = []; let prev = ''; let maxSpeedDuringClimb = 0;
+  while (t < 1800) {
+    stepAutopilot(rocketModel, st, c, ap, 1 / 60, {});
+    advanceFlight(rocketModel, st, c, noWind, flatGround, 1 / 60);
+    t += 1 / 60;
+    if (ap.phase === 'climb') maxSpeedDuringClimb = Math.max(maxSpeedDuringClimb, st.airspeed);
+    if (ap.phase !== prev) { prev = ap.phase; seen.push(ap.phase); }
+    if (ap.phase === 'done' || st.crashed) break;
+  }
+  note('推力過剰機テスト', `${seen.join('→')} ${t.toFixed(0)}秒 / 上昇中の最高速度`
+    + `${(maxSpeedDuringClimb * KT).toFixed(0)}kt（曲がれる速さ${(noRouteSpd.cruise * KT).toFixed(0)}kt）`);
+  check(maxSpeedDuringClimb < noRouteSpd.cruise * 2,
+    '上昇中、出力の絞りが効いて、曲がれる速さを大きく超えたまま伸び続けない',
+    `${(maxSpeedDuringClimb * KT).toFixed(0)}kt`);
+  check(ap.phase === 'done' && !st.crashed,
+    '推力が桁外れでも、旋回して目的地へ着陸できる（以前は旋回できず永遠に周り続けた）',
+    `${ap.phase} / ${t.toFixed(0)}秒`);
+}
+
 // --- 自動操縦：最高速度が桁外れな機体でも旋回できるか ------------------------------
 //
 // フィクションの超音速機には最高速度に「マッハ21」のような桁外れな値が

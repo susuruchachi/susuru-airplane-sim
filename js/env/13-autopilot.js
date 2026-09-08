@@ -196,6 +196,20 @@ function apRudderForCoordination(state) {
 // 速さで」という意味のはずなので、曲がれる速さを上限にする。
 const AP_CRUISE_TURN_RADIUS_MAX = 40000;
 
+// 旋回半径は「世界の大きさに対して」だけでなく、**いま飛んでいるルートの長さに
+// 対しても**無理のない値に抑える。旋回そのものに使う弧の長さは半径×旋回角で、
+// 目的地までの直線距離よりそれが長ければ、いくら旋回しても目的地の方を向けない
+// まま延々と周り続ける——実際、目的地まで数十kmしかないところへ、上の
+// AP_CRUISE_TURN_RADIUS_MAX（世界の大きさから決めた40km）をそのまま使う超音速機を
+// 飛ばすと、旋回半径のほうが目的地までの距離より大きく、旋回できず（＝直進のまま）
+// 目的地の周りをフラフラ回り続けて一生降りられなくなった。
+const AP_TURN_RADIUS_ROUTE_FRACTION = 1 / 6; // 目的地までの距離の、これぶんまでに抑える
+const AP_TURN_RADIUS_MIN = 3000;             // 極端に近い目的地でも、これより短くはしない
+function apCruiseTurnRadiusMax(distToGoM) {
+  if (!(distToGoM > 0)) return AP_CRUISE_TURN_RADIUS_MAX;
+  return apClamp(distToGoM * AP_TURN_RADIUS_ROUTE_FRACTION, AP_TURN_RADIUS_MIN, AP_CRUISE_TURN_RADIUS_MAX);
+}
+
 // バンク角の上限は、機体の最高速度が上がるほど引き上げる。
 // AP_BANK_MAX（25°）は民間機の常用域——乗客がいる想定でゆったり曲がる角度で、
 // 遅い機体はそのまま使う。実機の戦闘機はもっと深く傾けて旋回半径を詰めており
@@ -214,13 +228,16 @@ function apBankMaxFor(vMax) {
 
 // 失速速度から、離陸・上昇・巡航・進入の速度を決める。
 // analyzeAircraftPerformance と同じ式で失速速度を出す（重い呼び出しは避ける）。
-function apSpeedSchedule(model) {
+// distToGoM（目的地までの距離）を渡すと、旋回半径をそのルートの長さに合わせて絞る
+// （渡さなければ世界の大きさから決めた上限のまま——目的地未設定の高度維持モードなど）。
+function apSpeedSchedule(model, distToGoM) {
   const W = model.massKg * 9.80665;
   const S = Math.max(model.wingArea, 0.01);
   const stall = Math.sqrt((2 * W) / (1.225 * S * 1.5));
   const vMax = Math.max(model.vMaxMps || 0, stall * 2);
   const bankMax = apBankMaxFor(vMax);
-  const turnableV = Math.sqrt(AP_CRUISE_TURN_RADIUS_MAX * 9.80665
+  const radiusMax = apCruiseTurnRadiusMax(distToGoM);
+  const turnableV = Math.sqrt(radiusMax * 9.80665
     * Math.tan(bankMax * Math.PI / 180));
   return {
     stall,
@@ -380,8 +397,16 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.flap = 0;
     nav();
     ap.targetSpeedMps = spd.climb;
-    controls.throttle = 1;
-    // 上昇は「速度を保つように機首を上げ下げする」。出力は全開のまま。
+    // 上昇は基本「速度を保つように機首を上げ下げする」で、出力は全開のまま
+    // （ふつうの機体は、姿勢を目一杯（15°）まで上げれば抗力が増えて頭打ちになる）。
+    // ただし推力重量比が桁外れな機体（実機の何倍もの推力を持つフィクションの
+    // 超音速機）は、姿勢を上げるだけでは頭打ちにならず、上昇中に秒速数kmまで
+    // 加速して目的地をはるかに通り過ぎてしまう——旋回半径は速度の2乗で効くので、
+    // 曲がれる速さ（spd.cruise）を大きく超えたまま飛び続けると、そのぶん先で
+    // 目的地の周りを永遠に旋回するはめになる（実際、旋回できずフラフラする
+    // 報告になった）。曲がれる速さの1.5倍を超えたら、そこだけ出力を絞る。
+    const overCruise = state.airspeed - spd.cruise * 1.5;
+    controls.throttle = overCruise > 0 ? apClamp(1 - overCruise * 0.1, 0, 1) : 1;
     const want = apClamp(state.pitchDeg + (state.airspeed - spd.climb) * 0.8, 0, AP_PITCH_MAX);
     controls.pitch = apElevatorForPitch(state, controls, want, dt);
     ap.vsCmd = state.verticalSpeed;
@@ -458,6 +483,13 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 降りられなかったときはやり直す。滑走路の半ばを過ぎてもまだ浮いているなら、
     // そのまま降ろしても止まりきれない。ここで諦めないと素通りしたまま飛び続ける。
     if (t.before < -plan.runwayLengthM * 0.35) say('goaround', 'やり直し（もう一度進入）');
+
+    // 旋回半径が大きい機体（速い機体ほど）は、中心線から大きくずれたまま
+    // 最終進入点に着くことがある——横のずれを詰めきる前に滑走路が迫ってしまい、
+    // このまま進んでも間に合わない。滑走路が近いのに中心線から大きくずれている
+    // ときは、素通りするのを待たずにやり直す（実際、これが無いと合わせきれない
+    // まま延々と進入を続け、いつまで経っても着陸できなかった）。
+    if (t.before < 4000 && Math.abs(t.cross) > 2000) say('goaround', 'やり直し（中心線に乗り切れない）');
     return;
   }
 
@@ -536,7 +568,12 @@ function apStepAltHold(model, state, controls, ap, spd, dt) {
 // 自動操縦を1フレーム進める（環境に依らない本体）
 function stepAutopilot(model, state, controls, ap, dt, env) {
   if (state.crashed) { ap.full = false; ap.altHold = false; ap.phase = 'off'; return; }
-  const spd = apSpeedSchedule(model);
+  // 目的地までの距離（進入計画があれば最終進入開始点まで）。旋回半径をルートの
+  // 長さに合わせて絞るのに使う（apCruiseTurnRadiusMax参照）。
+  const distToGoM = ap.plan
+    ? Math.hypot(ap.plan.faf.x - state.position.x, ap.plan.faf.z - state.position.z)
+    : undefined;
+  const spd = apSpeedSchedule(model, distToGoM);
   if (ap.full) apStepFull(model, state, controls, ap, spd, dt, env);
   else if (ap.altHold) apStepAltHold(model, state, controls, ap, spd, dt);
 }
