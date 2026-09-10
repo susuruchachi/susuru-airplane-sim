@@ -299,7 +299,19 @@ function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
   const q = state.quaternion;
   const qInv = _fv.qInv.copy(q).invert();
   const n = model.contacts.length;
-  const kSpring = (model.massKg * FLIGHT_GRAVITY) / (GEAR_SQUASH_M * n);
+  // 脚のばねの硬さは「その機体に掛かる力の大きさ」で決める。
+  //
+  // **重さだけで決めてはいけない**。脚が受け止めるのは重さだけではなく、
+  // そのとき機体に掛かっている力ぜんぶ。推力が重さの何倍もある機体
+  // （サンダーバードのような）は、推力の作用線が重心より上にあるぶん
+  // 機首下げのモーメントが出る（内蔵機ならエンジンは重心の20cm上）。
+  // それを止めるには前脚が重さの数倍の力で押し返す必要があるが、
+  // 重さぶんの硬さしかないばねでは60cm以上沈まないとその力が出ず、
+  // 機首が滑走路にめり込んでいた（実測：推力/重量14倍でピッチ-90°、
+  // 機体が地面下22mまで沈んだ）。推力も見て硬さを決める。
+  // 推力が重さ以下のふつうの機体では、これまでとまったく同じ値になる。
+  const designLoadN = Math.max(model.massKg * FLIGHT_GRAVITY, model.totalThrustN || 0);
+  const kSpring = designLoadN / (GEAR_SQUASH_M * n);
   const cDamp = 2 * Math.sqrt(kSpring * (model.massKg / n)) * 0.9;
 
   const steerRad = THREE.MathUtils.degToRad(GEAR_STEER_MAX_DEG) * controls.yaw
@@ -323,8 +335,8 @@ function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
     const vNormal = vel.y;
     let normal = kSpring * pen - cDamp * vNormal;
     if (normal < 0) normal = 0;
-    // 沈みすぎたときに弾き飛ばさないよう上限を置く
-    normal = Math.min(normal, model.massKg * FLIGHT_GRAVITY * 8);
+    // 沈みすぎたときに弾き飛ばさないよう上限を置く（こちらも designLoadN 基準）
+    normal = Math.min(normal, designLoadN * 8);
 
     // 車輪の向き（機体の前方を地面へ落とし、前輪なら舵角ぶん回す）
     const fwd = _gv.fwd.set(0, 0, -1);

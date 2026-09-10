@@ -95,6 +95,99 @@ function apVtolHoverAngles(state, targetX, targetZ) {
   return { wantPitchDeg: -pitchTilt, wantBankDeg: bankTilt };
 }
 
+// --- 地面をよける ---------------------------------------------------------------
+//
+// 自動操縦は「設定した高度（海面から）」を保つだけだったので、下の地面が
+// 上がってきても知らんぷりで、山にそのまま突っ込んでいた（実測：30km先に
+// 標高2500mの尾根、目標高度1500mで、練習機もマッハ2級も対地高度-1mまで
+// めり込んだ）。前方の地面を見て、「いまこの高度以上にいないと越えられない」
+// 高さ（＝床）を出し、目標高度をそれで底上げする。
+//
+// 越えられるかどうかは距離と上昇率で決まる。距離dの先に標高hの地面があるなら、
+// そこへ着くまでの時間は d/v、そのあいだに稼げる高度は 上昇率×d/v なので、
+// **いま必要な高度は h + 余裕 − 上昇率×d/v**。前方を何点か見て、その最大を取る。
+// この形だと、遠くの高い山には早めに上りはじめ、近くの低い丘は無視できる。
+const AP_TERRAIN_CLEARANCE_M = 300;   // 地面からどれだけ上を通るか(m)
+const AP_TERRAIN_LOOKAHEAD_SEC = 120; // 何秒先まで見るか
+const AP_TERRAIN_LOOKAHEAD_MIN_M = 10000;
+const AP_TERRAIN_LOOKAHEAD_MAX_M = 60000;
+const AP_TERRAIN_SAMPLES = 24;        // 前方を何点見るか
+const AP_TERRAIN_CLIMB_MARGIN = 0.7;  // 上昇率をどれだけ割り引いて見積もるか
+const AP_TERRAIN_REFRESH_SEC = 0.25;  // 何秒ごとに測り直すか（毎コマは重い）
+// 目的地が近づいたら余裕を減らしていく。減らさないと、空港そのものの地面が
+// 「越えるべき障害物」に見えて、降りられなくなる。
+const AP_TERRAIN_TAPER_M = 15000;
+// 巡航中、床が現在高度よりこれ以上高くなったら上昇の段へ戻す(m)
+const AP_TERRAIN_CLIMB_BACK_M = 60;
+
+// 前方の地面を見て、2つ返す。地面の高さが分からなければ「制限なし」。
+//   floorM  … いま下回ってはいけない高度(m)。段の切り替えと、降下の目標に使う
+//   vsNeed  … いま出していないと間に合わない昇降率(m/s)
+//
+// **昇降率のほうが要る**。高度の床だけを比例制御で追いかけると、床が
+// 坂のように上がってくるあいだ必ず遅れる——比例ゲイン0.10で床が毎秒22m
+// 上がるなら、220m低いところで釣り合ってしまう（実測でも山の上を76mで
+// かすめ、床とのずれは215mだった）。降下の坂で同じことをやって滑走路を
+// 素通りしたのと同じ話なので、ここでも**要る昇降率を直接出す**。
+// 距離dの先に標高hがあるなら、そこへ着くまでの時間は d/v なので、
+// 要る昇降率は (h + 余裕 − いまの高度) / (d/v)。前方の最大を取る。
+function apTerrainFloor(state, env, clearanceM) {
+  // vsNeed の「制限なし」は 0 ではなく -Infinity。0 にすると
+  // Math.max(降下率, 0) になって、降下そのものを止めてしまう。
+  const none = { floorM: -Infinity, vsNeed: -Infinity };
+  const gh = env && env.groundHeightAt;
+  if (typeof gh !== 'function') return none;
+  const v = Math.max(state.airspeed, 1);
+  // 進んでいる向き（航跡）で見る。横風で機首とずれていても、実際に行く先は航跡のほう。
+  const dir = apForward(apGroundTrackDeg(state));
+  const look = apClamp(v * AP_TERRAIN_LOOKAHEAD_SEC,
+    AP_TERRAIN_LOOKAHEAD_MIN_M, AP_TERRAIN_LOOKAHEAD_MAX_M);
+  const up = Math.max(apVsLimits(state).up * AP_TERRAIN_CLIMB_MARGIN, 0.1);
+  let floorM = -Infinity, vsNeed = -Infinity;
+  for (let i = 1; i <= AP_TERRAIN_SAMPLES; i++) {
+    const d = look * i / AP_TERRAIN_SAMPLES;
+    const h = gh(state.position.x + dir.x * d, state.position.z + dir.z * d);
+    if (!(h > -1e5)) continue;
+    const top = h + clearanceM;
+    const need = top - up * (d / v);
+    if (need > floorM) floorM = need;
+    const vs = (top - state.altitudeM) / (d / v);
+    if (vs > vsNeed) vsNeed = vs;
+  }
+  // 出せる以上の昇降率を指示しても仕方がない（機首だけ上がって速度を失う）
+  return { floorM, vsNeed: Math.min(vsNeed, apVsLimits(state).up) };
+}
+
+// 測り直しは AP_TERRAIN_REFRESH_SEC ごと（地面の高さを引くのは安くない）。
+// 空港へ近づくぶんだけ余裕を細らせる（AP_TERRAIN_TAPER_M のコメント参照）。
+function apUpdateTerrainFloor(state, ap, env, dt, distToGoM) {
+  ap.terrainClock = (ap.terrainClock || 0) + dt;
+  if (ap.terrainFloorM === undefined || ap.terrainClock >= AP_TERRAIN_REFRESH_SEC) {
+    ap.terrainClock = 0;
+    const taper = distToGoM === undefined ? 1
+      : apClamp(distToGoM / AP_TERRAIN_TAPER_M, 0, 1);
+    const r = apTerrainFloor(state, env, AP_TERRAIN_CLEARANCE_M * taper);
+    ap.terrainFloorM = r.floorM;
+    ap.terrainVsNeed = r.vsNeed;
+  }
+  return { floorM: ap.terrainFloorM, vsNeed: ap.terrainVsNeed };
+}
+
+// --- 低いところでは深く傾けない -------------------------------------------------
+//
+// 離陸してすぐ、対地高度が数十mのうちに目的地の方位へ倒し込むと、傾けたぶん
+// 揚力の上向き成分が減って沈み、そのまま地面に触る。実機でも離陸直後は
+// 高度が取れるまで傾けない（そのあと段階的に深くしていく）。
+// 進入・引き起こしはこの制限を掛けない——あちらは滑走路の中心線に乗せるための
+// 浅いバンク（8°）で、低いところで効かなくなると逆に降りられなくなる。
+const AP_BANK_AGL_LO = 60;   // これ以下の対地高度では傾けない(m)
+const AP_BANK_AGL_HI = 300;  // ここまで上がれば上限いっぱいまで使う(m)
+function apBankAglFactor(state) {
+  if (state.onGround) return 0;
+  return apClamp((state.altitudeAglM - AP_BANK_AGL_LO)
+    / (AP_BANK_AGL_HI - AP_BANK_AGL_LO), 0, 1);
+}
+
 // --- 経路の形 -----------------------------------------------------------------
 
 const AP_GLIDE_DEG = 3;        // 進入の降下角。実機と同じ3°
@@ -461,6 +554,9 @@ function createAutopilotState() {
     statusText: '',
     vtolTakeoff: false,     // 垂直離陸用エンジンを持つ機体で、離陸を垂直で行うか
     vtolLanding: false,     // 同じく、着陸を垂直で行うか
+    terrainFloorM: undefined, // 前方の地面から決まる、下回ってはいけない高度(m)
+    terrainVsNeed: -Infinity, // 前方の山を越えるのに要る昇降率(m/s)
+    terrainClock: 0,          // 地面を測り直すまでの時間
     ceilingSec: 0,          // 上昇率がほぼ無いまま続いている秒数（上昇限度の判定）
     ceilingLimited: false,  // 上昇限度に当たって、目標高度を下げたか
     // 表示用
@@ -490,6 +586,14 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   const tz = plan ? plan.faf.z : state.position.z;
   const distFaf = Math.hypot(state.position.x - tx, state.position.z - tz);
   ap.distanceM = distFaf;
+
+  // 前方の地面から決まる「下回ってはいけない高度」。上昇・巡航・降下で使う
+  // （進入から先は滑走路そのものへ降りるので掛けない）。
+  const terrain = apUpdateTerrainFloor(state, ap, env, dt, plan ? distFaf : undefined);
+  const floorM = terrain.floorM;
+  const overTerrain = (altM) => (floorM > -1e5 ? Math.max(altM, floorM) : altM);
+  // 山を越えるのに要る昇降率。指示が足りなければこれで底上げする
+  const overTerrainVs = (vs) => Math.max(vs, terrain.vsNeed);
 
   // ---- 垂直離陸：真上へ上がる -------------------------------------------------
   if (ap.phase === 'vtol_takeoff') {
@@ -559,7 +663,9 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   const nav = () => {
     const want = plan ? apBearingTo(state.position.x, state.position.z, tx, tz) : state.headingDeg;
     ap.targetHeadingDeg = want;
-    controls.roll = apAileronForTrack(state, want, spd.bankMax, spd);
+    // 対地高度が低いうちは浅く（apBankAglFactor 参照）
+    const bankLim = spd.bankMax * apBankAglFactor(state);
+    controls.roll = apAileronForTrack(state, want, bankLim, spd);
     controls.yaw = apRudderForCoordination(state);
   };
 
@@ -582,7 +688,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     const want = apClamp(state.pitchDeg + (state.airspeed - spd.climb) * 0.8, 0, AP_PITCH_MAX);
     controls.pitch = apElevatorForPitch(state, controls, want, dt, spd);
     ap.vsCmd = state.verticalSpeed;
-    if (state.altitudeM > ap.targetAltitudeM - 60) { say('cruise', '巡航'); return; }
+    // 山があれば、目標高度に届いても上りつづける
+    if (state.altitudeM > Math.max(ap.targetAltitudeM, floorM) - 60) { say('cruise', '巡航'); return; }
 
     // 上昇を切り上げる条件は「目標に届いた」だけでは足りない。**届かない目標を
     // 設定されることがある**——高度のスライダーは12000mまで動くが、練習機の
@@ -622,10 +729,17 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
 
   // ---- 巡航 -----------------------------------------------------------------
   if (ap.phase === 'cruise') {
+    // 前方の山を越えるのに、いまの高度ではだいぶ足りない——巡航のままだと
+    // 出力が「巡航速度を保つぶん」しか出ず、上っては速度が落ちて上れなくなる
+    // （実測で、山の上を63mでかすめた）。上昇の段に戻せば全開で上れる。
+    if (floorM > state.altitudeM + AP_TERRAIN_CLIMB_BACK_M) {
+      say('climb', '上昇（地形回避）');
+      return;
+    }
     nav();
     ap.targetSpeedMps = spd.cruise;
     controls.throttle = apThrottleForSpeed(state, controls, spd.cruise, dt);
-    ap.vsCmd = apVsForAltitude(state, ap.targetAltitudeM, apClimbCap(state, spd));
+    ap.vsCmd = overTerrainVs(apVsForAltitude(state, overTerrain(ap.targetAltitudeM), apClimbCap(state, spd)));
     controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd);
     // 3°で降りきれる距離まで詰まったら降下へ。少し余裕を持たせる。
     if (plan) {
@@ -655,10 +769,11 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     ap.targetSpeedMps = Math.min(spd.cruise * 0.85, vAllowed);
     controls.throttle = apThrottleForSpeed(state, controls, ap.targetSpeedMps, dt);
     // 最終進入開始点の高度へ、一定の勾配で降りる
-    const wantAlt = Math.min(plan.fafAltM + distFaf * AP_DESCENT_SLOPE, ap.targetAltitudeM);
+    const wantAlt = overTerrain(
+      Math.min(plan.fafAltM + distFaf * AP_DESCENT_SLOPE, ap.targetAltitudeM));
     // 目標が巡航高度で頭打ちのあいだは、まだ坂に乗っていない＝前送りは要らない
     const onSlope = wantAlt < ap.targetAltitudeM - 1;
-    ap.vsCmd = apVsForPath(state, wantAlt, onSlope ? AP_DESCENT_SLOPE : 0, apClimbCap(state, spd));
+    ap.vsCmd = overTerrainVs(apVsForPath(state, wantAlt, onSlope ? AP_DESCENT_SLOPE : 0, apClimbCap(state, spd)));
     controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd);
     if (distFaf < 2500) {
       say(ap.vtolLanding && model.hasVtol ? 'vtol_approach' : 'approach',
@@ -946,6 +1061,8 @@ function updateAutopilot(dt) {
   const wasPhase = ap.phase;
   stepAutopilot(f.aircraft.model, f.state, f.controls, ap, dt, {
     announce: announceFlight,
+    // 山を越えるために要る（apTerrainFloor）。描かれている面をそのまま読む
+    groundHeightAt: flightGroundHeightAt,
   });
   if (ap.phase !== wasPhase) updateAutopilotUI();
 }
@@ -1095,7 +1212,7 @@ if (typeof module !== 'undefined' && module.exports) {
     apMakeApproachPlan, apPickRunwayHeading, apTrackPosition,
     apWrap180, apBearingTo, apForward, apRight,
     apElevatorForPitch, apAileronForBank, apAileronForTrack, apGroundTrackDeg,
-    apSurfaceGain, apBankLimit,
+    apSurfaceGain, apBankLimit, apTerrainFloor, apBankAglFactor,
   apPitchForVs, apBankForHeading, apFlareHeight,
     apVsForAltitude, apThrottleForSpeed,
   };

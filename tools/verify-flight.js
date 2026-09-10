@@ -43,8 +43,14 @@ const {
   airDensityAt, solveLevelTrim, vtolClimbSpeedLimit, accumulateAeroForces, refreshFlightReadouts,
   createAutopilotState, stepAutopilot, apSpeedSchedule, apMakeApproachPlan,
   apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo, apBankMaxFor,
-  apElevatorForPitch, apSurfaceGain, apBankLimit,
+  apElevatorForPitch, apSurfaceGain, apBankLimit, apBankAglFactor,
 } = ctx;
+
+// 13-autopilot.js / 10-flight.js の同名の定数と同じ値。vmコンテキストの外からは
+// トップレベルのconstを直接読めない（関数と違ってグローバルオブジェクトに乗らない）
+// ので、比較用にここでも複製する。
+const AP_BANK_AGL_LO_FOR_TEST = 60;
+const FLIGHT_GRAVITY_FOR_TEST = 9.80665;
 
 let failures = 0;
 const TRACE = process.argv.includes('--trace');
@@ -1002,7 +1008,11 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
     check(bad.length === 0, '速い機体でも水平トリムが解ける（中立で投げ返さない）',
       bad.join(' ') || 'すべて解けた');
 
-    // 解が本物か——その舵位置のまま30秒飛ばして、勝手に裏返らないことで確かめる
+    // 解が本物か——その舵位置のまま飛ばして、勝手に裏返らないことで確かめる。
+    // 中立(0)を返していたころは1.5秒で裏返っていたので、10秒見れば十分。
+    // **空を飛んでいるあいだだけ見る**。この機体は2500ktを超えると水平飛行を
+    // 保てずに沈んでいく（推力が要求に届かない＝そもそも出せない速度）ので、
+    // そのまま回し続けると地面の下での挙動を測ることになってしまう。
     const worst = [];
     for (const kt of [1400, 2000, 3000]) {
       const v = kt / KT;
@@ -1012,15 +1022,16 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
       s2.quaternion.setFromEuler(new THREE.Euler(THREE.MathUtils.degToRad(s.alphaDeg), 0, 0, 'YXZ'));
       c2.gearDown = false; c2.parkingBrake = false; c2.throttle = s.throttle; c2.trim = s.trim;
       let maxRoll = 0;
-      for (let i = 0; i < 60 * 30; i++) {
+      for (let i = 0; i < 60 * 10; i++) {
         advanceFlight(jm, s2, c2, noWind, flatGround, 1 / 60);
+        if (s2.position.y < 1000) break; // 地面に近づいたらそこまで（別の話になる）
         maxRoll = Math.max(maxRoll, Math.abs(s2.rollDeg));
       }
       worst.push(`${kt}kt:${maxRoll.toFixed(0)}°`);
-      check(maxRoll < 10, `${kt}ktのトリムを当てたまま30秒飛んでも姿勢が崩れない`,
+      check(maxRoll < 10, `${kt}ktのトリムを当てたまま10秒飛んでも姿勢が崩れない`,
         maxRoll.toFixed(0) + '°');
     }
-    note('超音速でトリムしたまま30秒', '勝手に転がった最大 ' + worst.join(' '));
+    note('超音速でトリムしたまま10秒', '勝手に転がった最大 ' + worst.join(' '));
   }
 
   // 遅く飛ぶほど機首上げのトリムが要る（実機と同じ）。長周期の振動に紛れないよう、
@@ -2123,6 +2134,138 @@ function autopilotFlight(opts) {
     check(Math.abs(ap.targetAltitudeM - st.altitudeM) < 100,
       'そのとき、目標高度は実際に届いた高さに書き換わる',
       `${ap.targetAltitudeM}m vs ${st.altitudeM.toFixed(0)}m`);
+  }
+}
+
+// --- 推力が桁外れでも、離陸滑走で機首が滑走路にめり込まない -----------------------
+//
+// 脚のばねの硬さも、めり込みを止める垂直抗力の上限も「重さの何倍」で決めていた。
+// 脚が受け止めるのは重さだけではなく、そのとき機体に掛かっている力ぜんぶで、
+// 推力が重さの何倍もある機体は、推力の作用線が重心より上にあるぶん機首下げの
+// モーメントが出る。重さぶんの硬さしかない脚ではそれを支えられず、
+// 離陸滑走中に機首が滑走路へめり込んでいた。
+{
+  const rows = [];
+  for (const [label, mul] of [['ふつう', 1], ['7倍', 20], ['14倍', 40], ['21倍', 60]]) {
+    const cfg = defaultAircraftConfig();
+    cfg.name = `滑走試験機${label}`;
+    cfg.modelMaxSpeedValue = 3; cfg.modelMaxSpeedUnit = 'mach';
+    for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= mul;
+    const gm = buildAircraftModel(cfg);
+    const tw = gm.totalThrustN / (gm.massKg * FLIGHT_GRAVITY_FOR_TEST);
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(gm, st, 0, 0, 90, flatGround);
+    const restY = st.position.y;
+    const ap = createAutopilotState();
+    ap.full = true; ap.targetAltitudeM = 3000; ap.destAirportId = 'DST';
+    ap.phase = 'takeoff'; ap.takeoffHeadingDeg = 90;
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 60000, z: 0, elevationM: 0 },
+      { runwayLengthM: 2400, headingDeg: 90 }, 0);
+    let t = 0, sink = 0, worstPitch = 0;
+    while (t < 30 && ap.phase === 'takeoff' && !st.crashed) {
+      stepAutopilot(gm, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+      advanceFlight(gm, st, c, noWind, flatGround, 1 / 60);
+      t += 1 / 60;
+      if (st.onGround) {
+        sink = Math.max(sink, restY - st.position.y);
+        worstPitch = Math.min(worstPitch, st.pitchDeg);
+      }
+    }
+    rows.push(`推力${label}:沈み${sink.toFixed(2)}m/ピッチ${worstPitch.toFixed(0)}°`);
+    check(sink < 0.5, `推力が重さの${label}でも、離陸滑走で機首が滑走路にめり込まない`,
+      `T/W${tw.toFixed(1)} 沈み${sink.toFixed(2)}m ピッチ${worstPitch.toFixed(0)}°`);
+  }
+  note('離陸滑走の沈み込み', rows.join('  '));
+}
+
+// --- 地面が上がってきたら越える／低いところでは深く傾けない -----------------------
+//
+// 自動操縦は設定した高度（海面から）を保つだけで、下の地面が上がってきても
+// 知らんぷりだった（実測：30km先に標高2500mの尾根、目標高度1500mで、
+// 対地高度-1mまでめり込んだ）。前方の地面を見て、越えるのに要る高度と昇降率を
+// 出して底上げする。あわせて、離陸直後に深く傾けて沈むのを防ぐ。
+{
+  // 30km地点を頂点にした、標高2500mの尾根
+  const ridge = (x, z) => {
+    const d = Math.hypot(x - 30000, z);
+    if (d > 15000) return 0;
+    return 2500 * 0.5 * (1 + Math.cos(Math.PI * d / 15000));
+  };
+  const fly = (m, withTerrain) => {
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(m, st, 0, 0, 90, ridge);
+    const ap = createAutopilotState();
+    ap.full = true; ap.targetAltitudeM = 1500; ap.destAirportId = 'DST';
+    ap.phase = 'takeoff'; ap.takeoffHeadingDeg = 90;
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 60000, z: 0, elevationM: 0 },
+      { runwayLengthM: 2400, headingDeg: 90 }, 0);
+    const env = withTerrain ? { groundHeightAt: ridge } : {};
+    let t = 0, minOverHill = Infinity, airborne = false;
+    while (t < 5000) {
+      stepAutopilot(m, st, c, ap, 1 / 60, env);
+      advanceFlight(m, st, c, noWind, ridge, 1 / 60);
+      t += 1 / 60;
+      if (!airborne && !st.onGround && st.altitudeAglM > 30) airborne = true;
+      // 山の上（標高100m超）にいるあいだの対地高度だけを見る
+      if (airborne && !st.onGround && ridge(st.position.x, st.position.z) > 100) {
+        minOverHill = Math.min(minOverHill, st.altitudeAglM);
+      }
+      if (st.crashed || ap.phase === 'done') break;
+    }
+    return { minOverHill, phase: ap.phase, crashed: st.crashed, t };
+  };
+
+  const cfg = defaultAircraftConfig();
+  cfg.name = '地形試験機';
+  cfg.modelMaxSpeedValue = 2; cfg.modelMaxSpeedUnit = 'mach';
+  for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 10;
+  const tm = buildAircraftModel(cfg);
+
+  const blind = fly(tm, false);
+  const seeing = fly(tm, true);
+  note('山越え', `地面を見ない: 山の上で${blind.minOverHill.toFixed(0)}m`
+    + ` / 見る: ${seeing.minOverHill.toFixed(0)}m（尾根は標高2500m、目標高度は1500m）`);
+  check(blind.minOverHill < 50,
+    'この経路は、地面を見なければ山に突っ込む（テストが効いていることの確認）',
+    blind.minOverHill.toFixed(0) + 'm');
+  check(seeing.minOverHill > 150, '前方の地面が上がってきたら、越えるだけ上る',
+    seeing.minOverHill.toFixed(0) + 'm');
+  check(seeing.phase === 'done' && !seeing.crashed, '山を越えたあとも、ちゃんと着陸できる',
+    `${seeing.phase} / ${seeing.t.toFixed(0)}秒`);
+
+  // 対地高度が低いうちは深く傾けない
+  check(apBankAglFactor({ onGround: false, altitudeAglM: 30 }) === 0,
+    '対地30mでは、まったく傾けない');
+  check(apBankAglFactor({ onGround: true, altitudeAglM: 500 }) === 0,
+    '接地しているあいだは傾けない');
+  const mid = apBankAglFactor({ onGround: false, altitudeAglM: 180 });
+  check(mid > 0 && mid < 1, '対地180mでは、上限の途中まで', mid.toFixed(2));
+  check(apBankAglFactor({ onGround: false, altitudeAglM: 500 }) === 1,
+    '対地500mまで上がれば、上限いっぱいまで使える');
+
+  // 実際に、180°の旋回が要る経路で離陸してみる
+  {
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(tm, st, 0, 0, 90, flatGround);
+    const ap = createAutopilotState();
+    ap.full = true; ap.targetAltitudeM = 3000; ap.destAirportId = 'DST';
+    ap.phase = 'takeoff'; ap.takeoffHeadingDeg = 90;
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: -60000, z: 0, elevationM: 0 },
+      { runwayLengthM: 2400, headingDeg: 270 }, 0);
+    let t = 0, bankLow = 0, bankHigh = 0;
+    while (t < 400 && ap.phase !== 'cruise' && !st.crashed) {
+      stepAutopilot(tm, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+      advanceFlight(tm, st, c, noWind, flatGround, 1 / 60);
+      t += 1 / 60;
+      if (!st.onGround && ap.phase !== 'takeoff') {
+        if (st.altitudeAglM < AP_BANK_AGL_LO_FOR_TEST) bankLow = Math.max(bankLow, Math.abs(st.rollDeg));
+        else if (st.altitudeAglM > 400) bankHigh = Math.max(bankHigh, Math.abs(st.rollDeg));
+      }
+    }
+    note('離陸直後のバンク', `対地60m未満で${bankLow.toFixed(0)}° / 対地400m超で${bankHigh.toFixed(0)}°`);
+    check(bankLow < 3, '離陸してすぐ、対地高度が低いうちは傾けない（沈んで地面に触る）',
+      bankLow.toFixed(0) + '°');
+    check(bankHigh > 10, '高度が取れたら、ふつうに旋回する', bankHigh.toFixed(0) + '°');
   }
 }
 
