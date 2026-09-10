@@ -43,6 +43,7 @@ const {
   airDensityAt, solveLevelTrim, vtolClimbSpeedLimit, accumulateAeroForces, refreshFlightReadouts,
   createAutopilotState, stepAutopilot, apSpeedSchedule, apMakeApproachPlan,
   apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo, apBankMaxFor,
+  apElevatorForPitch, apSurfaceGain,
 } = ctx;
 
 let failures = 0;
@@ -1836,6 +1837,165 @@ function autopilotFlight(opts) {
   note('自動操縦', `極超音速機・横へ90°旋回 … ${seen.join('→')} ${t.toFixed(0)}秒`);
   check(ap.phase === 'done' && !st.crashed, '最高速度が桁外れでも、旋回して目的地へ着陸できる',
     `${ap.phase} / ${t.toFixed(0)}秒`);
+}
+
+// --- 速い機体で舵がプルプルしない（かつ低速の効きは落とさない） -------------------
+//
+// 舵のモーメントは動圧に比例するので、ゲインを速度によらず固定にすると
+// 速い機体では内側の段のループゲインが1を超え、毎コマ舵が反対へ振り切れる。
+// 「行き過ぎて戻してまた行き過ぎる」という報告がこれで、
+// 直し方は**可動域を絞ることではない**（低速で効かなくなる）——
+// 「1°のずれあたり何舵か」を動圧で割る（apSurfaceGain）。
+{
+  const cfg = defaultAircraftConfig();
+  cfg.name = 'プルプル試験機';
+  cfg.modelMaxSpeedValue = 2; cfg.modelMaxSpeedUnit = 'mach';
+  for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 40;
+  const fm = buildAircraftModel(cfg);
+  const fspd = apSpeedSchedule(fm);
+
+  // 「いまのピッチをそのまま保て」とだけ指示して、舵が暴れないかを見る
+  const hold = (v) => {
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, 6000, 0); st.velocity.set(0, 0, -v);
+    const sol = solveLevelTrim(fm, v, 6000);
+    st.quaternion.setFromEuler(new THREE.Euler(sol.alphaDeg * Math.PI / 180, 0, 0, 'YXZ'));
+    c.gearDown = false; c.parkingBrake = false; c.throttle = sol.throttle; c.trim = sol.trim;
+    const want = st.pitchDeg;
+    let t = 0, prev = 0, flips = 0, maxQ = 0;
+    while (t < 20) {
+      c.pitch = apElevatorForPitch(st, c, want, 1 / 60, fspd);
+      advanceFlight(fm, st, c, noWind, flatGround, 1 / 60);
+      t += 1 / 60;
+      if (t > 2) {
+        if (prev * c.pitch < 0) flips++;
+        prev = c.pitch; maxQ = Math.max(maxQ, Math.abs(st.angularVelocity.x));
+      }
+    }
+    return { flips, maxQ };
+  };
+  const slowHold = hold(200 / 1.94384);
+  const fastHold = hold(fspd.cruise);
+  note('舵のゲイン', `${(fspd.cruise * 1.94384).toFixed(0)}kt で 符号反転${fastHold.flips}回/18秒`
+    + ` 最大ピッチ角速度${fastHold.maxQ.toFixed(2)}rad/s（補正前は764回・3.67rad/s）`);
+  check(fastHold.flips < 20, '速い機体でも、舵が毎コマ逆へ振り切れない',
+    `${fastHold.flips}回/18秒`);
+  check(fastHold.maxQ < 1.0, '速い機体でも、ピッチ角速度が暴れない',
+    fastHold.maxQ.toFixed(2) + 'rad/s');
+  check(slowHold.flips < 20, '同じ機体を遅く飛ばしたときも静かなまま',
+    `${slowHold.flips}回/18秒`);
+
+  // 低速側は「今までどおり」でなければならない（絞りすぎると効かなくなる）
+  const slowModel = model; // 内蔵の練習機
+  const sspd = apSpeedSchedule(slowModel);
+  const sst = createFlightState();
+  sst.velocity.set(0, 0, -sspd.cruise);
+  sst.angularVelocity.set(0.05, 0, 0);
+  const sc = createFlightControls();
+  const withSpd = apElevatorForPitch(sst, sc, sst.pitchDeg + 5, 0, sspd);
+  const withoutSpd = apElevatorForPitch(sst, sc, sst.pitchDeg + 5, 0);
+  check(Math.abs(withSpd - withoutSpd) < 1e-12, '低速の機体では、舵の効きが以前とまったく変わらない',
+    `${withSpd.toFixed(6)} / ${withoutSpd.toFixed(6)}`);
+  check(apSurfaceGain({ airspeed: sspd.stall * 2 }, sspd) === 1, '失速速度の2倍では、ゲインを絞らない');
+  check(apSurfaceGain({ airspeed: sspd.stall * 8 }, sspd) < 0.3, '失速速度の8倍では、ゲインを大きく絞る',
+    apSurfaceGain({ airspeed: sspd.stall * 8 }, sspd).toFixed(3));
+
+  // 旋回と高度維持がケンカしない（速い機体を、水平トリムから90°旋回させる）
+  {
+    const v = 300 / 1.94384;
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, 6000, 0); st.velocity.set(0, 0, -v);
+    const sol = solveLevelTrim(fm, v, 6000);
+    st.quaternion.setFromEuler(new THREE.Euler(sol.alphaDeg * Math.PI / 180, 0, 0, 'YXZ'));
+    c.gearDown = false; c.parkingBrake = false; c.throttle = sol.throttle; c.trim = sol.trim;
+    const ap = createAutopilotState();
+    ap.full = true; ap.targetAltitudeM = 6000; ap.phase = 'cruise'; ap.destAirportId = 'DST';
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 400000, z: 0, elevationM: 0 },
+      { runwayLengthM: 2400, headingDeg: 90 }, 0);
+    let t = 0, worst = 0;
+    while (t < 240) {
+      stepAutopilot(fm, st, c, ap, 1 / 60, {});
+      advanceFlight(fm, st, c, noWind, flatGround, 1 / 60);
+      t += 1 / 60;
+      worst = Math.max(worst, Math.abs(st.altitudeM - 6000));
+      if (st.crashed) break;
+    }
+    note('旋回と高度維持', `速い機体で90°旋回中の高度ずれ 最大${worst.toFixed(0)}m（補正前は1556m）`);
+    check(worst < 200 && !st.crashed, '速い機体でも、旋回しながら高度を保てる',
+      `最大${worst.toFixed(0)}m`);
+  }
+}
+
+// --- 届かない目標高度でも、降下が間に合う ----------------------------------------
+//
+// 上昇を抜ける条件が「目標高度に届いた」だけだったので、機体が上がれない
+// 高さを設定されると（高度スライダーは12000mまで動く）上昇のまま帰ってこず、
+// 降下も進入も始まらないまま目的地を通り過ぎていた。
+{
+  const runTo = (targetAltM, distKm, limitSec) => {
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(model, st, 0, 0, 90, flatGround);
+    const ap = createAutopilotState();
+    ap.full = true; ap.targetAltitudeM = targetAltM; ap.destAirportId = 'DST';
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: distKm * 1000, z: 0, elevationM: 0 },
+      { runwayLengthM: 2400, headingDeg: 90 }, 0);
+    ap.takeoffHeadingDeg = 90; ap.phase = 'takeoff';
+    let t = 0, peak = 0;
+    while (t < limitSec) {
+      stepAutopilot(model, st, c, ap, 1 / 60, {});
+      advanceFlight(model, st, c, noWind, flatGround, 1 / 60);
+      t += 1 / 60; peak = Math.max(peak, st.altitudeM);
+      if (ap.phase === 'done' || st.crashed) break;
+    }
+    return { ap, st, t, peak };
+  };
+
+  // 練習機の上昇限度は約2900〜5400m。届く目標はこれまでどおり。
+  const ok = runTo(1500, 60, 4000);
+  check(ok.ap.phase === 'done' && !ok.st.crashed, '届く目標高度なら、これまでどおり着陸できる',
+    `${ok.ap.phase} / ${ok.t.toFixed(0)}秒 / 最高${ok.peak.toFixed(0)}m`);
+
+  // ルートが短ければ、目標に届く前でも降下へ切り上げる
+  const short = runTo(6000, 60, 4000);
+  note('上昇の切り上げ', `目標6000m・経路60km … ${short.ap.phase} ${short.t.toFixed(0)}秒 最高${short.peak.toFixed(0)}m`);
+  check(short.ap.phase === 'done' && !short.st.crashed,
+    '届かない目標高度でも、ルートの長さで上昇を切り上げて着陸できる',
+    `${short.ap.phase} / ${short.t.toFixed(0)}秒`);
+  check(short.peak < 6000, 'そのとき、目標高度まで無理に上ろうとしない',
+    `最高${short.peak.toFixed(0)}m`);
+
+  // 上昇限度そのものの検出。実機で当てようとすると、上昇限度に届くまで
+  // 数千秒ぶん回すことになる（検証が100秒近くかかる）ので、
+  // 「上がれない状態」を直接こしらえて、上昇の段だけを回す。
+  {
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, 4000, 0);
+    st.velocity.set(0, 0.2, -60);   // 上昇率0.2m/s ＝ もう上がれない
+    c.gearDown = false; c.parkingBrake = false;
+    advanceFlight(model, st, c, noWind, flatGround, 1 / 60);
+    const ap = createAutopilotState();
+    ap.full = true; ap.targetAltitudeM = 12000; ap.destAirportId = 'DST';
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 600000, z: 0, elevationM: 0 },
+      { runwayLengthM: 2400, headingDeg: 90 }, 0);
+    ap.phase = 'climb';
+    let t = 0, atTen = null;
+    while (t < 60 && ap.phase === 'climb') {
+      stepAutopilot(model, st, c, ap, 1 / 60, {});
+      // 高度も上昇率も動かさない（上がれない状態のまま張り付かせる）
+      st.verticalSpeed = 0.2;
+      t += 1 / 60;
+      if (atTen === null && t > 10) atTen = ap.phase;
+    }
+    note('上昇限度', `上昇率0.2m/sのまま ${t.toFixed(0)}秒で ${ap.phase}`
+      + ` 打ち切り=${!!ap.ceilingLimited} 巡航高度=${ap.targetAltitudeM}m`);
+    check(atTen === 'climb', '一瞬上昇率が落ちただけでは、上昇を切り上げない', `10秒後: ${atTen}`);
+    check(ap.phase === 'cruise' && ap.ceilingLimited === true,
+      '上がれなくなったら、そこを巡航高度として受け入れる',
+      `${ap.phase} / ${t.toFixed(0)}秒 / 巡航${ap.targetAltitudeM}m`);
+    check(Math.abs(ap.targetAltitudeM - st.altitudeM) < 100,
+      'そのとき、目標高度は実際に届いた高さに書き換わる',
+      `${ap.targetAltitudeM}m vs ${st.altitudeM.toFixed(0)}m`);
+  }
 }
 
 // --- 計算の速さ ---------------------------------------------------------------

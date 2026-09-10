@@ -40,6 +40,9 @@ const AP_STEER_KP = 0.05;      // 地上：方位のずれ1°あたりの前輪
 const AP_PITCH_MAX = 15;       // 自動操縦が指示するピッチ角の上限(°)
 const AP_PITCH_MIN = -12;      //                            下限(°)
 
+const AP_CEILING_VS_MPS = 0.5; // 上昇中、これ未満の上昇率が続いたら上昇限度とみなす(m/s)
+const AP_CEILING_SEC = 20;     // 何秒続いたら、か
+
 // --- 垂直離着陸 ----------------------------------------------------------------
 //
 // 滑走路を使わない離陸・着陸。垂直離陸用エンジン（spinAxis='y'）を持つ機体だけ選べる。
@@ -127,6 +130,38 @@ function apBearingTo(fromX, fromZ, toX, toZ) {
 
 // --- 内側の段（舵） -----------------------------------------------------------
 
+// 舵の効き具合を、速度で割り引く倍率。
+//
+// 舵が出すモーメントは動圧（½ρv²）に比例する——同じ舵角でも、速く飛ぶほど
+// 強く効く。ゲインを速度によらず固定にすると、速い機体では内側の段の
+// ループゲインが1を超え、毎コマ舵が反対側へ振り切れる。
+// 実測：同じ機体に「いまのピッチを保て」と言うだけで、
+//   200kt  → 舵は0.00のまま静止（18秒で符号反転0回）
+//   1282kt → ±1.00を18秒に764回振り、ピッチ角速度3.7rad/sで暴れる
+// これが「行き過ぎて戻してまた行き過ぎる」プルプルの正体で、
+// 高度維持と旋回が殴り合って見えるのも、暴れた舵が指示に追従できないため。
+//
+// **可動域（舵角の上限）を絞ってはいけない**——低速では逆に舵が足りなくなり、
+// 全然効かなくなる。絞るべきなのは舵角そのものではなく「1°のずれあたり
+// 何舵を当てるか」のほう、しかも速度に応じて連続的に。動圧の比で割れば
+// 「舵角×動圧＝モーメント」が速度によらず一定になり、舵角の上限（±1）は
+// そのまま残るので、低速では今までどおり目一杯まで使える。
+//
+// 基準の速度は機体ごとに違う（失速速度が機体の大きさと翼面荷重を代表する）。
+// 失速速度の何倍か、で測り、それより遅い側ではゲインを上げない（1で頭打ち）
+// ——低速側は実測でいまのままが正しく（練習機の旋回中の高度ずれは平均0m）、
+// むやみに強めれば別のところが壊れる。絞るのは速すぎる側だけでいい。
+const AP_GAIN_REF_STALLS = 4;  // 失速速度の何倍から、舵のゲインを絞り始めるか
+
+function apSurfaceGain(state, spd) {
+  if (!spd || !spd.stall) return 1;
+  const ref = spd.stall * AP_GAIN_REF_STALLS;
+  const v = Math.max(state.airspeed, 1);
+  if (v <= ref) return 1;
+  const r = ref / v;
+  return r * r;
+}
+
 // 指示のピッチ角を保つエレベーター。
 //
 // 比例と微分だけでは足りない。フラップを下ろす、脚を出す、燃料は減らないが速度は変わる——
@@ -134,9 +169,10 @@ function apBearingTo(fromX, fromZ, toX, toZ) {
 // 止まってしまう（実際、進入でフラップを全開にした途端に降下が止まった）。
 // 残った舵をゆっくりトリムへ移すことで、これを積分項として働かせる。
 // 人間が飛ばすときにトリムを取り直すのと同じことを、機械にやらせている。
-function apElevatorForPitch(state, controls, wantPitchDeg, dt) {
-  const cmd = apClamp((wantPitchDeg - state.pitchDeg) * AP_PITCH_KP
-    - state.angularVelocity.x * AP_PITCH_KD, -1, 1);
+function apElevatorForPitch(state, controls, wantPitchDeg, dt, spd) {
+  const g = apSurfaceGain(state, spd);
+  const cmd = apClamp(((wantPitchDeg - state.pitchDeg) * AP_PITCH_KP
+    - state.angularVelocity.x * AP_PITCH_KD) * g, -1, 1);
   // 舵が振り切っている間は溜め込まない（大きく姿勢を変えている最中の巻き上がり防止）
   if (dt && Math.abs(cmd) < 0.9) {
     controls.trim = apClamp((controls.trim || 0) + cmd * AP_TRIM_RATE * dt, -1, 1);
@@ -145,9 +181,10 @@ function apElevatorForPitch(state, controls, wantPitchDeg, dt) {
 }
 
 // 指示のバンク角を保つエルロン。ロール角速度は符号が逆なので足す。
-function apAileronForBank(state, wantBankDeg) {
-  return apClamp((wantBankDeg - state.rollDeg) * AP_ROLL_KP
-    + state.angularVelocity.z * AP_ROLL_KD, -1, 1);
+// ゲインの速度による割り引きはエレベーターと同じ（apSurfaceGain 参照）。
+function apAileronForBank(state, wantBankDeg, spd) {
+  return apClamp(((wantBankDeg - state.rollDeg) * AP_ROLL_KP
+    + state.angularVelocity.z * AP_ROLL_KD) * apSurfaceGain(state, spd), -1, 1);
 }
 
 // --- 中間の段 -----------------------------------------------------------------
@@ -220,10 +257,10 @@ function apGroundTrackDeg(state) {
 // 風速と対気速度で決まるが、それを計算しなくても——**航跡のずれで舵を切れば
 // 必要なぶんだけ勝手に機首が風上へ向く**。横風25km/hで中心線から130m流された
 // のがこれで、方位ではなく航跡を見るようにして直した。
-function apAileronForTrack(state, wantTrackDeg, bankMax) {
+function apAileronForTrack(state, wantTrackDeg, bankMax, spd) {
   const err = apWrap180(wantTrackDeg - apGroundTrackDeg(state));
   const lim = bankMax === undefined ? AP_BANK_MAX : bankMax;
-  return apAileronForBank(state, apClamp(err * AP_HDG_KP, -lim, lim));
+  return apAileronForBank(state, apClamp(err * AP_HDG_KP, -lim, lim), spd);
 }
 
 // 速度を保つスロットル（今の値から少しずつ動かす）
@@ -391,6 +428,8 @@ function createAutopilotState() {
     statusText: '',
     vtolTakeoff: false,     // 垂直離陸用エンジンを持つ機体で、離陸を垂直で行うか
     vtolLanding: false,     // 同じく、着陸を垂直で行うか
+    ceilingSec: 0,          // 上昇率がほぼ無いまま続いている秒数（上昇限度の判定）
+    ceilingLimited: false,  // 上昇限度に当たって、目標高度を下げたか
     // 表示用
     vsCmd: 0, targetHeadingDeg: 0, targetSpeedMps: 0, distanceM: 0,
   };
@@ -429,8 +468,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // （accumulateVtolControlが低速でのピッチ/ロール/ヨーを姿勢制御ノズルとして拾う）
     const err = apWrap180(ap.takeoffHeadingDeg - state.headingDeg);
     controls.yaw = apClamp(err * AP_STEER_KP, -1, 1);
-    controls.pitch = apElevatorForPitch(state, controls, 0, dt);
-    controls.roll = apAileronForBank(state, 0);
+    controls.pitch = apElevatorForPitch(state, controls, 0, dt, spd);
+    controls.roll = apAileronForBank(state, 0, spd);
     controls.vtolThrottle = apVtolThrottleForVs(controls, state.verticalSpeed, AP_VTOL_CLIMB_MPS, dt);
     if (state.altitudeAglM > AP_VTOL_TRANSITION_AGL_M) say('vtol_transition', '前進エンジンへ切替');
     return;
@@ -442,7 +481,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.flap = 0;
     const want = plan ? apBearingTo(state.position.x, state.position.z, tx, tz) : state.headingDeg;
     ap.targetHeadingDeg = want;
-    controls.roll = apAileronForTrack(state, want, spd.bankMax);
+    controls.roll = apAileronForTrack(state, want, spd.bankMax, spd);
     controls.yaw = apRudderForCoordination(state);
 
     controls.throttle = 1;
@@ -451,7 +490,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 手動操作の遷移と同じ形）。姿勢は少し機首下げにして加速を助ける。
     controls.vtolThrottle = apClamp(1 - state.airspeed / Math.max(spd.climb, 1), 0, 1);
     const want2 = apClamp(-6 * controls.vtolThrottle, -6, 0);
-    controls.pitch = apElevatorForPitch(state, controls, want2, dt);
+    controls.pitch = apElevatorForPitch(state, controls, want2, dt, spd);
     ap.targetSpeedMps = spd.climb;
     ap.vsCmd = state.verticalSpeed;
 
@@ -470,11 +509,11 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 前輪で滑走路の方位を保つ
     const err = apWrap180(ap.takeoffHeadingDeg - state.headingDeg);
     controls.yaw = apClamp(err * AP_STEER_KP, -1, 1);
-    controls.roll = apAileronForBank(state, 0);
+    controls.roll = apAileronForBank(state, 0, spd);
     if (state.forwardAirspeed < spd.rotate) {
       controls.pitch = 0; // 引き起こす速度までは舵を当てない（尻もちを防ぐ）
     } else {
-      controls.pitch = apElevatorForPitch(state, controls, 10, dt); // 機首を10°へ
+      controls.pitch = apElevatorForPitch(state, controls, 10, dt, spd); // 機首を10°へ
     }
     if (!state.onGround && state.altitudeAglM > 25) {
       say('climb', '上昇');
@@ -487,7 +526,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   const nav = () => {
     const want = plan ? apBearingTo(state.position.x, state.position.z, tx, tz) : state.headingDeg;
     ap.targetHeadingDeg = want;
-    controls.roll = apAileronForTrack(state, want, spd.bankMax);
+    controls.roll = apAileronForTrack(state, want, spd.bankMax, spd);
     controls.yaw = apRudderForCoordination(state);
   };
 
@@ -508,9 +547,43 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     const overCruise = state.airspeed - spd.cruise * 1.5;
     controls.throttle = overCruise > 0 ? apClamp(1 - overCruise * 0.1, 0, 1) : 1;
     const want = apClamp(state.pitchDeg + (state.airspeed - spd.climb) * 0.8, 0, AP_PITCH_MAX);
-    controls.pitch = apElevatorForPitch(state, controls, want, dt);
+    controls.pitch = apElevatorForPitch(state, controls, want, dt, spd);
     ap.vsCmd = state.verticalSpeed;
-    if (state.altitudeM > ap.targetAltitudeM - 60) say('cruise', '巡航');
+    if (state.altitudeM > ap.targetAltitudeM - 60) { say('cruise', '巡航'); return; }
+
+    // 上昇を切り上げる条件は「目標に届いた」だけでは足りない。**届かない目標を
+    // 設定されることがある**——高度のスライダーは12000mまで動くが、練習機の
+    // 上昇限度は実測で約2900mしかない。目標3000mでも6000mでも、上昇のまま
+    // 永遠に帰ってこず、降下も進入も始まらないまま目的地を通り過ぎていた
+    // （「着陸でなかなか降下しないで全く間に合わない」のはこれ）。
+    // 抜け道を2つ用意する。
+
+    // (1) 上昇限度。全開で上がっているのに上昇率がほぼ無くなったら、
+    //     そこを巡航高度として受け入れる。一瞬の谷で切り上げないよう、
+    //     続いた時間で見る。
+    if (state.verticalSpeed < AP_CEILING_VS_MPS) {
+      ap.ceilingSec = (ap.ceilingSec || 0) + dt;
+      if (ap.ceilingSec > AP_CEILING_SEC) {
+        ap.targetAltitudeM = Math.round(state.altitudeM);
+        ap.ceilingLimited = true;
+        say('cruise', '巡航（上昇限度 ' + ap.targetAltitudeM + 'm）');
+        return;
+      }
+    } else {
+      ap.ceilingSec = 0;
+    }
+
+    // (2) 降下を始めないと間に合わない距離まで来たら、目標高度に関係なく降りる。
+    //     上るほど降りるのに要る距離も伸びるので、放っておくと近づくほど
+    //     間に合わなくなる。ここで打ち切れば「ルートの長さで上れるだけ上って
+    //     から降りる」になる。
+    if (plan) {
+      const drop = Math.max(state.altitudeM - plan.fafAltM, 0);
+      if (distFaf < drop / AP_DESCENT_SLOPE + 3000) {
+        ap.targetAltitudeM = Math.round(state.altitudeM);
+        say('descent', '降下（上昇を切り上げ）');
+      }
+    }
     return;
   }
 
@@ -520,7 +593,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     ap.targetSpeedMps = spd.cruise;
     controls.throttle = apThrottleForSpeed(state, controls, spd.cruise, dt);
     ap.vsCmd = apVsForAltitude(state, ap.targetAltitudeM, apClimbCap(state, spd));
-    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt);
+    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd);
     // 3°で降りきれる距離まで詰まったら降下へ。少し余裕を持たせる。
     if (plan) {
       const drop = Math.max(state.altitudeM - plan.fafAltM, 0);
@@ -539,7 +612,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 目標が巡航高度で頭打ちのあいだは、まだ坂に乗っていない＝前送りは要らない
     const onSlope = wantAlt < ap.targetAltitudeM - 1;
     ap.vsCmd = apVsForPath(state, wantAlt, onSlope ? AP_DESCENT_SLOPE : 0, apClimbCap(state, spd));
-    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt);
+    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd);
     if (distFaf < 2500) {
       say(ap.vtolLanding && model.hasVtol ? 'vtol_approach' : 'approach',
         ap.vtolLanding && model.hasVtol ? '最終進入（垂直着陸）' : '最終進入');
@@ -551,7 +624,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   if (ap.phase === 'vtol_approach') {
     const want = apBearingTo(state.position.x, state.position.z, plan.threshold.x, plan.threshold.z);
     ap.targetHeadingDeg = want;
-    controls.roll = apAileronForTrack(state, want, spd.bankMax);
+    controls.roll = apAileronForTrack(state, want, spd.bankMax, spd);
     controls.yaw = apRudderForCoordination(state);
 
     const distToTouchdown = Math.hypot(
@@ -567,7 +640,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 高さまでただ寄せるだけでいい
     const hoverAltM = plan.elevationM + AP_VTOL_HOVER_AGL_M;
     ap.vsCmd = apVsForAltitude(state, hoverAltM, apClimbCap(state, spd));
-    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt);
+    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd);
 
     if (distToTouchdown < apVtolHoverEngageRadius(spd)) say('vtol_descent', '垂直降下');
     return;
@@ -580,8 +653,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.throttle = 0; // 前へ進む推力は切る。速度は抗力任せで落ちていく
 
     const hover = apVtolHoverAngles(state, plan.threshold.x, plan.threshold.z);
-    controls.pitch = apElevatorForPitch(state, controls, hover.wantPitchDeg, dt);
-    controls.roll = apAileronForBank(state, hover.wantBankDeg);
+    controls.pitch = apElevatorForPitch(state, controls, hover.wantPitchDeg, dt, spd);
+    controls.roll = apAileronForBank(state, hover.wantBankDeg, spd);
     controls.yaw = apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP, -1, 1);
 
     // 沈下率は残りの高さに比例させる（引き起こしと同じ考え方。高いうちは速く、近づくほどゆっくり）
@@ -596,8 +669,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   if (ap.phase === 'vtol_touchdown') {
     controls.throttle = 0;
     controls.vtolThrottle = 0;
-    controls.pitch = apElevatorForPitch(state, controls, 0, dt);
-    controls.roll = apAileronForBank(state, 0);
+    controls.pitch = apElevatorForPitch(state, controls, 0, dt, spd);
+    controls.roll = apAileronForBank(state, 0, spd);
     controls.trim = 0;
     controls.brake = 1;
     if (state.groundSpeed < 1.5) {
@@ -618,7 +691,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     const corr = apClamp(-t.cross * 0.06, -35, 35);
     const want = plan.heading + corr;
     ap.targetHeadingDeg = (want + 360) % 360;
-    controls.roll = apAileronForTrack(state, want, 20);
+    controls.roll = apAileronForTrack(state, want, 20, spd);
     // 接地の直前だけ、横滑りを消すより滑走路と機首を合わせるほうを優先する。
     // 斜めを向いたまま降りると脚をねじるが、早くから機首を合わせてしまうと
     // 今度は横風でそのぶん流されるので、引き起こしにかかる高さで切り替える。
@@ -631,7 +704,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 進入では上げ過ぎない（高すぎたときは降りるほうを優先する）
     ap.vsCmd = apVsForPath(state, wantAlt, plan.glide,
       Math.min(apClimbCap(state, spd), Math.max(state.airspeed * 0.05, 2)));
-    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd, -8, 12), dt);
+    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd, -8, 12), dt, spd);
 
     ap.targetSpeedMps = spd.approach;
     controls.throttle = apThrottleForSpeed(state, controls, spd.approach, dt);
@@ -670,7 +743,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     const wantAlt = plan.fafAltM + 150;
     ap.vsCmd = apVsForAltitude(state, wantAlt, apClimbCap(state, spd));
     ap.targetSpeedMps = spd.climb;
-    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt);
+    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd);
     // 最終進入開始点に戻って、高度も合っていれば進入をやり直す
     if (distFaf < 2500 && Math.abs(state.altitudeM - wantAlt) < 250) say('approach', '最終進入');
     return;
@@ -679,7 +752,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   // ---- 引き起こし -----------------------------------------------------------
   if (ap.phase === 'flare') {
     const corr = apClamp(-apTrackPosition(plan, state.position.x, state.position.z).cross * 0.06, -12, 12);
-    controls.roll = apAileronForTrack(state, plan.heading + corr, 8);
+    controls.roll = apAileronForTrack(state, plan.heading + corr, 8, spd);
     controls.yaw = apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP, -1, 1);
     controls.throttle = Math.max(controls.throttle - dt * 0.8, 0);
 
@@ -689,7 +762,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     ap.vsCmd = -Math.max(state.altitudeAglM * 0.22, 0.3);
     // 接地の姿勢は少し機首上げ。前輪から落とすと跳ねる。
     const want = apClamp(apPitchForVs(state, ap.vsCmd, -3, 10), state.pitchDeg - 1, 10);
-    controls.pitch = apElevatorForPitch(state, controls, want, dt);
+    controls.pitch = apElevatorForPitch(state, controls, want, dt, spd);
 
     if (state.onGround) say('rollout', '滑走路上で減速');
     return;
@@ -699,13 +772,13 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   if (ap.phase === 'rollout') {
     controls.throttle = 0;
     controls.flap = 1;
-    controls.roll = apAileronForBank(state, 0);
+    controls.roll = apAileronForBank(state, 0, spd);
     controls.yaw = apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP, -1, 1);
     // 跳ねて浮いたら、ブレーキを離してもう一度接地の姿勢へ。
     // 浮いている間に舵を中立へ落とすと、前輪から突っ込むことになる。
     if (!state.onGround) {
       controls.brake = 0;
-      controls.pitch = apElevatorForPitch(state, controls, apClamp(state.pitchDeg, 0, 8), dt);
+      controls.pitch = apElevatorForPitch(state, controls, apClamp(state.pitchDeg, 0, 8), dt, spd);
       return;
     }
     controls.pitch = 0;
@@ -725,9 +798,9 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
 // 高度維持だけ（横と出力は手動のまま）
 function apStepAltHold(model, state, controls, ap, spd, dt) {
   ap.vsCmd = apVsForAltitude(state, ap.targetAltitudeM, apClimbCap(state, spd));
-  controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt);
+  controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd);
   // 翼を水平に戻すのは、手でロールを当てていないときだけ
-  if (Math.abs(controls.roll) < 0.02) controls.roll = apAileronForBank(state, 0);
+  if (Math.abs(controls.roll) < 0.02) controls.roll = apAileronForBank(state, 0, spd);
 }
 
 // 自動操縦を1フレーム進める（環境に依らない本体）
@@ -975,6 +1048,7 @@ if (typeof module !== 'undefined' && module.exports) {
     apMakeApproachPlan, apPickRunwayHeading, apTrackPosition,
     apWrap180, apBearingTo, apForward, apRight,
     apElevatorForPitch, apAileronForBank, apAileronForTrack, apGroundTrackDeg,
+    apSurfaceGain,
   apPitchForVs, apBankForHeading, apFlareHeight,
     apVsForAltitude, apThrottleForSpeed,
   };
