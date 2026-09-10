@@ -203,6 +203,12 @@ function resetFlightToRunway() {
   if (typeof terrainRebuildNow === 'function') terrainRebuildNow();
   // 地形ができてから改めて置き直す（最初の1回は地面の高さがまだ粗い）
   placeAircraftOnGround(f.aircraft.model, f.state, x, z, heading, flightGroundHeightAt);
+  // 脚の長さが脚ごとに揃っていない機体だと、水平の決め打ちでは浅い脚が
+  // 宙に浮いたまま出てしまい、支えを欠いた姿勢から物理が激しく弾んで、
+  // 離陸もしていないのに衝撃Gの墜落判定に触れる（settleAircraftOnGround 参照）。
+  if (typeof settleAircraftOnGround === 'function') {
+    settleAircraftOnGround(f.aircraft.model, f.state, flightGroundHeightAt);
+  }
   syncAircraftVisual();
   announceFlight(`${def.id} ${runwayDesignatorFor(heading)} — 出力を上げて離陸`);
 }

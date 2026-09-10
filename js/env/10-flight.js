@@ -613,7 +613,11 @@ function vtolClimbSpeedLimit(model) {
   return trimBisect(over, 0.2, 200);
 }
 
-// 地面へ機体を置く（滑走路の上に出すときと、リセットのとき）
+// 地面へ機体を置く（滑走路の上に出すときと、リセットのとき）。
+// 姿勢は常に水平（ピッチ・ロール0）に決め打ちし、高さは脚のいちばん深いところが
+// 接地する位置にする。脚がどれも同じ深さで、重心のまわりに素直に並んでいれば
+// これで合う——ただし脚の長さがバラついている機体では、浅い脚が地面に届かず
+// 浮いたままになる（下の settleAircraftOnGround 参照）。
 function placeAircraftOnGround(model, state, x, z, headingDeg, groundHeightAt) {
   state.velocity.set(0, 0, 0);
   state.angularVelocity.set(0, 0, 0);
@@ -624,10 +628,87 @@ function placeAircraftOnGround(model, state, x, z, headingDeg, groundHeightAt) {
   refreshFlightReadouts(model, state, groundHeightAt);
 }
 
+const _settleControls = { gearDown: true, parkingBrake: true };
+const _settleWind = new THREE.Vector3();
+
+// placeAircraftOnGround の「水平に決め打ち」を、実際に釣り合う姿勢へ静定させる。
+//
+// **脚の長さが脚ごとに揃っていない機体で必要になる**。placeAircraftOnGround は
+// いちばん深い脚が接地する高さに置くだけなので、それより浅い脚は宙に浮いたまま
+// 出てしまう（実際、あるユーザー機体で前脚の伸縮節がほかの脚より1m以上短く、
+// 前脚だけ浮いた状態で出ていた）。支えを欠いた状態から物理が姿勢を直そうとして
+// 激しく弾み、離陸すらしていないのに衝撃Gの墜落判定（12-flight-mode.js）に
+// 触れてしまう——「召喚すると高い位置に出て落っこちて墜落判定になる」がこれ。
+//
+// 姿勢を計算で解こうとはしない。**このシミュレータの脚のばねは、どんな並びの
+// 脚が来てもいずれ釣り合う姿勢に収束する**ので、静かに（ブレーキを引いて、
+// 舵も出力も入れずに）数秒ぶん物理を回してしまうのがいちばん確実——脚がどれだけ
+// 変な位置にあっても、そのまま同じ物理で本番も扱うのと同じ理屈で必ず答えが出る。
+// 墜落判定は呼び出し側（12-flight-mode.jsの毎フレームループ）の話なので、
+// ここで先に静定させてしまえば、その激しい過渡応答をプレイヤーは目にしない。
+//
+// 収まるまでの時間は機体次第（素直な脚ならほぼ一瞬）なので、脚が全部接地して
+// 沈み込みも回転も十分小さいまま0.5秒続いたら打ち切る。上限（既定12秒ぶん）を
+// 過ぎても収まらない、収まった先が横倒し同然（ピッチ・ロールどちらかが60°を
+// 超える）、または深く沈み込みすぎている（＝支えを完全に失って地面をすり抜けて
+// いる）なら、静定は諦めて元の水平placementへ戻す——直せないなら、せめて
+// 今までどおりの挙動のままにしておく。
+//
+// **「脚が全部接地しているか」まで見ないと、静定したつもりが実は静定していない**。
+// このシミュレータの接地は点接触なので、2本の脚だけがX方向に並んで接地し、
+// 3本目（前脚など）が僅かに浮いたままだと、ピッチ方向の支えが無いまま鉛筆を
+// 立てたような釣り合いになる——速度・角速度はゼロで一見「静か」に見えても、
+// ほんの少しの数値誤差で再び傾き始め、3本目の脚がようやく届いたところで
+// 今度こそ大きな衝撃になる（実測：この判定を「接地して静か」とだけ書いていた
+// ときは、静定を抜けたあと0.7秒で3本目の脚が接地し35Gの衝撃が出ていた）。
+// 速度・角速度に加えて `state.contactCount === model.contacts.length`
+// （脚が全部接地している）も条件に入れることで、この「あと少しで倒れる」
+// 半端な状態では打ち切らないようにする。
+//
+// ピッチ角だけでは倒れきったかどうかも判定できない。支えを失ったまま延々
+// 回転し続けると、90°を超えたところでEuler角の抽出が巻き戻り（THREE.jsの
+// 'YXZ'順ではピッチ成分が±90°に丸め込まれ、続きはヨー・ロール側に現れる）、
+// 実際は転がり続けているのに `pitchDeg` だけ見ると「-37°くらいで収まった」
+// ように見えてしまう（実測：主脚2本だけの支えで、5秒足らずでピッチ-88°・
+// 地面下2.5mまで転落）。沈み込み量（本来の接地深さからどれだけ余計に沈んだか）
+// も一緒に見て、脚の深さぶんを超えて沈んでいたら「支えを失って落ちた」と判定する。
+function settleAircraftOnGround(model, state, groundHeightAt, maxSeconds) {
+  const p0 = state.position.clone();
+  const q0 = state.quaternion.clone();
+
+  const c = _settleControls;
+  c.pitch = c.roll = c.yaw = c.trim = 0;
+  c.throttle = c.vtolThrottle = c.flap = c.brake = 0;
+
+  const gearCount = model.contacts.length;
+  const dt = 1 / 60;
+  const limit = Math.max(maxSeconds || 12, 0);
+  let quietFrames = 0;
+  for (let t = 0; t < limit; t += dt) {
+    advanceFlight(model, state, c, _settleWind, groundHeightAt, dt);
+    const quiet = state.onGround && state.contactCount >= gearCount
+      && Math.abs(state.velocity.y) < 0.05 && state.angularVelocity.lengthSq() < 0.0004;
+    quietFrames = quiet ? quietFrames + 1 : 0;
+    if (quietFrames > 30) break; // 全脚が接地して0.5秒静かなら、もう収まったとみなす
+  }
+
+  const sunkTooFar = state.position.y < p0.y - Math.max(model.gearHeight, 1);
+  const settled = state.onGround && state.contactCount >= gearCount && !sunkTooFar
+    && Math.abs(state.pitchDeg) < 60 && Math.abs(state.rollDeg) < 60;
+  if (!settled) {
+    state.position.copy(p0);
+    state.quaternion.copy(q0);
+  }
+  state.velocity.set(0, 0, 0);
+  state.angularVelocity.set(0, 0, 0);
+  refreshFlightReadouts(model, state, groundHeightAt);
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     createFlightState, createFlightControls, advanceFlight, flightStep,
-    refreshFlightReadouts, placeAircraftOnGround, airDensityAt, liftCoefficient,
+    refreshFlightReadouts, placeAircraftOnGround, settleAircraftOnGround,
+    airDensityAt, liftCoefficient,
     solveLevelTrim, trimToCurrentFlight, vtolClimbSpeedLimit,
     FLIGHT_SUBSTEP, GEAR_SQUASH_M,
   };

@@ -40,6 +40,7 @@ for (const f of ['09-aircraft.js', '10-flight.js', '13-autopilot.js']) {
 const {
   buildAircraftModel, defaultAircraftConfig, analyzeAircraftPerformance,
   createFlightState, createFlightControls, advanceFlight, placeAircraftOnGround,
+  settleAircraftOnGround,
   airDensityAt, solveLevelTrim, vtolClimbSpeedLimit, accumulateAeroForces, refreshFlightReadouts,
   createAutopilotState, stepAutopilot, apSpeedSchedule, apMakeApproachPlan,
   apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo, apBankMaxFor,
@@ -2176,6 +2177,114 @@ function autopilotFlight(opts) {
       `T/W${tw.toFixed(1)} 沈み${sink.toFixed(2)}m ピッチ${worstPitch.toFixed(0)}°`);
   }
   note('離陸滑走の沈み込み', rows.join('  '));
+}
+
+// --- 脚の長さが脚ごとに揃っていない機体でも、召喚した瞬間に墜落判定にならない -------
+//
+// placeAircraftOnGround は「いちばん深い脚が接地する高さに水平で置く」だけなので、
+// それより浅い脚は宙に浮いたまま出てしまう（実際のユーザー機体で、GLBから
+// 取り込んだ前脚の関節・伸縮節がほかの脚より1m以上短く、前脚だけ浮いた状態で
+// 出ていた）。支えを欠いた状態から物理が姿勢を直そうとして激しく弾み、
+// 離陸すらしていないのに衝撃Gの墜落判定に触れる——
+// 「召喚すると高い位置に出て落っこちて墜落判定になる」の正体がこれ。
+// settleAircraftOnGround は、その激しい過渡応答をプレイヤーに見せる前に、
+// 物理そのものを静かに数秒ぶん回して釣り合う姿勢へ収めてしまう。
+{
+  const FLIGHT_CRASH_G = 12, FLIGHT_CRASH_SINK_MPS = 9;
+  // 実際の毎フレームループ（12-flight-mode.jsのupdateFlight）と同じ墜落判定で、
+  // 静かに置いたあと何秒か経っても墜落しないかを確かめる
+  const flyAndCheckCrash = (m, st) => {
+    const c = createFlightControls();
+    c.parkingBrake = true; c.gearDown = true; c.throttle = 0;
+    let crashed = false, maxG = 0;
+    for (let t = 0; t < 15 && !crashed; t += 1 / 60) {
+      const sinkBefore = st.velocity.y;
+      advanceFlight(m, st, c, noWind, flatGround, 1 / 60);
+      if (st.onGround) {
+        maxG = Math.max(maxG, Math.abs(st.loadFactor));
+        if (Math.abs(st.loadFactor) > FLIGHT_CRASH_G
+          || (sinkBefore < -FLIGHT_CRASH_SINK_MPS && st.contactCount > 0)) crashed = true;
+      }
+    }
+    return { crashed, maxG };
+  };
+
+  // 大型機と同じ拡大（4倍・推力200倍）に、前脚だけ主脚よりずっと浅い脚を作る
+  const cfg = defaultAircraftConfig();
+  cfg.name = '前脚だけ浮いた大型機';
+  cfg.modelMaxSpeedValue = 480; cfg.modelMaxSpeedUnit = 'kt';
+  const S = 4; const scaleV = (v) => { v.x *= S; v.y *= S; v.z *= S; };
+  scaleV(cfg.cg);
+  for (const p of cfg.parts) {
+    scaleV(p.position);
+    if (p.props && p.props.corners) for (const k in p.props.corners) scaleV(p.props.corners[k]);
+    if (p.props && p.props.span) p.props.span *= S;
+    if (p.props && p.props.thrustKgf) p.props.thrustKgf *= 200;
+  }
+  const preModel = buildAircraftModel(cfg);
+  const nose = cfg.parts.find((p) => p.id === 'g_nose');
+  nose.position.y = preModel.gearHeight * 0.85; // 主脚より15%浅い＝深さの15%ぶん浮く
+  const brokenModel = buildAircraftModel(cfg);
+
+  const naive = createFlightState();
+  placeAircraftOnGround(brokenModel, naive, 0, 0, 90, flatGround);
+  const naiveResult = flyAndCheckCrash(brokenModel, naive);
+  note('前脚が浮いた機体：水平に置いただけ',
+    `${naiveResult.crashed ? '墜落' : '無事'}（最大${naiveResult.maxG.toFixed(1)}G）`);
+  check(naiveResult.crashed, 'この機体は、実際に水平へ決め打ちで置くと墜落する（テストが効いている確認）',
+    `${naiveResult.maxG.toFixed(1)}G`);
+
+  const settled = createFlightState();
+  placeAircraftOnGround(brokenModel, settled, 0, 0, 90, flatGround);
+  settleAircraftOnGround(brokenModel, settled, flatGround);
+  const settledResult = flyAndCheckCrash(brokenModel, settled);
+  note('前脚が浮いた機体：静定させてから置く',
+    `${settledResult.crashed ? '墜落' : '無事'}（最大${settledResult.maxG.toFixed(1)}G） `
+    + `姿勢=ピッチ${settled.pitchDeg.toFixed(1)}°`);
+  check(!settledResult.crashed, '静定させれば、同じ機体でも召喚しただけで墜落しない',
+    `${settledResult.maxG.toFixed(1)}G`);
+  check(settledResult.maxG < naiveResult.maxG * 0.5, '衝撃そのものも大きく減っている',
+    `${settledResult.maxG.toFixed(1)}G < ${(naiveResult.maxG * 0.5).toFixed(1)}G`);
+
+  // 素直な脚（内蔵の練習機・さっきの大型機そのもの）では、静定してもほとんど動かない
+  const plainModel = buildAircraftModel(defaultAircraftConfig());
+  const plainNaive = createFlightState();
+  placeAircraftOnGround(plainModel, plainNaive, 0, 0, 90, flatGround);
+  const plainSettled = createFlightState();
+  placeAircraftOnGround(plainModel, plainSettled, 0, 0, 90, flatGround);
+  settleAircraftOnGround(plainModel, plainSettled, flatGround);
+  const drift = Math.abs(plainNaive.position.y - plainSettled.position.y);
+  note('練習機：静定による変化', `高さ${drift.toFixed(3)}m ピッチ${Math.abs(plainNaive.pitchDeg - plainSettled.pitchDeg).toFixed(2)}°`);
+  check(drift < 0.1, '素直な脚の機体では、静定してもほとんど動かない（無駄に暴れない）',
+    drift.toFixed(3) + 'm');
+
+  // 3本目の脚がどうやっても届かない（2本の脚だけがX方向に並んでいて、
+  // ピッチ方向にまったく支えが無い）ような、直しようのない機体では、
+  // 静定を諦めて元の水平placementのままにする
+  const hopelessCfg = defaultAircraftConfig();
+  hopelessCfg.name = '前脚が遠く離れて浮いた機体';
+  scaleV(hopelessCfg.cg);
+  for (const p of hopelessCfg.parts) {
+    scaleV(p.position);
+    if (p.props && p.props.corners) for (const k in p.props.corners) scaleV(p.props.corners[k]);
+    if (p.props && p.props.span) p.props.span *= S;
+    if (p.props && p.props.thrustKgf) p.props.thrustKgf *= 200;
+  }
+  const preHopeless = buildAircraftModel(hopelessCfg);
+  const hopelessNose = hopelessCfg.parts.find((p) => p.id === 'g_nose');
+  hopelessNose.position.y = preHopeless.gearHeight * 0.5;
+  hopelessNose.position.z = 8; // 重心から遠く、主脚2本の並びからも外れた位置
+  const hopelessModel = buildAircraftModel(hopelessCfg);
+  const hopeless = createFlightState();
+  placeAircraftOnGround(hopelessModel, hopeless, 0, 0, 90, flatGround);
+  const beforeY = hopeless.position.y, beforePitch = hopeless.pitchDeg;
+  settleAircraftOnGround(hopelessModel, hopeless, flatGround);
+  note('直しようのない機体（前脚が遠くて2本足状態）',
+    `静定前y=${beforeY.toFixed(2)} → 静定後y=${hopeless.position.y.toFixed(2)}（差${Math.abs(hopeless.position.y - beforeY).toFixed(2)}m）`);
+  check(Math.abs(hopeless.position.y - beforeY) < 0.01
+    && Math.abs(hopeless.pitchDeg - beforePitch) < 0.01,
+    '支えようがない機体では、静定をあきらめて元の水平placementのまま残す',
+    `y差${Math.abs(hopeless.position.y - beforeY).toFixed(3)}m`);
 }
 
 // --- 地面が上がってきたら越える／低いところでは深く傾けない -----------------------
