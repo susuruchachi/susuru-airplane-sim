@@ -44,7 +44,8 @@ const {
   airDensityAt, solveLevelTrim, vtolClimbSpeedLimit, accumulateAeroForces, refreshFlightReadouts,
   createAutopilotState, stepAutopilot, apSpeedSchedule, apMakeApproachPlan,
   apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo, apBankMaxFor,
-  apElevatorForPitch, apSurfaceGain, apBankLimit, apBankAglFactor,
+  apElevatorForPitch, apSurfaceGain, apBankLimit, apBankAglFactor, apTerrainFloor,
+  aircraftDragLengthM,
 } = ctx;
 
 // 13-autopilot.js / 10-flight.js の同名の定数と同じ値。vmコンテキストの外からは
@@ -297,6 +298,8 @@ let takeoffRun = null;
     c.parkingBrake = false;
     c.throttle = 1;
     c.brake = 0;
+    // 脚は浮いたら上げる（出したままだと抗力になる——10-flight.js の gearDragArea）
+    c.gearDown = s.altitudeAglM < 15;
     if (s.airspeed * KT < 55 && s.onGround) c.pitch = 0;
     else if (s.altitudeAglM < 15) c.pitch = 0.45;
     else c.pitch = holdPitch(s, 8); // 上昇姿勢8°を保つ
@@ -1103,10 +1106,18 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
   const onAc = buildAircraftModel(deltaConfig(acZ));
   const perfOnAc = analyzeAircraftPerformance(onAc);
   check(!perfOnAc.flyable, '重心が主翼の空力中心と一致すると、飛行不能と判定される');
-  check(perfOnAc.trimForClimb.reason === 'no_elevator',
-    '「翼が足りない」に埋もれず、ピッチ舵に腕が無いことが理由として出る', String(perfOnAc.trimForClimb.reason));
-  check(perfOnAc.notes.some((n) => n.level === 'error' && n.text.includes('ピッチ舵')),
-    'エラーとして「ピッチ舵」の説明が出る');
+  // 舵の力が空力中心の**後ろ**に掛かるようになってから（10-flight.js の
+  // hingeArmChord）、エレボンだけの機体でも重心の真上でピッチのモーメントは出る。
+  // つまり「舵に腕が無い」はもう正しい診断ではない。この配置で本当に飛べない
+  // 理由は**静安定が0%**であること——実測で、静安定0%の機体は自動操縦でも
+  // 姿勢が発散し、重心を少し前へ出して9%にしただけで着陸できた。
+  note('デルタ翼テスト機：重心＝空力中心', `静安定 ${perfOnAc.staticMarginPct.toFixed(0)}% MAC`);
+  check(Math.abs(perfOnAc.staticMarginPct) < 1, '重心＝空力中心なら静安定はほぼ0%',
+    perfOnAc.staticMarginPct.toFixed(1));
+  check(perfOnAc.notes.some((n) => n.level === 'error' && n.text.includes('静安定')),
+    'エラーとして「静安定がない」ことが出る');
+  check(perfOnAc.elevatorPower > 1e-3, '重心の真上のエレボンでも、ピッチのモーメントは出る',
+    perfOnAc.elevatorPower.toFixed(0));
 
   // 重心を主翼より少し前へ出せば、同じ主翼・同じエルロンのままモーメントの腕がつく
   const ahead = buildAircraftModel(deltaConfig(acZ - 2));
@@ -2408,6 +2419,208 @@ function autopilotFlight(opts) {
       bankLow.toFixed(0) + '°');
     check(bankHigh > 10, '高度が取れたら、ふつうに旋回する', bankHigh.toFixed(0) + '°');
   }
+}
+
+// --- 実機で見つかった壊れ方の作り直し -------------------------------------------
+//
+// ここから下は、実際に報告された機体（Boeing 747 / Concorde / サンダーバード1号2号）で
+// 見つかった壊れ方を、**その機体を特徴づける数字だけ**で作り直したもの。
+// 機体ファイルそのものはリポジトリに入れられないので、原因になった性質
+// （取付角・重心と空力中心の位置関係・尾翼の有無・推力重量比・翼面荷重）を再現する。
+
+// (1) 主翼と水平尾翼の取付角が大きい大型機は、どの速度でも釣り合うこと。
+//     実機の747は主翼+4.3°・水平尾翼-3.8°で、迎角0でも+9.4MN·mの機首上げが出る。
+//     トリムがエレベーターと同じ舵を動かすだけだった頃は、全部倒しても足りず
+//     「離陸すると頭が上がり続けて失速する」機体になっていた。
+{
+  const jet = defaultAircraftConfig();
+  jet.name = '取付角の大きい大型機'; jet.modelWeightKg = 180000;
+  jet.modelMaxSpeedValue = 560; jet.modelMaxSpeedUnit = 'kt';
+  const S = 5.4;
+  const scale = (v) => { v.x *= S; v.y *= S; v.z *= S; };
+  scale(jet.cg);
+  for (const p of jet.parts) {
+    scale(p.position);
+    if (p.props && p.props.corners) for (const k in p.props.corners) scale(p.props.corners[k]);
+    if (p.props && p.props.span) p.props.span *= S;
+    if (p.props && p.props.thrustKgf) p.props.thrustKgf *= 280;
+    // 主翼を機首上げ、水平尾翼を機首下げに取り付ける（747と同じ向き・同じ大きさ）
+    // 内蔵機の素の取付角（主翼+3.1° / 水平尾翼-1.1°）から、747と同じ
+    // 主翼+4.3° / 水平尾翼-3.8° へ寄せる
+    if (p.type === 'wing' && p.props && p.props.role === 'main') p.rotation.x = 1.2;
+    if (p.type === 'wing' && p.props && p.props.role === 'htail') p.rotation.x = -2.7;
+  }
+  const jm = buildAircraftModel(jet);
+  const jspd = apSpeedSchedule(jm);
+  const inc = jm.surfaces.filter((s) => s.role !== 'vtail')
+    .map((s) => `${s.role}${(s.incidenceRad * 180 / Math.PI).toFixed(1)}°`).join(' ');
+  note('取付角の大きい大型機', `${jm.massKg.toLocaleString()}kg 翼${jm.wingArea.toFixed(0)}m² 取付角 ${inc}`);
+  // 引き起こし速度は定義からして水平飛行できない速さなので、飛行の範囲だけ見る
+  const speeds = [jspd.climb, jspd.approach, Math.min(jspd.cruise, jspd.stall * 4)];
+  const solved = speeds.map((v) => solveLevelTrim(jm, v, 1000));
+  check(solved.every((s) => s.ok), '取付角が大きくても、どの速度でも水平飛行の釣り合いが取れる',
+    solved.map((s, i) => `${(speeds[i] * KT).toFixed(0)}kt:${s.ok ? '○' : '×' + s.reason}`).join(' '));
+  // トリムが安定板まるごとを動かすので、エレベーター単独より効きが大きい
+  const at = (pitch, trim) => {
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, 1000, 0); st.altitudeM = 1000;
+    st.quaternion.setFromEuler(new THREE.Euler(THREE.MathUtils.degToRad(3), 0, 0, 'YXZ'));
+    st.velocity.set(0, 0, -jspd.climb);
+    c.pitch = pitch; c.trim = trim; c.throttle = 0; c.gearDown = false;
+    const out = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
+    accumulateAeroForces(jm, st, c, noWind, out);
+    return out.torque.x;
+  };
+  const elevOnly = Math.abs(at(-1, 0) - at(0, 0));
+  const withTrim = Math.abs(at(-1, -1) - at(0, 0));
+  note('安定板トリムの効き', `エレベーターだけ ${(elevOnly / 1e6).toFixed(1)}MN·m`
+    + ` → トリムも足すと ${(withTrim / 1e6).toFixed(1)}MN·m`);
+  check(withTrim > elevOnly * 1.2, 'トリムは安定板まるごとを動かすので、エレベーター単独より効く',
+    `${(withTrim / elevOnly).toFixed(2)}倍`);
+}
+
+// (2) 水平尾翼を持たない機体（エレボン）は、重心の真上でもピッチの舵が効き、
+//     失速しかけても**逆には効かない**こと。実機のConcordeがこれで背面に回っていた。
+{
+  const wing = (side, sign) => ({
+    id: 'w_' + side, type: 'wing', name: '主翼', position: { x: 0, y: 0, z: 0 },
+    rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: { role: 'main', corners: {
+      // 後退角の強いデルタ翼（Concordeと同じくらい）
+      rootLeading: { x: 0, y: 0, z: -8 }, rootTrailing: { x: 0, y: 0, z: 4 },
+      tipLeading: { x: sign * 9, y: 0, z: 3 }, tipTrailing: { x: sign * 9, y: 0, z: 4 },
+    } },
+  });
+  const delta = buildAircraftModel({
+    name: 'デルタ機', modelWeightKg: 100000, modelMaxSpeedValue: 1300, modelMaxSpeedUnit: 'kt',
+    cg: { x: 0, y: 0, z: 0 }, parts: [wing('r', 1), wing('l', -1)],
+  });
+  const w = delta.surfaces.find((s) => s.role === 'main');
+  note('デルタ機（尾翼なし）', `主翼の空力中心 z=${w.center.z.toFixed(2)}m`
+    + ` 後退角ぶんの迎角の倍率 ×${w.alphaGain.toFixed(2)}`);
+  const M = (alphaDeg, el) => {
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, 1000, 0); st.altitudeM = 1000;
+    st.quaternion.setFromEuler(new THREE.Euler(THREE.MathUtils.degToRad(alphaDeg), 0, 0, 'YXZ'));
+    st.velocity.set(0, 0, -90);
+    c.pitch = el; c.throttle = 0; c.gearDown = false;
+    const out = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
+    accumulateAeroForces(delta, st, c, noWind, out);
+    return out.torque.x;
+  };
+  check(Math.abs(M(0, 1)) > 1e4, '重心の真上のエレボンでも、ピッチのモーメントが出る',
+    (M(0, 1) / 1e6).toFixed(2) + 'MN·m');
+  const angles = [0, 3, 6, 9, 12, 15];
+  const worst = angles.map((a) => M(a, -1) - M(a, 0)).reduce((x, y) => Math.max(x, y), -Infinity);
+  note('エレボンの効き（機首下げを当てたとき）',
+    angles.map((a) => `${a}°:${((M(a, -1) - M(a, 0)) / 1e6).toFixed(2)}`).join(' '));
+  check(worst <= 0, '失速しかけても、機首下げの舵が機首上げに反転しない',
+    (worst / 1e6).toFixed(3) + 'MN·m');
+  // 重心の真上にある翼でも、回転を止める力が出る（Cmq）
+  const damp = (q) => {
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, 1000, 0); st.altitudeM = 1000;
+    st.velocity.set(0, 0, -90); st.angularVelocity.set(q, 0, 0);
+    c.throttle = 0; c.gearDown = false;
+    const out = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
+    accumulateAeroForces(delta, st, c, noWind, out);
+    return out.torque.x;
+  };
+  check(damp(0.4) < damp(0) - 1e4, '重心の真上にある翼でも、ピッチの回転が減衰する',
+    `q=0.4rad/s で ${((damp(0.4) - damp(0)) / 1e6).toFixed(3)}MN·m`);
+}
+
+// (3) 壊れたエンジン取付角は捨て、正しい取付角は残すこと。
+{
+  const tilted = (deg) => {
+    const c = defaultAircraftConfig();
+    for (const p of c.parts) {
+      if (p.type !== 'engine') continue;
+      p.position.y = -1.5;         // 重心より下に付ける＝推力が機首上げのモーメントを生む
+      p.rotation.x = deg;
+    }
+    return buildAircraftModel(c);
+  };
+  const moment = (m) => {
+    let t = 0;
+    for (const e of m.engines) {
+      if (e.lift) continue;
+      t += e.position.y * (e.axis.z * e.thrustN) - e.position.z * (e.axis.y * e.thrustN);
+    }
+    return t;
+  };
+  const flat = moment(tilted(0));
+  // 打ち消す向きの取付角を、実際に探して確かめる
+  let best = 0, bestAbs = Math.abs(flat);
+  for (let d = -60; d <= 60; d += 0.5) {
+    const v = Math.abs(moment(tilted(d)));
+    if (v < bestAbs) { bestAbs = v; best = d; }
+  }
+  note('エンジン取付角', `取付角0で ${(flat / 1000).toFixed(1)}kN·m / 打ち消す角度 ${best.toFixed(1)}°`);
+  check(Math.abs(moment(tilted(best))) < Math.abs(flat) * 0.5,
+    '打ち消す向きの取付角はそのまま効く', (moment(tilted(best)) / 1000).toFixed(1) + 'kN·m');
+  check(tilted(best).engineTiltIgnored === false, '正しい取付角は捨てられない');
+  check(Math.abs(moment(tilted(-best))) <= Math.abs(flat) + 1,
+    '逆向き（モーメントを増やす）の取付角は捨てられる',
+    (moment(tilted(-best)) / 1000).toFixed(1) + 'kN·m');
+  check(tilted(-best).engineTiltIgnored === true, '捨てたことが機体に記録される');
+}
+
+// (4) 出した脚は抗力になる（自動操縦が減速に使う）
+{
+  const drag = (gear) => {
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, 1000, 0); st.altitudeM = 1000;
+    st.velocity.set(0, 0, -80);
+    c.throttle = 0; c.gearDown = gear;
+    const out = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
+    accumulateAeroForces(model, st, c, noWind, out);
+    return out.force.z;
+  };
+  note('脚の抗力', `脚上げ ${(drag(false)).toFixed(0)}N → 脚下げ ${(drag(true)).toFixed(0)}N`);
+  check(drag(true) > drag(false) * 1.1, '脚を出すと抗力が増える',
+    `${(drag(true) / drag(false)).toFixed(2)}倍`);
+}
+
+// (5) 平らな地面の上で、地形回避が降下を止めないこと。
+//     vsNeed は「越えるのに要る上昇率」なので、地面が下にあるときは効かせてはいけない。
+{
+  const st = createFlightState();
+  st.position.set(0, 3000, 0); st.altitudeM = 3000;
+  st.velocity.set(0, -10, -140);
+  st.quaternion.setFromEuler(new THREE.Euler(0, 0, 0, 'YXZ'));
+  const flatFloor = apTerrainFloor(st, { groundHeightAt: flatGround }, 300);
+  note('平らな地面の上での地形回避', `床 ${flatFloor.floorM.toFixed(0)}m / 要る上昇率 ${flatFloor.vsNeed}`);
+  check(flatFloor.vsNeed === -Infinity, '地面より高いところでは、降下の下限を作らない',
+    String(flatFloor.vsNeed));
+  // 山があるときは、ちゃんと上昇率を要求する
+  // 機体は -Z（北）へ飛んでいるので、その先に尾根を置く
+  const ridge = (x, z) => (-z > 5000 && -z < 20000 ? 4000 : 0);
+  const overRidge = apTerrainFloor(st, { groundHeightAt: ridge }, 300);
+  check(overRidge.vsNeed > 0, '前方に山があれば、越えるのに要る上昇率を出す',
+    overRidge.vsNeed.toFixed(1) + 'm/s');
+}
+
+// (6) 目的地までに落としきれない速さでは巡航しないこと。
+{
+  const rocketCfg = defaultAircraftConfig();
+  rocketCfg.name = '翼が小さくて推力が桁外れな機体';
+  rocketCfg.modelWeightKg = 140000;
+  rocketCfg.modelMaxSpeedValue = 21; rocketCfg.modelMaxSpeedUnit = 'mach';
+  for (const p of rocketCfg.parts) {
+    if (p.props && p.props.thrustKgf) p.props.thrustKgf *= 100000;
+  }
+  const rm = buildAircraftModel(rocketCfg);
+  const L = aircraftDragLengthM(rm);
+  const far = apSpeedSchedule(rm, 2000000);  // 2000km 先
+  const near = apSpeedSchedule(rm, 80000);   // 80km 先
+  note('抗力長さと巡航速度', `L=${(L / 1000).toFixed(0)}km`
+    + ` / 2000km先なら${(far.cruise * KT).toFixed(0)}kt / 80km先なら${(near.cruise * KT).toFixed(0)}kt`);
+  check(near.cruise < far.cruise, '目的地が近いほど、落としきれる速さまで巡航を絞る',
+    `${(near.cruise * KT).toFixed(0)}kt < ${(far.cruise * KT).toFixed(0)}kt`);
+  check(near.cruise <= near.approach * Math.exp(80000 * 0.5 / L) * 1.01,
+    '巡航速度は「残りの半分で進入速度まで落とせる速さ」に収まる',
+    `${(near.cruise * KT).toFixed(0)}kt`);
 }
 
 // --- 計算の速さ ---------------------------------------------------------------

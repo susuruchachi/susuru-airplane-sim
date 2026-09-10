@@ -112,6 +112,7 @@ const _fv = {
   force: new THREE.Vector3(), torque: new THREE.Vector3(),
   liftDir: new THREE.Vector3(), dragDir: new THREE.Vector3(), f: new THREE.Vector3(),
   qInv: new THREE.Quaternion(), up: new THREE.Vector3(),
+  arm: new THREE.Vector3(), dF: new THREE.Vector3(),
 };
 
 // 機体にかかる力（機体座標）とモーメント（機体座標）を積み上げる。
@@ -155,18 +156,35 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
 
     // 舵角を足す
     const flapPart = s.flap * controls.flap;
-    // トリムは舵と同じところへ足す。実機のトリムタブも結局は舵を動かすものなので、
-    // 「手を離しているときの舵の中立位置をずらす」のがいちばん近い。
-    const pitchCmd = THREE.MathUtils.clamp(controls.pitch + (controls.trim || 0), -1, 1);
-    const deflect = s.pitch * pitchCmd + s.roll * controls.roll
-      + s.yaw * controls.yaw + flapPart;
+    // トリムは別勘定。水平尾翼を持つ機体では**安定板まるごとの取付角**を動かすので、
+    // エレベーターとは足し算になる。尾翼を持たない機体ではトリムもエレベーターと
+    // 同じ蝶番の舵を動かす（09-aircraft.js の assignTrimAuthority 参照）。
+    const trimDefl = (s.trimAuth === undefined ? s.pitch : s.trimAuth)
+      * THREE.MathUtils.clamp(controls.trim || 0, -1, 1);
+    // 蝶番で付いた舵（エレベーター・エルロン・ラダー）。翼の後ろだけが動く。
+    const hinged = s.pitch * THREE.MathUtils.clamp(controls.pitch, -1, 1)
+      + s.roll * controls.roll + s.yaw * controls.yaw
+      + (s.trimHinged === false ? 0 : trimDefl);
+    // 翼まるごとの取付角が変わるぶん（安定板トリム）。力は空力中心にそのまま掛かる。
+    const trimmed = s.trimHinged === false ? trimDefl : 0;
+    const deflect = hinged + trimmed + flapPart;
     const alphaEff = alpha + deflect;
 
     // フラップは「翼のキャンバーを増やす」もの。迎角をずらすだけの扱いにすると、
     // 失速する迎角まで同じぶんだけ前倒しになって最大揚力が増えず、
     // フラップを下ろすほど失速が早まる——という逆の機体ができあがる。
     // そこで失速の判定からはフラップぶんを外し、揚力の曲線ごと持ち上げる。
-    const stallLimit = stallRad + Math.abs(flapPart);
+    //
+    // **舵も同じ**。舵はキャンバーを変えるもので、翼まるごとを迎角ぶんひねる
+    // ものではない。外しておかないと、失速が近い迎角で舵を当てたとたんに翼が
+    // 失速して揚力が落ち、**舵が逆に効く**。実測で、水平尾翼を持たない Concorde が
+    // 迎角12°で「機首下げ」を当てると機首上げに反転し、引き起こしを始めた瞬間に
+    // 止められなくなって背面へ回っていた（ふつうの尾翼機ではエレベーターは
+    // 水平尾翼に付くので、主翼の失速はこれまでどおり迎角だけで決まる）。
+    // 失速角そのものは「機体の迎角で何度か」で決める（s.alphaGain の説明を参照）。
+    // 舵とフラップのぶんは、もう翼が感じる角度で足してあるので倍率は掛けない。
+    const stallLimit = stallRad * (s.alphaGain || 1)
+      + Math.abs(flapPart) + Math.abs(hinged + trimmed);
 
     const cl = liftCoefficient(alphaEff, stallLimit);
     const cdi = (cl * cl) / (Math.PI * s.aspect * AERO_DEFAULTS.oswald);
@@ -186,6 +204,42 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
     out.force.add(f);
     out.torque.add(_fv.tmp.crossVectors(s.center, f));
 
+    // **蝶番の舵で増えたぶんの揚力は、空力中心より後ろに掛かる**——動くのは翼の
+    // 後ろ半分だけなので、増えた圧力の中心も後ろに寄る。これを入れないと、
+    // 舵の力はすべて空力中心（前縁から1/4）に掛かることになり、
+    // **翼の空力中心が重心の真上にある機体はピッチをまったく操縦できない**。
+    // 実際そうなっていて、水平尾翼を持たずエレボンだけで飛ぶ Concorde は
+    // 舵の効きが実測 ±0.00MN·m ——引き起こせず、離陸滑走のまま滑走路の端まで
+    // 走り続けていた。実機のデルタ機はまさにこの腕で機首を上げている。
+    //
+    // フラップはここに入れない。この飛行モデルはフラップを「翼まるごとの
+    // キャンバーが増える」ものとして扱っており（上のコメント参照）、蝶番の先だけが
+    // 動く舵とは別物だから。入れると、フラップ全開で機首下げが勝ってしまい、
+    // 内蔵の練習機がエレベーターを一杯に引いても失速させられなくなった（実測）。
+    if (hinged) {
+      let dCl = cl - liftCoefficient(alpha + trimmed + flapPart, stallLimit);
+      // **失速した舵は効かなくなるだけで、逆には効かない**。揚力の曲線の差で
+      // 出すと、翼が崩れたところでは差の符号まで裏返り、当てた向きと逆の
+      // モーメントが出る。実測で Concorde が迎角12°から「機首下げ」を当てると
+      // +0.59MN·m の機首上げになり、引き起こしが止まらず背面へ回っていた。
+      if (dCl * hinged < 0) dCl = 0;
+      if (dCl) {
+        const arm = _fv.arm.copy(s.fwd).multiplyScalar(-AERO_DEFAULTS.hingeArmChord * s.chord);
+        out.torque.add(_fv.tmp.crossVectors(arm, _fv.dF.copy(liftDir).multiplyScalar(dCl * q)));
+      }
+    }
+
+    // **翼弦方向の回転減衰**。上の ω×r は翼の位置が重心から離れているぶんしか
+    // 拾わないので、**重心の真上にある翼はまったく減衰しない**。実際そうなっていて、
+    // 主翼が重心の上にあるデルタ機（Concorde）はピッチ角速度0.4rad/sを与えても
+    // 戻す力が0.001MN·mしか出ず、いちど機首が上がりだすと止まらないまま
+    // 背面に入って滑走路に落ちていた。翼はそれ自身の翼弦の長さで回転を止める。
+    const qRate = omega.dot(s.spanA);
+    if (qRate) {
+      out.torque.addScaledVector(s.spanA,
+        -AERO_DEFAULTS.pitchDamp * rho * v * s.area * s.chord * s.chord * qRate);
+    }
+
     if (s.role === 'main') {
       mainArea += s.area;
       if (Math.abs(alphaEff) > stallLimit) stalledArea += s.area;
@@ -199,6 +253,15 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
   out.force.x -= qSide;
   out.force.y -= qVert;
   out.force.z -= qFront;
+
+  // **出した脚は抗力になる**。ここが抜けていたので、脚を出しても速度がまったく
+  // 落ちず、自動操縦は「降りる」と「減速する」を姿勢ひとつで両立するしかなかった
+  // ——実測でBoeing 747が進入開始に260kt（進入速度168kt）・経路より600m高いところで
+  // 入って、やり直しを25回繰り返していた。実機の進入で最初に出す減速装置がこれ。
+  if (controls.gearDown && model.gearDragArea > 0 && airspeed > 1e-3) {
+    const dGear = 0.5 * rho * airspeed * model.gearDragArea * AERO_DEFAULTS.gearCd;
+    out.force.addScaledVector(vAirBody, -dGear);
+  }
 
   // 推力。プロペラなので速度が上がるほど落ちる。
   const speedRatio = THREE.MathUtils.clamp(airspeed / Math.max(model.vMaxMps, 1), 0, 1.4);
@@ -542,6 +605,37 @@ function trimBisect(f, lo, hi) {
   return (lo + hi) / 2;
 }
 
+// 機体の「抗力長さ」——出力を絞ったとき、速度が 1/e に落ちるまでに進む距離(m)。
+//
+// 抗力は速度の2乗に比例するので m·dv/dt = -k·v² となり、距離で書き直すと
+// dv/v = -(k/m)·dx。つまり **速度を v0 から v1 まで落とすのに要る距離は
+// L·ln(v0/v1)**（L = m/k）で、速度によらない1本の物差しになる。
+// 自動操縦はこれで「目的地までに進入速度まで落としきれるか」を判断する。
+// 実測すると機体差は桁で違う——Boeing 747 が約15km、TB1（翼73m²に140t）は
+// 約300kmで、TB1 は巡航のまま突っ込むと1000km走っても進入速度まで落ちない。
+function aircraftDragLengthM(model) {
+  if (model._dragLengthM > 0) return model._dragLengthM;
+  const s = _trimScratch;
+  if (!s.state) { s.state = createFlightState(); s.controls = createFlightControls(); }
+  const st = s.state, c = s.controls;
+  // 代表速度は失速の3倍あたり（進入から巡航までの真ん中）。誘導抗力はここでは
+  // ほぼ効かないので、どこで測ってもLはあまり動かない。
+  const stall = Math.sqrt((2 * model.massKg * FLIGHT_GRAVITY)
+    / (1.225 * Math.max(model.wingArea, 0.01) * 1.5));
+  const v = Math.max(stall * 3, 10);
+  st.position.set(0, 0, 0); st.altitudeM = 0;
+  st.angularVelocity.set(0, 0, 0);
+  st.quaternion.setFromEuler(s.euler.set(0, 0, 0, 'YXZ'));
+  st.velocity.set(0, 0, -v);
+  c.pitch = c.roll = c.yaw = c.flap = c.brake = 0;
+  c.trim = 0; c.throttle = 0; c.vtolThrottle = 0;
+  c.gearDown = false; c.parkingBrake = false;
+  accumulateAeroForces(model, st, c, s.wind, s.out);
+  const drag = Math.max(s.out.force.z, 1e-6); // 機首は-z。抗力は+z
+  model._dragLengthM = (model.massKg * v * v) / drag;
+  return model._dragLengthM;
+}
+
 // その速度で水平飛行するトリム・迎角・スロットルを返す。
 function solveLevelTrim(model, speedMps, altitudeM) {
   // 失速したところで探すと意味のない答えが出る。失速角のすこし手前で頭打ちにする——
@@ -747,7 +841,7 @@ if (typeof module !== 'undefined' && module.exports) {
     createFlightState, createFlightControls, advanceFlight, flightStep,
     refreshFlightReadouts, placeAircraftOnGround, settleAircraftOnGround,
     airDensityAt, liftCoefficient,
-    solveLevelTrim, trimToCurrentFlight, vtolClimbSpeedLimit,
+    solveLevelTrim, trimToCurrentFlight, vtolClimbSpeedLimit, aircraftDragLengthM,
     FLIGHT_SUBSTEP, GEAR_SQUASH_M,
   };
 }

@@ -24,8 +24,20 @@ const AERO_DEFAULTS = {
   surfaceEffect: 0.55,   // 舵角に対する迎角の変化率（薄翼理論の目安）
   flapEffect: 0.35,      // フラップは面積が小さいので効きも小さい（全開でCl+0.85ほど）
   fuselageCd: 1.00,      // 胴体の抗力係数（前面投影面積基準）
+  gearCd: 1.00,          // 出した脚の抗力係数（gearDragArea 基準）
   fuselageSideCd: 0.80,  // 横滑りしたときの側面抗力
   propDecay: 0.75,       // 推力の速度低下。最高速度で静止推力の(1-この値)倍になる
+  // 水平安定板の可動角。トリムは**安定板まるごとの取付角**を動かすもので、
+  // 尾部に蝶番で付いたエレベーターとは別に効く（stabTrimRad 参照）。
+  stabTrimDeg: 8,
+  // 翼弦方向の減衰。翼が回れば、前縁と後縁で気流の当たる角度が変わる——
+  // その差が回転を止める向きの力になる（実機の Cmq）。平板の薄翼理論で
+  // Cmq = -π/4（翼弦・速度で無次元化）なので、モーメントは -(π/16)·ρ·V·S·c²·q。
+  pitchDamp: Math.PI / 16,
+  // 舵で増えたぶんの揚力が、翼の空力中心よりどれだけ後ろに掛かるか（翼弦に対する割合）。
+  // 蝶番より後ろだけがひねられるので、増えたぶんの圧力中心は空力中心（前縁から1/4）
+  // より後ろに来る。薄翼理論で 25%弦のフラップだと 0.45〜0.5弦あたり。
+  hingeArmChord: 0.25,
 };
 
 // 舵面が「その翼のどれだけを占めるか」。
@@ -36,11 +48,20 @@ const AERO_DEFAULTS = {
 // まるごと11°ひねる」ことになり、ロールが実機の5倍以上速くなる。
 // 実際そうなっていて、内蔵の練習機が毎秒310°（実機の6倍）で転がっていた。
 // 数字は内蔵機（セスナ172くらいの機体）が実機並みの毎秒60°前後で転がるように合わせてある。
+// ピッチの静安定はここを下回ったら「無い」と見なす（%MAC）。実測で、0%の機体は
+// 自動操縦でも姿勢が発散して飛ばせず、9%あれば同じ設定のまま着陸できた。
+const AC_MIN_STATIC_MARGIN_PCT = 3;
+
 const CONTROL_SPAN_FRACTION = {
   elevator: 1.00,  // 水平尾翼の全幅
   rudder: 1.00,    // 垂直尾翼の全高
   aileron: 0.20,   // 外翼の一部だけ
   spoiler: 0.20,
+  // エレボン（水平尾翼を持たない機体が主翼の後ろでピッチを取る舵）。
+  // エルロンより広く取る——ロールのついでではなく、ピッチの主舵だから。
+  // ここを1.00（翼まるごと）にすると舵だけで失速角を越えて**効きが逆になり**、
+  // 0.20（エルロン並み）だと引き起こしに実測304kt要って離陸できない。
+  elevon: 0.35,
 };
 
 // --- 小さなベクトル道具 -------------------------------------------------------
@@ -208,6 +229,47 @@ function applyVtolTrim(engines) {
   for (const e of rear) e.trimScale = kRear;
 }
 
+// 前へ進むエンジンが全開のときに出るピッチモーメント（重心まわり）。
+// 05e-pitch-balance.js の pbEngineMoment と同じ式。
+function enginePitchMoment(engines, useTilt) {
+  let total = 0;
+  for (const e of engines) {
+    if (e.lift) continue;
+    const a = useTilt ? e.axis : e.axisNoTilt;
+    const fy = a.y * e.thrustN, fz = a.z * e.thrustN;
+    total += e.position.y * fz - e.position.z * fy;
+  }
+  return total;
+}
+
+// **エンジンの取付角は「推力のずれを打ち消す」ためのもの**——だから、
+// 打ち消すどころか増やす取付角は、取付角ではなく壊れた数値である。
+//
+// この判定が要るのは、取付角を書き込むのが人ではなく Builder の
+// 「空力バランスを整える」ボタンだから。あのボタンは重心まわりの
+// モーメントを解いて rotation.x を書くが、modelTransform でまるごと
+// 反転させた機体（実際に来た Boeing 747）では腕の前後が逆に出ていて、
+// **ちょうど符号だけ逆の答え**を保存していた（打ち消す角は-22.2°、
+// 保存されていたのは+22.2°）。ボタン側は直したが、そのころ保存した
+// 機体ファイルには誤った角度が焼き付いたまま残る。
+//
+// 実測（747）：取付角0で推力モーメント2.94MN·m、+22.22°では5.45MN·mと
+// **倍**になり、地上では尻もちをついて滑走路にめり込み、空中では
+// エレベーターを一杯に当てても頭が上がり続けて離陸フェーズから出られなかった。
+// 角度の大小ではなく「モーメントを減らすか増やすか」だけで見るので、
+// 正しく解けている機体（TB2の10.62°＝87.96MN·m→0）はそのまま残る。
+function dropHarmfulEngineTilt(engines) {
+  const withTilt = enginePitchMoment(engines, true);
+  const without = enginePitchMoment(engines, false);
+  if (Math.abs(withTilt) <= Math.abs(without)) return false;
+  for (const e of engines) {
+    if (e.lift) continue;
+    e.axis.copy(e.axisNoTilt);
+    e.tiltIgnored = true;
+  }
+  return true;
+}
+
 // --- 飛行モデルを組み立てる ---------------------------------------------------
 
 // config は Builder の保存レコード（またはportable config）と同じ形:
@@ -281,6 +343,7 @@ function buildAircraftModel(config) {
       // 舵の効き。舵面を割り当てるときに埋める
       pitch: 0, roll: 0, yaw: 0, flap: 0,
     };
+    surf.alphaGain = surfaceAlphaGain(surf);
     surfaces.push(surf);
     wingById.set(w.part.id, surf);
   }
@@ -346,6 +409,13 @@ function buildAircraftModel(config) {
     // 取り付ければ、見た目どおり推力もその向きへ出る（傾けても真後ろへ推力を
     // 出し続ける機体になっていた）。
     const r = p.rotation || {};
+    // 取付角（rotation.x）を抜いた向きも作っておく。壊れた取付角を捨てるのに使う
+    // （dropHarmfulEngineTilt 参照）。
+    const axisNoTilt = axis.clone();
+    if (r.y || r.z) {
+      axisNoTilt.applyEuler(new THREE.Euler(0,
+        THREE.MathUtils.degToRad(r.y || 0), THREE.MathUtils.degToRad(r.z || 0)));
+    }
     if (r.x || r.y || r.z) {
       axis.applyEuler(new THREE.Euler(
         THREE.MathUtils.degToRad(r.x || 0),
@@ -361,10 +431,12 @@ function buildAircraftModel(config) {
       position: acVec(p.position || {}).applyMatrix4(modelMat).applyQuaternion(qFix).sub(cg),
       // 向きの正規化ぶんだけ回しておく
       axis: axis.applyQuaternion(qFix).normalize(),
+      axisNoTilt: axisNoTilt.applyQuaternion(qFix).normalize(),
       thrustN: Math.max((p.props && p.props.thrustKgf) || 0, 0) * 9.80665,
     };
   }).filter((e) => e.thrustN > 0);
   applyVtolTrim(engines);
+  const engineTiltIgnored = dropHarmfulEngineTilt(engines);
 
   // 5) 着陸脚の接地点。
   //    Builderの「地面にフィット」は脚の先端がモデル座標のY=0に来るように作るので、
@@ -411,11 +483,16 @@ function buildAircraftModel(config) {
     // 前面 0.022×翼面積（Cd=1.0）で、翼面積基準の有害抗力係数が 0.02 前後になる。
     fuselageFrontArea: Math.max(0.022 * wingArea, 0.15),
     fuselageSideArea: Math.max(0.10 * wingArea, 0.6),
+    // 出した脚の前面投影。実機の旅客機は脚を出すと有害抗力がほぼ倍になるので、
+    // 胴体の前面（0.022×翼面積）と同じくらいの大きさに取る。
+    gearDragArea: 0.020 * wingArea,
     totalThrustN: engines.reduce((a, e) => a + (e.lift ? 0 : e.thrustN), 0),
     // 前後バランスで絞ったぶんを差し引いた「実際に使える」垂直推力
     vtolThrustN: engines.reduce((a, e) => a + (e.lift ? e.thrustN * e.trimScale : 0), 0),
     vtolThrustNRaw: engines.reduce((a, e) => a + (e.lift ? e.thrustN : 0), 0),
     hasVtol: engines.some((e) => e.lift),
+    // 壊れた取付角を捨てたか（性能診断に出す）
+    engineTiltIgnored,
     // 車輪の高さ（接地点が重心からどれだけ下か）
     gearHeight: contacts.length ? -Math.min(...contacts.map((c) => c.position.y)) : 1,
   };
@@ -425,6 +502,30 @@ function buildAircraftModel(config) {
 // 左右に分かれた板1枚ではなく、つながった翼ぜんぶの翼幅で測る。
 // 片翼だけで span²/面積 を出すと実際のアスペクト比の半分になり、
 // 誘導抗力が2倍になって、まともに飛ばない機体ができあがる。
+// 機体の迎角が1°増えたとき、その翼が感じる迎角は何度増えるか。
+//
+// 飛行モデルは「翼幅方向に流れるぶんは揚力に効かない」として落としている
+// （後退角のある翼を素直に扱うための、実機の後退翼理論と同じ考え方）。ところが
+// 落とすと前向き成分 u が cosΛ ぶん縮むので、**残った流れの迎角は機体の迎角より
+// 大きく出る**。揚力そのものはこれで合っているが、失速の判定までその見かけの
+// 迎角で行うと、後退角が強い翼ほど早く失速することになる——実測で、後退49°の
+// Concorde は機体の迎角6°で翼が15.6°を感じ、7°あたりで失速していた。
+// 実機のデルタ翼はむしろ深い迎角まで粘るので、これは明らかに行き過ぎ。
+// 失速角は「機体の迎角で何度か」で決めたいので、その倍率をここで測っておき、
+// 失速の判定にだけ掛ける（10-flight.js の stallLimit）。
+function surfaceAlphaGain(s) {
+  const at = (deg) => {
+    const r = THREE.MathUtils.degToRad(deg);
+    const local = new THREE.Vector3(0, -Math.sin(r), -Math.cos(r));
+    local.addScaledVector(s.spanA, -local.dot(s.spanA));
+    const u = local.dot(s.fwd), w = local.dot(s.up);
+    return Math.atan2(-w, Math.abs(u) < 1e-9 ? 1e-9 : u);
+  };
+  const d = THREE.MathUtils.degToRad(1);
+  const gain = (at(1) - at(-1)) / (2 * d);
+  return THREE.MathUtils.clamp(Math.abs(gain), 1, 4);
+}
+
 function applyGroupAspect(surfaces) {
   for (const role of ['main', 'htail', 'vtail']) {
     const group = surfaces.filter((s) => s.role === role);
@@ -451,7 +552,18 @@ function ensureDefaultControls(surfaces) {
 
   if (!has('pitch')) {
     const tails = surfaces.filter((s) => s.role === 'htail');
-    for (const s of (tails.length ? tails : surfaces.filter((s) => s.role === 'main'))) s.pitch -= g;
+    if (tails.length) {
+      for (const s of tails) s.pitch -= g;
+    } else {
+      // 水平尾翼が無い機体は主翼の後ろでピッチを取る＝エレボン。エルロンと同じで
+      // **翼の一部にしか付かない**ので、翼まるごとをひねる扱いにしてはいけない。
+      // 全幅ぶん（15.4°）当てると主翼が舵だけで失速角を越え、**舵が逆に効く**——
+      // 実測で Concorde が迎角6°から「機首下げ」を当てると +1.22MN·m の機首上げに
+      // 反転し、離陸のたびに背面へ回っていた。
+      for (const s of surfaces.filter((s) => s.role === 'main')) {
+        s.pitch -= g * CONTROL_SPAN_FRACTION.elevon;
+      }
+    }
   }
   if (!has('yaw')) {
     for (const s of surfaces.filter((s) => s.role === 'vtail')) s.yaw += g;
@@ -461,6 +573,43 @@ function ensureDefaultControls(surfaces) {
     for (const s of surfaces.filter((s) => s.role === 'main' && s.side !== 'center')) {
       s.roll += g * CONTROL_SPAN_FRACTION.aileron * (s.side === 'left' ? 1 : -1);
     }
+  }
+  assignTrimAuthority(surfaces);
+}
+
+// トリムがどの翼をどれだけ動かすか。
+//
+// **水平尾翼を持つ機体では、トリムは安定板まるごとの取付角を動かす**——実機の
+// 旅客機がそうで、離着陸のたびに安定板を数度ずつ振り直している。ここを
+// 「エレベーターと同じ舵に足すだけ」にしていたせいで、ピッチの効きの総量が
+// エレベーターの舵角ぶんで頭打ちになっていた。実測（Boeing 747）で、
+// 主翼と水平尾翼の取付角から迎角0でも +9.4MN·m の機首上げが出るのに対し、
+// エレベーターは全部倒しても ±7.5MN·m しか出せず、**どの速度でも水平飛行の
+// 釣り合いが取れない**（離陸すると頭が上がり続け、失速して落ちる）機体になっていた。
+// 安定板まで動かせれば釣り合う。
+//
+// 尾翼を持たない機体（エレボンのデルタ翼など）はこれまでどおり、トリムは
+// エレベーターと同じ舵を動かす。動かせる安定板がそもそも無いのだから。
+function assignTrimAuthority(surfaces) {
+  const stab = THREE.MathUtils.degToRad(AERO_DEFAULTS.stabTrimDeg);
+  for (const s of surfaces) {
+    s.trimAuth = s.pitch;
+    // trimHinged … トリムが「エレベーターと同じ蝶番の舵」を動かすのか、
+    // 「安定板まるごと」を動かすのか。前者は舵と同じで空力中心の後ろに力が
+    // 掛かる（hingeArmChord）、後者は翼まるごとの取付角が変わるだけなので
+    // 空力中心にそのまま掛かる。ここを取り違えると、エレボンしか無い機体で
+    // **トリムがピッチにまったく効かなくなる**（実測でConcordeが
+    // 「舵に腕が無い（no_elevator）」と診断され、トリムが端まで巻いたまま
+    // 何も起きなかった）。
+    s.trimHinged = true;
+  }
+  // 安定板はエレベーターより効く（蝶番の先だけでなく翼まるごとが動くので）。
+  // エレベーターの効きを下回らせない——下回らせると、これまで飛べていた機体の
+  // トリムだけが弱くなってしまう。
+  for (const s of surfaces) {
+    if (s.role !== 'htail' || Math.abs(s.pitch) < 1e-6) continue;
+    s.trimAuth = Math.sign(s.pitch) * Math.max(Math.abs(s.pitch), stab);
+    s.trimHinged = false;
   }
 }
 
@@ -617,7 +766,12 @@ function analyzeAircraftPerformance(model) {
     const qL = 0.5 * rho * liftoffMps * liftoffMps;
     for (const s of model.surfaces) {
       if (Math.abs(s.pitch) < 1e-6) continue;
-      elevatorPower += qL * s.area * 2 * Math.PI * Math.abs(s.pitch) * Math.abs(s.center.z);
+      // 腕は「重心からの前後距離」だけではない。舵で増えたぶんの揚力は
+      // その翼自身の空力中心より後ろに掛かるので、重心の真上にある翼でも
+      // 翼弦ぶんの腕を持つ（10-flight.js の hingeArmChord）。ここを入れないと、
+      // 尾翼を持たないデルタ機の舵の効きを 0 と報告してしまう。
+      const arm = Math.abs(s.center.z) + AERO_DEFAULTS.hingeArmChord * s.chord;
+      elevatorPower += qL * s.area * 2 * Math.PI * Math.abs(s.pitch) * arm;
     }
   }
 
@@ -677,10 +831,18 @@ function analyzeAircraftPerformance(model) {
         + `狭いほうへ傾きます。ミラー複製した脚のX位置が反転しているか確かめてください。` });
     }
   }
-  if (staticMarginPct < 0) {
-    notes.push({ level: 'warn', text:
-      `重心が翼より後ろにあり、ピッチが不安定です（静安定 ${staticMarginPct.toFixed(0)}% MAC）。`
-      + `重心を前へ出すか、水平尾翼を大きくしてください。` });
+  if (staticMarginPct < AC_MIN_STATIC_MARGIN_PCT) {
+    // **静安定が0%付近の機体は、舵が効いても飛ばせない**。いちど機首が動くと
+    // 戻す力がまったく無いので、自動操縦でも手動でも、当てた舵をそのぶん
+    // きっちり戻さないかぎり姿勢が発散する。実測で、静安定0%のConcordeは
+    // 巡航へ移った20秒後に迎角142°まで回って墜ち、重心を0.6m前へ出して
+    // 静安定を9%にしただけで、同じ自動操縦のまま518秒で着陸できた。
+    notes.push({ level: 'error', text:
+      `ピッチが不安定です（静安定 ${staticMarginPct.toFixed(0)}% MAC、ふつうは5〜20%）。`
+      + `主翼の揚力がかかる点に重心がぴったり乗っているか、それより後ろにあります。`
+      + `いちど機首が動くと戻す力が出ないので、舵が効いても姿勢を保てません。`
+      + `Builderの重心設定にある「空力バランスを整える」を押すか、重心を主翼より`
+      + `少し前へ出してください（水平尾翼を大きくしても同じ効果があります）。` });
   } else if (staticMarginPct > 60) {
     notes.push({ level: 'warn', text:
       `安定しすぎです（静安定 ${staticMarginPct.toFixed(0)}% MAC、ふつうは5〜20%）。`
