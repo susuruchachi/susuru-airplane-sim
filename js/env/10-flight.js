@@ -291,6 +291,54 @@ const _gv = {
   tmp: new THREE.Vector3(), up: new THREE.Vector3(0, 1, 0),
 };
 
+// 数値的に持つ範囲の上限。接地のばねは陽解法で積分しているので、
+// 固有振動数ωと刻みdtの積が大きすぎると弾け飛ぶ。実測では
+// ω·dt=0.44までは静かなまま、0.70で84G、2.22で1176G・上下90m/sまで暴れた。
+const GEAR_STABLE_WDT = 0.5;
+
+// 脚のばねの硬さ。静止時に GEAR_SQUASH_M だけ沈む硬さを基本にする。
+//
+// **「脚が受け止める荷重」で決める。推力そのものではない。**
+// 脚が支えるのは重さだけではない——推力の作用線が重心からずれていれば、
+// そのモーメントも脚が押し返して支えることになる（内蔵機ならエンジンは
+// 重心の20cm上にあり、推力が重さの14倍もあると機首下げのモーメントで
+// 前脚が潰れ、機首が滑走路にめり込んでいた）。
+// だからといって**推力の大きさをそのまま硬さにしてはいけない**。
+// モーメントの腕（重心からのずれ）と脚の間隔しだいで、実際に脚へ来る力は
+// 推力よりずっと小さいことがあるからで、そこを取り違えると
+// 軽い機体に大推力を積んだ瞬間にばねが桁違いに硬くなる。
+// 硬すぎるばねは1/240秒の刻みでは積分が持たず、**置いただけで弾け飛ぶ**
+// （実測：1トンの機体で推力を10倍にしたら接地した瞬間に84G、
+// 100倍では1176G・上下90m/sで跳ね回った）。
+//
+// 支えるべき荷重は「重さ ＋ 推力のモーメント ÷ 脚の間隔」。
+// モーメントの腕は、前へ進むエンジンなら重心からの上下のずれ、
+// 垂直離陸用エンジンなら前後のずれ（推力の向きが90°違う）。
+// 脚1本あたりで見るので、脚の本数ぶんを掛ける。
+function gearDesignLoadN(model) {
+  const weight = model.massKg * FLIGHT_GRAVITY;
+  let moment = 0;
+  for (const e of (model.engines || [])) {
+    moment += Math.abs(e.thrustN * (e.lift ? e.position.z : e.position.y));
+  }
+  if (!(moment > 0)) return weight;
+  // 脚の前後の広がり（モーメントを受け止める腕の長さ）
+  let lo = Infinity, hi = -Infinity;
+  for (const c of model.contacts) { lo = Math.min(lo, c.position.z); hi = Math.max(hi, c.position.z); }
+  const base = Math.max(hi - lo, 0.5);
+  return weight + model.contacts.length * (moment / base);
+}
+
+function gearSpringRate(model) {
+  const n = Math.max(model.contacts.length, 1);
+  const k = gearDesignLoadN(model) / (GEAR_SQUASH_M * n);
+  // どれだけ荷重が大きくても、刻みで積分できる硬さを超えさせない。
+  // ここで頭打ちになると設計より深く沈むが、弾け飛ぶよりはるかにましで、
+  // 「沈む」ほうは見た目が少し埋まるだけで済む。
+  const kMax = Math.pow(GEAR_STABLE_WDT / FLIGHT_SUBSTEP, 2) * (model.massKg / n);
+  return Math.min(k, kMax);
+}
+
 // 脚ごとにばねと摩擦を出す。力は機体座標で返す（空力と同じ入れ物に足せるように）。
 function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
   state.contactCount = 0;
@@ -299,19 +347,7 @@ function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
   const q = state.quaternion;
   const qInv = _fv.qInv.copy(q).invert();
   const n = model.contacts.length;
-  // 脚のばねの硬さは「その機体に掛かる力の大きさ」で決める。
-  //
-  // **重さだけで決めてはいけない**。脚が受け止めるのは重さだけではなく、
-  // そのとき機体に掛かっている力ぜんぶ。推力が重さの何倍もある機体
-  // （サンダーバードのような）は、推力の作用線が重心より上にあるぶん
-  // 機首下げのモーメントが出る（内蔵機ならエンジンは重心の20cm上）。
-  // それを止めるには前脚が重さの数倍の力で押し返す必要があるが、
-  // 重さぶんの硬さしかないばねでは60cm以上沈まないとその力が出ず、
-  // 機首が滑走路にめり込んでいた（実測：推力/重量14倍でピッチ-90°、
-  // 機体が地面下22mまで沈んだ）。推力も見て硬さを決める。
-  // 推力が重さ以下のふつうの機体では、これまでとまったく同じ値になる。
-  const designLoadN = Math.max(model.massKg * FLIGHT_GRAVITY, model.totalThrustN || 0);
-  const kSpring = designLoadN / (GEAR_SQUASH_M * n);
+  const kSpring = gearSpringRate(model);
   const cDamp = 2 * Math.sqrt(kSpring * (model.massKg / n)) * 0.9;
 
   const steerRad = THREE.MathUtils.degToRad(GEAR_STEER_MAX_DEG) * controls.yaw
@@ -335,8 +371,10 @@ function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
     const vNormal = vel.y;
     let normal = kSpring * pen - cDamp * vNormal;
     if (normal < 0) normal = 0;
-    // 沈みすぎたときに弾き飛ばさないよう上限を置く（こちらも designLoadN 基準）
-    normal = Math.min(normal, designLoadN * 8);
+    // 沈みすぎたときに弾き飛ばさないよう上限を置く。ばねが GEAR_SQUASH_M の
+    // 8倍まで縮んだぶん＝そのばねで出せる力の8倍を上限にする（硬さと同じ基準で
+    // 決まるので、重い機体でも大推力の機体でも自動で釣り合う）。
+    normal = Math.min(normal, kSpring * GEAR_SQUASH_M * 8);
 
     // 車輪の向き（機体の前方を地面へ落とし、前輪なら舵角ぶん回す）
     const fwd = _gv.fwd.set(0, 0, -1);

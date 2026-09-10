@@ -2231,7 +2231,10 @@ function autopilotFlight(opts) {
   const naiveResult = flyAndCheckCrash(brokenModel, naive);
   note('前脚が浮いた機体：水平に置いただけ',
     `${naiveResult.crashed ? '墜落' : '無事'}（最大${naiveResult.maxG.toFixed(1)}G）`);
-  check(naiveResult.crashed, 'この機体は、実際に水平へ決め打ちで置くと墜落する（テストが効いている確認）',
+  // 水平に決め打ちで置くと、浮いた脚が地面に届くまで落ちて弾む。
+  // 墜落判定（12G）に届くかどうかは機体しだいなので、ここでは
+  // 「静定しなければ確かに強く弾む」ことだけを確かめる（テストが効いている確認）。
+  check(naiveResult.maxG > 4, 'この機体は、水平へ決め打ちで置くと接地で強く弾む（テストが効いている確認）',
     `${naiveResult.maxG.toFixed(1)}G`);
 
   const settled = createFlightState();
@@ -2245,6 +2248,35 @@ function autopilotFlight(opts) {
     `${settledResult.maxG.toFixed(1)}G`);
   check(settledResult.maxG < naiveResult.maxG * 0.5, '衝撃そのものも大きく減っている',
     `${settledResult.maxG.toFixed(1)}G < ${(naiveResult.maxG * 0.5).toFixed(1)}G`);
+
+  // --- 軽い機体に大推力を積んでも、脚のばねが硬くなりすぎて弾け飛ばない ---
+  //
+  // 脚のばねの硬さを「推力そのもの」で決めていたときは、1トン級の軽い機体に
+  // 大推力を積んだ瞬間にばねが桁違いに硬くなり、1/240秒の刻みでは積分が持たず、
+  // 滑走路に置いただけで弾け飛んでいた（実測：推力10倍で84G、100倍では
+  // 1176G・上下90m/s）。「最高速度を上げてエンジン出力もそれに合わせたら
+  // もっとひどく弾む」という報告がこれ。
+  // 脚が実際に受け止めるのは推力そのものではなく「推力のモーメント÷脚の間隔」
+  // なので、そちらで硬さを決める（gearDesignLoadN）。
+  {
+    const rows = [];
+    for (const mul of [1, 10, 100, 1000]) {
+      const lightCfg = defaultAircraftConfig();
+      lightCfg.name = `軽量大推力機×${mul}`;
+      for (const p of lightCfg.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 60 * mul;
+      const lm = buildAircraftModel(lightCfg);
+      const tw = lm.totalThrustN / (lm.massKg * FLIGHT_GRAVITY_FOR_TEST);
+      const st = createFlightState();
+      placeAircraftOnGround(lm, st, 0, 0, 90, flatGround);
+      settleAircraftOnGround(lm, st, flatGround);
+      const r = flyAndCheckCrash(lm, st);
+      rows.push(`T/W${tw.toFixed(0)}:${r.maxG.toFixed(1)}G`);
+      check(!r.crashed && r.maxG < 3,
+        `推力/重量${tw.toFixed(0)}倍でも、滑走路に置いただけで弾け飛ばない`,
+        `${r.crashed ? '墜落 ' : ''}最大${r.maxG.toFixed(1)}G`);
+    }
+    note('軽い機体に大推力', rows.join('  ') + '（以前は推力10倍で84G、100倍で1176G）');
+  }
 
   // 素直な脚（内蔵の練習機・さっきの大型機そのもの）では、静定してもほとんど動かない
   const plainModel = buildAircraftModel(defaultAircraftConfig());
