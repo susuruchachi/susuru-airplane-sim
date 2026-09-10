@@ -52,10 +52,12 @@ function collectEnvSnapshot() {
       cgOffsets: EnvState.flight.cgOffsets,
       touchControls: document.body.classList.contains('touch-controls'),
       // 自動操縦は入切そのものは保存しない（次に開いたとき勝手に飛び出さないように）。
-      // 目的地と目標高度だけを覚えておく。
+      // 目的地・目標高度・垂直離着陸を使うかどうかだけを覚えておく。
       autopilot: EnvState.flight.autopilot ? {
         targetAltitudeM: EnvState.flight.autopilot.targetAltitudeM,
         destAirportId: EnvState.flight.autopilot.destAirportId,
+        vtolTakeoff: !!EnvState.flight.autopilot.vtolTakeoff,
+        vtolLanding: !!EnvState.flight.autopilot.vtolLanding,
       } : null,
     },
     selectedAirportId: EnvState.selectedAirportId,
@@ -177,6 +179,8 @@ function applyFlightSnapshot(flight) {
         && worldAirportById(flight.autopilot.destAirportId)) {
       ap.destAirportId = flight.autopilot.destAirportId;
     }
+    if (typeof flight.autopilot.vtolTakeoff === 'boolean') ap.vtolTakeoff = flight.autopilot.vtolTakeoff;
+    if (typeof flight.autopilot.vtolLanding === 'boolean') ap.vtolLanding = flight.autopilot.vtolLanding;
     if (typeof updateAutopilotUI === 'function') updateAutopilotUI();
     const sel = document.getElementById('envApDestination');
     if (sel) sel.value = ap.destAirportId || '';

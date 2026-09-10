@@ -1721,6 +1721,81 @@ function autopilotFlight(opts) {
     `${ap.phase} / ${t.toFixed(0)}秒`);
 }
 
+// --- 自動操縦：垂直離着陸を選んでオンオフできる ------------------------------------
+//
+// 垂直離着陸用エンジンを持つ機体で、離陸・着陸それぞれを独立に「滑走路を使う
+// ふつうの離着陸」と「真上へ上がる／真下へ降りる垂直離着陸」に切り替えられる。
+// takeoff→vtol_takeoff→vtol_transition→climb で離陸を、
+// approach→flare→rollout→done の代わりに vtol_approach→vtol_descent→
+// vtol_touchdown→done で着陸をやり直す。既存の巡航・降下はそのまま使う。
+{
+  const vtolEngine = (id, x, z) => ({
+    id, type: 'engine', name: '垂直' + id, position: { x, y: 1.05, z }, rotation: { x: 0, y: 0, z: 0 },
+    scale: { x: 1, y: 1, z: 1 }, props: { thrustKgf: 900, spinAxis: 'y' },
+  });
+  const vtolConfig = () => {
+    const cfg = defaultAircraftConfig();
+    cfg.parts = cfg.parts.concat([
+      vtolEngine('1', -1, -1.5), vtolEngine('2', 1, -1.5),
+      vtolEngine('3', -1, 1.5), vtolEngine('4', 1, 1.5),
+    ]);
+    return cfg;
+  };
+  const model = buildAircraftModel(vtolConfig());
+  check(model.hasVtol, '垂直離着陸用エンジンを積んだ機体だと分かる');
+  check(model.vtolThrustN > model.massKg * 9.80665, '積んだ推力で自重を持ち上げられる',
+    `推力/重量 ${(model.vtolThrustN / (model.massKg * 9.80665)).toFixed(2)}`);
+
+  function runVtolRoute(vtolTakeoff, vtolLanding) {
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(model, st, 0, 0, 90, flatGround);
+    const ap = createAutopilotState();
+    ap.vtolTakeoff = vtolTakeoff; ap.vtolLanding = vtolLanding;
+    ap.full = true; ap.targetAltitudeM = 1500; ap.destAirportId = 'DST';
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 40000, z: 40000, elevationM: 0 },
+      { runwayLengthM: 2400, headingDeg: 0 }, 0);
+    ap.takeoffHeadingDeg = 90;
+    ap.phase = vtolTakeoff ? 'vtol_takeoff' : 'takeoff';
+    let t = 0; const seen = []; let prev = '';
+    while (t < 1800) {
+      stepAutopilot(model, st, c, ap, 1 / 60, {});
+      advanceFlight(model, st, c, noWind, flatGround, 1 / 60);
+      t += 1 / 60;
+      if (ap.phase !== prev) { prev = ap.phase; seen.push(prev); }
+      if (ap.phase === 'done' || st.crashed) break;
+    }
+    return { st, ap, t, seen };
+  }
+
+  const both = runVtolRoute(true, true);
+  note('自動操縦：垂直離着陸（両方）', `${both.seen.join('→')} ${both.t.toFixed(0)}秒`);
+  check(both.seen.includes('vtol_takeoff') && both.seen.includes('vtol_transition'),
+    '垂直離陸をオンにすると、その手順を通る');
+  check(both.seen.includes('vtol_approach') && both.seen.includes('vtol_descent')
+    && both.seen.includes('vtol_touchdown'),
+    '垂直着陸をオンにすると、その手順を通る');
+  check(both.ap.phase === 'done' && !both.st.crashed, '垂直離着陸だけで、離陸から着陸まで通せる',
+    `${both.ap.phase} / ${both.t.toFixed(0)}秒`);
+
+  const takeoffOnly = runVtolRoute(true, false);
+  check(takeoffOnly.seen.includes('vtol_takeoff') && takeoffOnly.seen.includes('flare')
+    && !takeoffOnly.seen.includes('vtol_approach'),
+    '垂直離陸だけオンにすると、離陸は垂直・着陸はふつうの滑走路になる',
+    takeoffOnly.seen.join('→'));
+  check(takeoffOnly.ap.phase === 'done' && !takeoffOnly.st.crashed, '垂直離陸のみでも通しで飛べる');
+
+  const landingOnly = runVtolRoute(false, true);
+  check(landingOnly.seen.includes('takeoff') && landingOnly.seen.includes('vtol_descent')
+    && !landingOnly.seen.includes('vtol_takeoff'),
+    '垂直着陸だけオンにすると、離陸はふつうの滑走路・着陸は垂直になる',
+    landingOnly.seen.join('→'));
+  check(landingOnly.ap.phase === 'done' && !landingOnly.st.crashed, '垂直着陸のみでも通しで飛べる');
+
+  // 垂直離着陸用エンジンが無い機体では、チェックを入れても通常運用のまま
+  const plain = buildAircraftModel(defaultAircraftConfig());
+  check(!plain.hasVtol, '垂直離着陸用エンジンが無い機体だと分かる');
+}
+
 // --- 自動操縦：最高速度が桁外れな機体でも旋回できるか ------------------------------
 //
 // フィクションの超音速機には最高速度に「マッハ21」のような桁外れな値が

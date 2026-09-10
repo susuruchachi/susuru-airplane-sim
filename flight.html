@@ -318,6 +318,19 @@ body.touch-controls #hudHelp { display:none; }
 
       <div class="env-row" style="margin-top:12px;"><label>目的地の空港</label></div>
       <select id="envApDestination"></select>
+
+      <div class="env-row" style="margin-top:10px;">
+        <label for="envApVtolTakeoff">垂直離陸</label>
+        <input type="checkbox" id="envApVtolTakeoff">
+      </div>
+      <div class="env-row">
+        <label for="envApVtolLanding">垂直着陸</label>
+        <input type="checkbox" id="envApVtolLanding">
+      </div>
+      <div class="hint" id="envApVtolHint" style="margin:2px 0 8px;">
+        垂直離着陸用エンジンを持つ機体だけ選べます。入れると滑走路を使わず、真上へ上がって／真下へ降りて発着します。
+      </div>
+
       <button id="envBtnApFull" class="primary" style="margin-top:8px;">🛫 全自動で離陸〜着陸（I）</button>
       <div class="env-note" style="margin-top:6px;"><span id="envApReadout">—</span></div>
       <div class="hint" style="margin-top:4px;">

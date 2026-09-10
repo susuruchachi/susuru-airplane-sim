@@ -40,6 +40,58 @@ const AP_STEER_KP = 0.05;      // 地上：方位のずれ1°あたりの前輪
 const AP_PITCH_MAX = 15;       // 自動操縦が指示するピッチ角の上限(°)
 const AP_PITCH_MIN = -12;      //                            下限(°)
 
+// --- 垂直離着陸 ----------------------------------------------------------------
+//
+// 滑走路を使わない離陸・着陸。垂直離陸用エンジン（spinAxis='y'）を持つ機体だけ選べる。
+// 低速・無風速でのピッチ／ロールは、10-flight.js の accumulateVtolControl が
+// 姿勢制御ノズルとして拾ってくれる（前へ進むエンジンの舵とまったく同じ
+// controls.pitch/roll/yaw を使う——低速なら効くのがノズル、速度が乗れば効くのが
+// 舵面、というだけで、上のapElevatorForPitch/apAileronForBankはどちらの場合も
+// そのまま使い回せる）。ここで新しく要るのは、水平方向へ移動するための
+// 「わざと少し傾ける」制御と、垂直エンジンの出力そのものの制御だけ。
+const AP_VTOL_CLIMB_MPS = 3;     // 垂直離陸で目指す上昇率(m/s)。姿勢制御の効く範囲でゆっくり
+const AP_VTOL_SINK_KP = 0.15;    // 垂直着陸：残り高度1mあたりの目標沈下率(m/s)
+const AP_VTOL_SINK_MAX = 3;      // 垂直着陸：目標沈下率の上限(m/s)
+const AP_VTOL_VS_KP = 0.20;      // 昇降率のずれ1m/sあたり、毎秒どれだけ垂直エンジン出力を動かすか
+const AP_VTOL_TRANSITION_AGL_M = 30; // これより高く上がったら、前へ進むエンジンへ切り替え始める
+const AP_VTOL_HOVER_AGL_M = 80;  // 着陸時、この高さまで来たら垂直降下に切り替える
+const AP_VTOL_HOVER_RADIUS_MIN_M = 300; // 着陸点からこの距離まで来たら垂直降下に切り替える（下限）
+const AP_VTOL_TILT_MAX = 10;     // ホバー中、水平移動のために傾ける角度の上限(°)
+const AP_VTOL_POS_KP = 0.08;     // 着地点までの距離1mあたり、何度傾けるか
+const AP_VTOL_VEL_KD = 1.6;      // 水平方向の速度1m/sあたり、何度戻すか
+
+// 垂直降下へ切り替えていい半径。300mを基本にしつつ、進入速度での旋回半径
+// （v²/(g·tanθ)）より広く取る——速い機体（サンダーバードのような）は進入速度でも
+// 旋回半径が数百m〜1km級になり、300m固定では旋回してもその内側に入れず、
+// 永遠に進入をやり直すだけになる（旋回半径のほうが広い円の外を回り続ける）。
+function apVtolHoverEngageRadius(spd) {
+  const turnRadius = (spd.approach * spd.approach) / (9.80665 * Math.tan(spd.bankMax * Math.PI / 180));
+  return Math.max(AP_VTOL_HOVER_RADIUS_MIN_M, turnRadius * 1.5);
+}
+
+// 垂直エンジンの出力を、目標の昇降率へ少しずつ近づける（apThrottleForSpeedと同じ形）
+function apVtolThrottleForVs(controls, currentVs, targetVs, dt) {
+  const err = targetVs - currentVs;
+  return apClamp((controls.vtolThrottle || 0) + err * AP_VTOL_VS_KP * dt, 0, 1);
+}
+
+// ホバー中に目標地点（世界座標）へ寄せるための、目標ピッチ角・バンク角。
+// 前へ進むエンジンとは無関係に、姿勢を少し崩して水平方向の推力成分を作る——
+// 実機のVTOL機と同じで、機首を下げれば前へ、右へ傾ければ右へ進む
+// （実測して符号を決めてある。ピッチは上げるほど後ろへ、ロールは
+// 右へ倒すほど右へ動く）。位置の誤差と速度の誤差、両方を見て収束させる。
+function apVtolHoverAngles(state, targetX, targetZ) {
+  const fwd = apForward(state.headingDeg), right = apRight(state.headingDeg);
+  const dx = targetX - state.position.x, dz = targetZ - state.position.z;
+  const along = dx * fwd.x + dz * fwd.z;   // +なら目標は前方
+  const cross = dx * right.x + dz * right.z; // +なら目標は右
+  const vAlong = state.velocity.x * fwd.x + state.velocity.z * fwd.z;
+  const vCross = state.velocity.x * right.x + state.velocity.z * right.z;
+  const pitchTilt = apClamp(along * AP_VTOL_POS_KP - vAlong * AP_VTOL_VEL_KD, -AP_VTOL_TILT_MAX, AP_VTOL_TILT_MAX);
+  const bankTilt = apClamp(cross * AP_VTOL_POS_KP - vCross * AP_VTOL_VEL_KD, -AP_VTOL_TILT_MAX, AP_VTOL_TILT_MAX);
+  return { wantPitchDeg: -pitchTilt, wantBankDeg: bankTilt };
+}
+
 // --- 経路の形 -----------------------------------------------------------------
 
 const AP_GLIDE_DEG = 3;        // 進入の降下角。実機と同じ3°
@@ -331,9 +383,14 @@ function createAutopilotState() {
     full: false,           // 離陸から着陸まで全自動
     targetAltitudeM: 1500,
     destAirportId: null,
-    phase: 'off',          // takeoff / climb / cruise / descent / approach / flare / rollout / done
+    // takeoff/climb/cruise/descent/approach/goaround/flare/rollout/done に加え、
+    // 垂直離着陸を選んだ機体では vtol_takeoff/vtol_transition（離陸）・
+    // vtol_approach/vtol_descent（着陸）も通る
+    phase: 'off',
     plan: null,            // apMakeApproachPlan の結果
     statusText: '',
+    vtolTakeoff: false,     // 垂直離陸用エンジンを持つ機体で、離陸を垂直で行うか
+    vtolLanding: false,     // 同じく、着陸を垂直で行うか
     // 表示用
     vsCmd: 0, targetHeadingDeg: 0, targetSpeedMps: 0, distanceM: 0,
   };
@@ -361,6 +418,49 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   const tz = plan ? plan.faf.z : state.position.z;
   const distFaf = Math.hypot(state.position.x - tx, state.position.z - tz);
   ap.distanceM = distFaf;
+
+  // ---- 垂直離陸：真上へ上がる -------------------------------------------------
+  if (ap.phase === 'vtol_takeoff') {
+    controls.throttle = 0;
+    controls.brake = 0;
+    controls.gearDown = true;
+    controls.flap = 0;
+    // 姿勢は水平のまま。方位は離陸したときの向きを保つ
+    // （accumulateVtolControlが低速でのピッチ/ロール/ヨーを姿勢制御ノズルとして拾う）
+    const err = apWrap180(ap.takeoffHeadingDeg - state.headingDeg);
+    controls.yaw = apClamp(err * AP_STEER_KP, -1, 1);
+    controls.pitch = apElevatorForPitch(state, controls, 0, dt);
+    controls.roll = apAileronForBank(state, 0);
+    controls.vtolThrottle = apVtolThrottleForVs(controls, state.verticalSpeed, AP_VTOL_CLIMB_MPS, dt);
+    if (state.altitudeAglM > AP_VTOL_TRANSITION_AGL_M) say('vtol_transition', '前進エンジンへ切替');
+    return;
+  }
+
+  // ---- 垂直離陸：前へ進むエンジンへ切り替えて加速 -------------------------------
+  if (ap.phase === 'vtol_transition') {
+    controls.gearDown = false;
+    controls.flap = 0;
+    const want = plan ? apBearingTo(state.position.x, state.position.z, tx, tz) : state.headingDeg;
+    ap.targetHeadingDeg = want;
+    controls.roll = apAileronForTrack(state, want, spd.bankMax);
+    controls.yaw = apRudderForCoordination(state);
+
+    controls.throttle = 1;
+    // 前へ進む速度が育つほど、垂直エンジンの出力を手放していく
+    // （0m/sでは全開、上昇フェーズへ渡す速さに達したら0——実際に検証した
+    // 手動操作の遷移と同じ形）。姿勢は少し機首下げにして加速を助ける。
+    controls.vtolThrottle = apClamp(1 - state.airspeed / Math.max(spd.climb, 1), 0, 1);
+    const want2 = apClamp(-6 * controls.vtolThrottle, -6, 0);
+    controls.pitch = apElevatorForPitch(state, controls, want2, dt);
+    ap.targetSpeedMps = spd.climb;
+    ap.vsCmd = state.verticalSpeed;
+
+    if (state.airspeed >= spd.climb || controls.vtolThrottle <= 0.01) {
+      controls.vtolThrottle = 0;
+      say('climb', '上昇');
+    }
+    return;
+  }
 
   // ---- 離陸滑走 -------------------------------------------------------------
   if (ap.phase === 'takeoff') {
@@ -440,7 +540,72 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     const onSlope = wantAlt < ap.targetAltitudeM - 1;
     ap.vsCmd = apVsForPath(state, wantAlt, onSlope ? AP_DESCENT_SLOPE : 0, apClimbCap(state, spd));
     controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt);
-    if (distFaf < 2500) say('approach', '最終進入');
+    if (distFaf < 2500) {
+      say(ap.vtolLanding && model.hasVtol ? 'vtol_approach' : 'approach',
+        ap.vtolLanding && model.hasVtol ? '最終進入（垂直着陸）' : '最終進入');
+    }
+    return;
+  }
+
+  // ---- 垂直着陸：着地点の上空へ寄せる（滑走路は要らないので中心線は気にしない） -----
+  if (ap.phase === 'vtol_approach') {
+    const want = apBearingTo(state.position.x, state.position.z, plan.threshold.x, plan.threshold.z);
+    ap.targetHeadingDeg = want;
+    controls.roll = apAileronForTrack(state, want, spd.bankMax);
+    controls.yaw = apRudderForCoordination(state);
+
+    const distToTouchdown = Math.hypot(
+      state.position.x - plan.threshold.x, state.position.z - plan.threshold.z);
+    ap.distanceM = distToTouchdown;
+
+    ap.targetSpeedMps = spd.approach;
+    controls.throttle = apThrottleForSpeed(state, controls, spd.approach, dt);
+    controls.gearDown = true;
+    controls.flap = 1;
+
+    // 中心線に乗せる必要が無いぶん、進入はずっと単純——垂直降下を始めていい
+    // 高さまでただ寄せるだけでいい
+    const hoverAltM = plan.elevationM + AP_VTOL_HOVER_AGL_M;
+    ap.vsCmd = apVsForAltitude(state, hoverAltM, apClimbCap(state, spd));
+    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt);
+
+    if (distToTouchdown < apVtolHoverEngageRadius(spd)) say('vtol_descent', '垂直降下');
+    return;
+  }
+
+  // ---- 垂直着陸：ホバーしながら真下へ降りる -------------------------------------
+  if (ap.phase === 'vtol_descent') {
+    controls.gearDown = true;
+    controls.flap = 1;
+    controls.throttle = 0; // 前へ進む推力は切る。速度は抗力任せで落ちていく
+
+    const hover = apVtolHoverAngles(state, plan.threshold.x, plan.threshold.z);
+    controls.pitch = apElevatorForPitch(state, controls, hover.wantPitchDeg, dt);
+    controls.roll = apAileronForBank(state, hover.wantBankDeg);
+    controls.yaw = apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP, -1, 1);
+
+    // 沈下率は残りの高さに比例させる（引き起こしと同じ考え方。高いうちは速く、近づくほどゆっくり）
+    const targetVs = -apClamp(state.altitudeAglM * AP_VTOL_SINK_KP, 0.3, AP_VTOL_SINK_MAX);
+    controls.vtolThrottle = apVtolThrottleForVs(controls, state.verticalSpeed, targetVs, dt);
+
+    if (state.onGround) { say('vtol_touchdown', '接地'); return; }
+    return;
+  }
+
+  // ---- 垂直着陸：接地して止まる -----------------------------------------------
+  if (ap.phase === 'vtol_touchdown') {
+    controls.throttle = 0;
+    controls.vtolThrottle = 0;
+    controls.pitch = apElevatorForPitch(state, controls, 0, dt);
+    controls.roll = apAileronForBank(state, 0);
+    controls.trim = 0;
+    controls.brake = 1;
+    if (state.groundSpeed < 1.5) {
+      controls.brake = 0;
+      controls.parkingBrake = true;
+      say('done', `${plan.airportId} に着陸しました`);
+      ap.full = false;
+    }
     return;
   }
 
@@ -613,7 +778,8 @@ function startFullAutopilot() {
   ap.full = true;
   ap.altHold = false;
   ap.takeoffHeadingDeg = f.state.headingDeg;
-  ap.phase = f.state.onGround ? 'takeoff' : 'cruise';
+  const vtolTakeoff = ap.vtolTakeoff && f.aircraft.model.hasVtol;
+  ap.phase = f.state.onGround ? (vtolTakeoff ? 'vtol_takeoff' : 'takeoff') : 'cruise';
   ap.statusText = f.state.onGround ? '離陸' : '巡航';
   announceFlight(`自動操縦：${dest.id} ${dest.name} へ — ${ap.statusText}`);
   updateAutopilotUI();
@@ -718,6 +884,17 @@ function setupAutopilotUI() {
     if (hold.checked !== flightAutopilot().altHold) toggleAltitudeHold();
   });
 
+  const vtolTakeoff = document.getElementById('envApVtolTakeoff');
+  if (vtolTakeoff) vtolTakeoff.addEventListener('change', () => {
+    flightAutopilot().vtolTakeoff = vtolTakeoff.checked;
+    onEnvSettingsChanged();
+  });
+  const vtolLanding = document.getElementById('envApVtolLanding');
+  if (vtolLanding) vtolLanding.addEventListener('change', () => {
+    flightAutopilot().vtolLanding = vtolLanding.checked;
+    onEnvSettingsChanged();
+  });
+
   const full = document.getElementById('envBtnApFull');
   if (full) full.addEventListener('click', () => {
     if (flightAutopilot().full) stopAutopilot();
@@ -738,6 +915,21 @@ function updateAutopilotUI() {
   if (altR) altR.textContent = Math.round(ap.targetAltitudeM).toLocaleString() + ' m';
   const btn = document.getElementById('envBtnApFull');
   if (btn) btn.textContent = ap.full ? '⏹ 自動操縦をやめる（I）' : '🛫 全自動で離陸〜着陸（I）';
+
+  // 垂直離着陸は、いまの機体に上向きエンジンがあるときだけ選べる
+  // （無い機体でチェックを入れさせても、離陸/着陸のときに黙って通常運用に戻るだけなので、
+  // ここで断っておいたほうが分かりやすい）。
+  const hasVtol = !!(EnvState.flight.aircraft && EnvState.flight.aircraft.model.hasVtol);
+  const vtolTakeoff = document.getElementById('envApVtolTakeoff');
+  if (vtolTakeoff) { vtolTakeoff.checked = ap.vtolTakeoff; vtolTakeoff.disabled = !hasVtol; }
+  const vtolLanding = document.getElementById('envApVtolLanding');
+  if (vtolLanding) { vtolLanding.checked = ap.vtolLanding; vtolLanding.disabled = !hasVtol; }
+  const vtolHint = document.getElementById('envApVtolHint');
+  if (vtolHint) {
+    vtolHint.textContent = hasVtol
+      ? '入れると滑走路を使わず、真上へ上がって／真下へ降りて発着します。'
+      : 'この機体には垂直離着陸用エンジンがありません。';
+  }
 
   const out = document.getElementById('envApReadout');
   if (out) out.textContent = autopilotStatusLine();
@@ -765,6 +957,8 @@ function autopilotStatusLine() {
 const AP_PHASE_LABEL = {
   takeoff: '離陸', climb: '上昇', cruise: '巡航', descent: '降下',
   approach: '進入', goaround: 'やり直し', flare: '接地', rollout: '減速', done: '着陸',
+  vtol_takeoff: '垂直離陸', vtol_transition: '前進切替',
+  vtol_approach: '進入（垂直）', vtol_descent: '垂直降下', vtol_touchdown: '接地',
 };
 
 function autopilotHudText() {
