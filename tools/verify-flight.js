@@ -43,7 +43,7 @@ const {
   airDensityAt, solveLevelTrim, vtolClimbSpeedLimit, accumulateAeroForces, refreshFlightReadouts,
   createAutopilotState, stepAutopilot, apSpeedSchedule, apMakeApproachPlan,
   apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo, apBankMaxFor,
-  apElevatorForPitch, apSurfaceGain,
+  apElevatorForPitch, apSurfaceGain, apBankLimit,
 } = ctx;
 
 let failures = 0;
@@ -980,6 +980,49 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
     (st.position.y - alt).toFixed(0) + 'm');
   check(Math.abs(st.pitchDeg) < 15, '手を離しても姿勢が暴れない', st.pitchDeg.toFixed(1) + '°');
 
+  // 速い機体でもトリムが解けること。
+  //
+  // 迎角→トリム→スロットルの順に解いて回す作りなので、トリムを解き直すと
+  // 水平尾翼の揚力が変わって迎角の答えがずれる。このずれは動圧に比例するため、
+  // 回数が足りないと速い機体で収束しきらず、「翼が足りない」と誤診断して
+  // **トリムを中立(0)で返して**いた。中立はその動圧では全く釣り合わない舵位置で、
+  // 当てると1.5秒で裏返る（自動トリムを押すと超音速機が墜ちる、という壊れ方）。
+  {
+    const jet = defaultAircraftConfig();
+    jet.name = '超音速トリム試験機';
+    jet.modelMaxSpeedValue = 6; jet.modelMaxSpeedUnit = 'mach';
+    for (const p of jet.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 200;
+    const jm = buildAircraftModel(jet);
+    const bad = [];
+    for (const kt of [800, 1300, 1400, 1500, 2000, 3000, 4000]) {
+      const s = solveLevelTrim(jm, kt / KT, 8000);
+      if (!s.ok || Math.abs(s.trim) < 1e-6) bad.push(`${kt}kt(${s.reason || 'trim=0'})`);
+    }
+    note('超音速でのトリム', bad.length ? '解けなかった: ' + bad.join(' ') : '800〜4000kt すべて解けた');
+    check(bad.length === 0, '速い機体でも水平トリムが解ける（中立で投げ返さない）',
+      bad.join(' ') || 'すべて解けた');
+
+    // 解が本物か——その舵位置のまま30秒飛ばして、勝手に裏返らないことで確かめる
+    const worst = [];
+    for (const kt of [1400, 2000, 3000]) {
+      const v = kt / KT;
+      const s = solveLevelTrim(jm, v, 8000);
+      const s2 = createFlightState(), c2 = createFlightControls();
+      s2.position.set(0, 8000, 0); s2.velocity.set(0, 0, -v);
+      s2.quaternion.setFromEuler(new THREE.Euler(THREE.MathUtils.degToRad(s.alphaDeg), 0, 0, 'YXZ'));
+      c2.gearDown = false; c2.parkingBrake = false; c2.throttle = s.throttle; c2.trim = s.trim;
+      let maxRoll = 0;
+      for (let i = 0; i < 60 * 30; i++) {
+        advanceFlight(jm, s2, c2, noWind, flatGround, 1 / 60);
+        maxRoll = Math.max(maxRoll, Math.abs(s2.rollDeg));
+      }
+      worst.push(`${kt}kt:${maxRoll.toFixed(0)}°`);
+      check(maxRoll < 10, `${kt}ktのトリムを当てたまま30秒飛んでも姿勢が崩れない`,
+        maxRoll.toFixed(0) + '°');
+    }
+    note('超音速でトリムしたまま30秒', '勝手に転がった最大 ' + worst.join(' '));
+  }
+
   // 遅く飛ぶほど機首上げのトリムが要る（実機と同じ）。長周期の振動に紛れないよう、
   // 飛ばして測るのではなく釣り合いそのもので見る。
   const slow = solveLevelTrim(model, perf.liftoffMps * 1.05, alt);
@@ -1644,16 +1687,34 @@ function autopilotFlight(opts) {
   // 13-autopilot.js の同名の定数と同じ値。vmコンテキストの外からはトップレベルの
   // constを直接読めない（関数と違ってグローバルオブジェクトに乗らない）ので、
   // 比較用にここでも複製する（下の旋回半径のテストで25°を複製していたのと同じ理由）。
-  const BANK_SLOW = 25, BANK_FAST = 60, SPEED_LO = 100, SPEED_HI = 680, RADIUS_MAX = 40000;
+  const BANK_SLOW = 25, BANK_HARD = 85, RADIUS_MAX = 40000;
+  const STALL = 28; // 内蔵機の失速速度に近い値(m/s)。以下の判定はこれを基準に測る
 
-  check(Math.abs(apBankMaxFor(50) - BANK_SLOW) < 0.01,
-    '低速機（100m/s以下）はバンク角の上限がそのまま', apBankMaxFor(50).toFixed(1) + '°');
-  check(Math.abs(apBankMaxFor(2000) - BANK_FAST) < 0.01,
-    '極端に速い機体でも60°で頭打ちになる（実機の常用域を外れる深いバンクにはしない）',
-    apBankMaxFor(2000).toFixed(1) + '°');
-  const mid = apBankMaxFor((SPEED_LO + SPEED_HI) / 2);
-  check(mid > BANK_SLOW && mid < BANK_FAST,
-    '中間の速さでは上限も中間になる（速いほど滑らかに深くなる）', mid.toFixed(1) + '°');
+  // 遅い機体は、必要なバンクが浅いので民間機の常用域のまま
+  check(Math.abs(apBankMaxFor(50, STALL, RADIUS_MAX) - BANK_SLOW) < 0.01,
+    '遅い機体はバンク角の上限がそのまま（曲がるのに深く倒す必要がない）',
+    apBankMaxFor(50, STALL, RADIUS_MAX).toFixed(1) + '°');
+
+  // 速い機体は、必要なだけ深くなる（旋回半径 v²/(g·tanφ) を収めるため）
+  const b660 = apBankMaxFor(660, STALL, RADIUS_MAX);
+  const b1980 = apBankMaxFor(1980, STALL, RADIUS_MAX);
+  check(b660 > BANK_SLOW && b660 < b1980,
+    '速い機体ほどバンク角の上限が深くなる（速いほど深く倒さないと同じ半径で回れない）',
+    `660m/s→${b660.toFixed(0)}° < 1980m/s→${b1980.toFixed(0)}°`);
+  check(b1980 <= BANK_HARD + 0.01, 'どれだけ速くても、上限そのものは超えない',
+    b1980.toFixed(1) + '°');
+  // 実際にその半径で回れる角度になっているか（＝必要なぶんはちゃんと出ている）
+  const rAt660 = (660 * 660) / (9.80665 * Math.tan(b660 * Math.PI / 180));
+  check(rAt660 <= RADIUS_MAX * 1.01, 'その上限で、狙った旋回半径に収まる',
+    `${(rAt660 / 1000).toFixed(1)}km ≤ ${(RADIUS_MAX / 1000).toFixed(0)}km`);
+
+  // 出せる揚力を超えるバンクは許さない（失速速度に近い速度で深く倒さない）
+  check(apBankLimit(STALL * 1.3, STALL) < 40,
+    '進入速度あたりでは、揚力が足りないので深いバンクを許さない',
+    apBankLimit(STALL * 1.3, STALL).toFixed(0) + '°');
+  check(apBankLimit(STALL * 20, STALL) > 60,
+    '失速速度の20倍で飛んでいれば、揚力は余っているので深く倒せる',
+    apBankLimit(STALL * 20, STALL).toFixed(0) + '°');
 
   // マッハ2級の機体で、実際に巡航速度が上がる（＝曲がれる速さの上限が上がる）ことを確かめる
   const fast = defaultAircraftConfig();
@@ -1669,6 +1730,73 @@ function autopilotFlight(opts) {
   check(fastSpd.cruise > oldTurnableV * 1.3,
     'そのぶん、以前の固定25°より速く巡航できる（旋回性能が上がる）',
     `${(fastSpd.cruise * KT).toFixed(0)}kt > ${(oldTurnableV * KT).toFixed(0)}kt(旧上限)`);
+}
+
+// --- 自動操縦：速い機体でも、ほぼ最高速度のまま旋回できる -------------------------
+//
+// 手で飛ばせば超音速機はほぼ最高速度でもしっかり曲がれる（実測で、失速速度の
+// 22倍の速さでも半径1.5kmで回れた）のに、自動操縦だけがバンク角60°で
+// 頭打ちになっていたため、曲がるには速度を落とすしかなかった
+// （巡航速度が turnableV で頭打ちになる）。バンク角の上限を「必要なだけ深く、
+// 出せる揚力のぶんだけ」に変えて、速いまま曲がれるようにする。
+{
+  const fast = (mach) => {
+    const cfg = defaultAircraftConfig();
+    cfg.name = `旋回試験機M${mach}`;
+    cfg.modelMaxSpeedValue = mach; cfg.modelMaxSpeedUnit = 'mach';
+    for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 40;
+    return buildAircraftModel(cfg);
+  };
+  const rows = [];
+  for (const mach of [2, 3, 6]) {
+    const m2 = fast(mach);
+    const s2 = apSpeedSchedule(m2, 200000);
+    const frac = s2.cruise / m2.vMaxMps;
+    rows.push(`M${mach}:${(frac * 100).toFixed(0)}%/${s2.bankMax.toFixed(0)}°`);
+    check(frac > 0.9, `マッハ${mach}級は、旋回のために速度を落とさず最高速度近くで巡航する`,
+      `${(s2.cruise * KT).toFixed(0)}kt / 最高${(m2.vMaxMps * KT).toFixed(0)}kt (${(frac * 100).toFixed(0)}%)`);
+    // その巡航速度・そのバンク角で、旋回半径がちゃんと収まっていること
+    const r = (s2.cruise * s2.cruise) / (9.80665 * Math.tan(s2.bankMax * Math.PI / 180));
+    check(r < 40000 * 1.02, `マッハ${mach}級でも、その速さのまま旋回半径が収まる`,
+      (r / 1000).toFixed(1) + 'km');
+  }
+  note('速いまま旋回', '巡航速度が最高速度の何%か／バンク上限 … ' + rows.join('  '));
+
+  // 実際に、90°の旋回が要る経路を通しで飛ばして着陸できること
+  for (const mach of [3, 6]) {
+    const m2 = fast(mach);
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(m2, st, 0, 0, 90, flatGround);
+    const ap = createAutopilotState();
+    ap.full = true; ap.targetAltitudeM = 6000; ap.destAirportId = 'DST'; ap.phase = 'takeoff';
+    ap.takeoffHeadingDeg = 90;
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 0, z: -200000, elevationM: 0 },
+      { runwayLengthM: 2400, headingDeg: 0 }, 0);
+    let t = 0, prev = '', seen = [], vAtApproach = null;
+    while (t < 4000) {
+      stepAutopilot(m2, st, c, ap, 1 / 60, {});
+      advanceFlight(m2, st, c, noWind, flatGround, 1 / 60);
+      t += 1 / 60;
+      if (ap.phase !== prev) {
+        if (ap.phase === 'approach' && vAtApproach === null) vAtApproach = st.airspeed;
+        prev = ap.phase; seen.push(ap.phase);
+      }
+      if (ap.phase === 'done' || st.crashed) break;
+    }
+    const spd2 = apSpeedSchedule(m2);
+    note(`自動操縦: マッハ${mach}級・90°旋回`, `${seen.join('→')} ${t.toFixed(0)}秒`
+      + ` / 進入開始時 ${vAtApproach === null ? '—' : (vAtApproach * KT).toFixed(0) + 'kt'}`
+      + `（進入速度${(spd2.approach * KT).toFixed(0)}kt）`);
+    check(ap.phase === 'done' && !st.crashed,
+      `マッハ${mach}級でも、旋回して目的地へ着陸できる`, `${ap.phase} / ${t.toFixed(0)}秒`);
+    // 降下で進入速度まで落としきれていること。以前は「目的地に近づくと旋回半径の
+    // 上限が縮み、それに引きずられて巡航速度の見積もりも下がる」という偶然に
+    // 頼って減速していたので、速いまま曲がれるようにした途端に進入へ958ktで
+    // 突っ込み、74Gを掛けてやり直していた。
+    check(vAtApproach !== null && vAtApproach < spd2.approach * 4,
+      `マッハ${mach}級でも、降下のあいだに進入速度まで減速できている`,
+      `${vAtApproach === null ? '—' : (vAtApproach * KT).toFixed(0) + 'kt'} < ${(spd2.approach * 4 * KT).toFixed(0)}kt`);
+  }
 }
 
 // --- 自動操縦：推力重量比が桁外れな機体でも、旋回して着陸できるか -----------------------

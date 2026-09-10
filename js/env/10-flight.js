@@ -499,8 +499,18 @@ function solveLevelTrim(model, speedMps, altitudeM) {
   // そもそも水平飛行できないので「解けなかった」と答えるのが正しい。
   const maxAlpha = THREE.MathUtils.degToRad(AERO_DEFAULTS.stallDeg * 0.75);
   let alpha = 0, trim = 0, thr = 0.5;
-  // 3つは互いに影響し合うので、順に解いて数回まわす
-  for (let i = 0; i < 4; i++) {
+  // 3つは互いに影響し合うので、順に解いて数回まわす。
+  //
+  // **回す回数は速い機体で効いてくる**。迎角を解いたあとにトリムを解き直すと、
+  // 水平尾翼が出す揚力そのものが変わるので、迎角の答えがずれる。このずれは
+  // 動圧に比例して大きくなるため、4回では速い機体で収束しきらない——
+  // 実測で、揚力の残差が 1300kt で503N（許容539Nのぎりぎり）、1400ktで562N、
+  // 4000ktでは4573Nになり、許容を超えたところで「翼が足りない（wing）」と
+  // 誤診断して**トリムを中立(0)で返していた**。中立は、その動圧では
+  // まったく釣り合わない舵位置なので、返り値をそのまま当てると1.5秒で機体が
+  // 裏返る（自動トリムを押すと超音速機が墜ちる、という壊れ方になる）。
+  // 8回まわせば4000ktでも残差20Nまで落ちる（12回でも20回でも同じ＝収束済み）。
+  for (let i = 0; i < 8; i++) {
     alpha = trimBisect((a) => trimResiduals(model, speedMps, altitudeM, a, trim, thr).lift,
       -maxAlpha, maxAlpha);
     trim = trimBisect((t) => trimResiduals(model, speedMps, altitudeM, alpha, t, thr).moment, -1, 1);

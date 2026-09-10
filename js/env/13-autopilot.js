@@ -101,6 +101,9 @@ const AP_GLIDE_DEG = 3;        // 進入の降下角。実機と同じ3°
 const AP_FINAL_M = 9000;       // 最終進入を始める点（滑走路末端からの距離 m）
 const AP_DESCENT_SLOPE = 1 / 20; // 巡航からの降下勾配（約2.9°）
 const AP_TOUCHDOWN_M = 200;    // 末端から何m先を目標に降ろすか
+// 降下中、抗力だけでどれくらい減速できるとみなすか(m/s²)。
+// 進入速度まで落としきるのに要る距離の見積もりに使う（降下の段を参照）。
+const AP_DECEL_MPS2 = 1.5;
 
 // --- 小道具 -------------------------------------------------------------------
 
@@ -299,35 +302,64 @@ function apCruiseTurnRadiusMax(distToGoM) {
   return apClamp(distToGoM * AP_TURN_RADIUS_ROUTE_FRACTION, AP_TURN_RADIUS_MIN, AP_CRUISE_TURN_RADIUS_MAX);
 }
 
-// バンク角の上限は、機体の最高速度が上がるほど引き上げる。
-// AP_BANK_MAX（25°）は民間機の常用域——乗客がいる想定でゆったり曲がる角度で、
-// 遅い機体はそのまま使う。実機の戦闘機はもっと深く傾けて旋回半径を詰めており
-// （tanθが効くので、25°→60°で半径は1/3強になる）、速い機体ほどそちらへ寄せる。
-// ここを上げないと、速い機体ほど「バンクを目一杯使っても曲がりきれない」影響を
-// 強く受ける（AP_CRUISE_TURN_RADIUS_MAXのコメント参照）——上限そのものを
-// 引き上げれば、同じ半径でもっと速く巡航でき、旋回性能が上がる。
-// マッハ2見当（680m/s）より速い機体（フィクションの超音速機）は60°で頭打ちにする。
-const AP_BANK_MAX_FAST = 60;   // 高速機のバンク角上限(°)
-const AP_BANK_SPEED_LO = 100;  // この速さ(m/s、約194kt)以下は低速機としてAP_BANK_MAXのまま
-const AP_BANK_SPEED_HI = 680;  // この速さ(m/s、マッハ2見当)でAP_BANK_MAX_FASTに達する
-function apBankMaxFor(vMax) {
-  const t = apClamp((vMax - AP_BANK_SPEED_LO) / (AP_BANK_SPEED_HI - AP_BANK_SPEED_LO), 0, 1);
-  return AP_BANK_MAX + t * (AP_BANK_MAX_FAST - AP_BANK_MAX);
+// バンク角の上限は、**必要なぶんだけ深く、出せるぶんだけ**で決める。
+//
+// 水平旋回の半径は r = v²/(g·tanφ) なので、許せる半径 radiusMax に収めるのに
+// 要るバンク角は atan(v²/(g·radiusMax))。遅い機体ではこれが1°にもならないので、
+// AP_BANK_MAX（25°＝1.1G、旅客機の常用域）で頭打ちにする——低速側の
+// 振る舞いはこれまでどおり変わらない。
+//
+// 深くできる上限のほうは「そのバンクを保つ揚力を出せるか」で決まる。
+// バンク角φの水平旋回に要る荷重倍数は n = 1/cosφ（60°で2G、85°で11.5G）、
+// 出せる揚力は速度の2乗で増えるので、失速速度のk倍で飛んでいれば n = k² まで出せる。
+// **手で飛ばすと超高速機がほぼ最高速度でもきつく曲がれるのはこれ**で、
+// 実測では失速速度の22倍で半径1.5km、65倍で0.6kmまで回れた（60°バンク）。
+// 自動操縦だけ60°で頭打ちにしていたので、曲がるには速度を落とすしかなく
+// （巡航速度が turnableV で頭打ちになる）、「手動なら最高速度で旋回できるのに
+// 自動操縦だと遅い」ことになっていた。上限を荷重倍数で決めれば、
+// 速い機体はそのまま速く飛んだまま深く倒して曲がれる。
+const AP_BANK_MAX_HARD = 85;    // それでもここまで(°)。n=11.5G相当
+const AP_LOAD_MARGIN = 0.7;     // 出せる揚力のうち、旋回に使っていい割合（失速させない余裕）
+
+// その速度で保てるバンク角の上限(°)
+function apBankLimit(vMps, stallMps) {
+  const k = Math.max(vMps, 1) / Math.max(stallMps, 1);
+  const nMax = k * k * AP_LOAD_MARGIN;            // 出せる荷重倍数
+  if (!(nMax > 1.02)) return AP_BANK_MAX;         // 失速ぎりぎりでは傾けない
+  const deg = Math.acos(1 / nMax) * 180 / Math.PI;
+  return apClamp(deg, AP_BANK_MAX, AP_BANK_MAX_HARD);
+}
+
+// その速度で、許せる旋回半径に収めるのに実際に使うバンク角の上限(°)
+function apBankMaxFor(vMps, stallMps, radiusMax) {
+  const r = radiusMax === undefined ? AP_CRUISE_TURN_RADIUS_MAX : radiusMax;
+  const needed = Math.atan((vMps * vMps) / (9.80665 * Math.max(r, 1))) * 180 / Math.PI;
+  return apClamp(needed, AP_BANK_MAX, apBankLimit(vMps, stallMps));
 }
 
 // 失速速度から、離陸・上昇・巡航・進入の速度を決める。
 // analyzeAircraftPerformance と同じ式で失速速度を出す（重い呼び出しは避ける）。
 // distToGoM（目的地までの距離）を渡すと、旋回半径をそのルートの長さに合わせて絞る
 // （渡さなければ世界の大きさから決めた上限のまま——目的地未設定の高度維持モードなど）。
-function apSpeedSchedule(model, distToGoM) {
+// currentVMps（いまの対気速度）を渡すと、実際に使うバンク角の上限をその速度で出す
+// （渡さなければ巡航速度のぶん）。
+function apSpeedSchedule(model, distToGoM, currentVMps) {
   const W = model.massKg * 9.80665;
   const S = Math.max(model.wingArea, 0.01);
   const stall = Math.sqrt((2 * W) / (1.225 * S * 1.5));
   const vMax = Math.max(model.vMaxMps || 0, stall * 2);
-  const bankMax = apBankMaxFor(vMax);
   const radiusMax = apCruiseTurnRadiusMax(distToGoM);
+  // 「出したい速さ」で要るバンク角を先に出し、そこから曲がれる速さを決める。
+  // 順序が逆（先にバンク角を決めて速さを頭打ちにする）だと、速い機体は
+  // 曲がるために遅く飛ぶしかなくなる。
+  const vWant = vMax * 0.97;
+  const bankPlan = apBankMaxFor(vWant, stall, radiusMax);
   const turnableV = Math.sqrt(radiusMax * 9.80665
-    * Math.tan(bankMax * Math.PI / 180));
+    * Math.tan(bankPlan * Math.PI / 180));
+  // 実際に舵を切るときの上限は、いまの速度で保てるぶん。上昇中など巡航より
+  // 遅いときに巡航ぶんの深いバンクを許すと、その揚力が出せず失速するだけになる。
+  const bankMax = currentVMps === undefined ? bankPlan
+    : apBankMaxFor(currentVMps, stall, radiusMax);
   return {
     stall,
     rotate: stall * 1.15,               // 機首を上げる速度
@@ -339,7 +371,8 @@ function apSpeedSchedule(model, distToGoM) {
     cruise: apClamp(Math.min(vMax * 0.97, turnableV), stall * 1.4, vMax),
     approach: stall * 1.3,
     vMax,
-    bankMax, // 巡航中（nav()）が実際に使うバンク角の上限。進入・引き起こしはこれより浅い固定値のまま
+    bankMax,  // 巡航中（nav()）が実際に使うバンク角の上限。進入・引き起こしはこれより浅い固定値のまま
+    bankPlan, // 巡航速度を決めるのに使ったバンク角の上限（＝出したい速さで要るぶん）
   };
 }
 
@@ -605,7 +638,21 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   // ---- 降下 -----------------------------------------------------------------
   if (ap.phase === 'descent') {
     nav();
-    ap.targetSpeedMps = spd.cruise * 0.85;
+    // 降下しながら、進入速度まで落としきる。
+    //
+    // **「残りの距離で落としきれる速度」を目標にする**。以前は巡航速度の85%を
+    // ずっと目標にしていて、進入速度まで落ちるのは偶然に頼っていた——
+    // 目的地に近づくと旋回半径の上限が縮み、それに引きずられて巡航速度の
+    // 見積もりも下がるので、結果として減速していた（apCruiseTurnRadiusMax参照）。
+    // 旋回のための頭打ちを速い機体で外したとたん、この偶然が消えて
+    // 進入に958ktで突っ込み、74Gを掛けてやり直すようになった。
+    // 減速は旋回半径とは無関係の話なので、ここで正面から書く：
+    // 抗力だけで落とせる減速度を AP_DECEL_MPS2 と見て、残り距離 distFaf で
+    // 進入速度まで落とすのに、いま出していていい速度は
+    //   v = √(進入速度² + 2·減速度·残り距離)
+    const vAllowed = Math.sqrt(spd.approach * spd.approach
+      + 2 * AP_DECEL_MPS2 * Math.max(distFaf, 0));
+    ap.targetSpeedMps = Math.min(spd.cruise * 0.85, vAllowed);
     controls.throttle = apThrottleForSpeed(state, controls, ap.targetSpeedMps, dt);
     // 最終進入開始点の高度へ、一定の勾配で降りる
     const wantAlt = Math.min(plan.fafAltM + distFaf * AP_DESCENT_SLOPE, ap.targetAltitudeM);
@@ -811,7 +858,7 @@ function stepAutopilot(model, state, controls, ap, dt, env) {
   const distToGoM = ap.plan
     ? Math.hypot(ap.plan.faf.x - state.position.x, ap.plan.faf.z - state.position.z)
     : undefined;
-  const spd = apSpeedSchedule(model, distToGoM);
+  const spd = apSpeedSchedule(model, distToGoM, state.airspeed);
   if (ap.full) apStepFull(model, state, controls, ap, spd, dt, env);
   else if (ap.altHold) apStepAltHold(model, state, controls, ap, spd, dt);
 }
@@ -1048,7 +1095,7 @@ if (typeof module !== 'undefined' && module.exports) {
     apMakeApproachPlan, apPickRunwayHeading, apTrackPosition,
     apWrap180, apBearingTo, apForward, apRight,
     apElevatorForPitch, apAileronForBank, apAileronForTrack, apGroundTrackDeg,
-    apSurfaceGain,
+    apSurfaceGain, apBankLimit,
   apPitchForVs, apBankForHeading, apFlareHeight,
     apVsForAltitude, apThrottleForSpeed,
   };

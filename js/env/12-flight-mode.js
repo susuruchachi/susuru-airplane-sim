@@ -75,6 +75,12 @@ async function buildSelectedAircraft() {
   f.aircraft.group.visible = f.active;
   if (typeof syncCgUI === 'function') syncCgUI(); // 目盛の実寸は機体の大きさで変わる
   updateFlightPanelReadout();
+  // 自動操縦のパネルも描き直す。垂直離着陸のチェックボックスは「上向きエンジンを
+  // 持つ機体か」で押せるかどうかが変わるので、機体を差し替えたら必ず要る——
+  // ここを呼び忘れていたために、垂直離着陸機を選んでもチェックボックスが
+  // ずっと灰色のまま（「垂直離着陸用エンジンがありません」の説明のまま）で、
+  // 垂直離着陸をそもそも選べなかった。
+  if (typeof updateAutopilotUI === 'function') updateAutopilotUI();
   return f.aircraft;
 }
 
