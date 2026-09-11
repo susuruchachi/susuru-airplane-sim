@@ -45,7 +45,7 @@ const {
   createAutopilotState, stepAutopilot, apSpeedSchedule, apMakeApproachPlan,
   apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo, apBankMaxFor,
   apElevatorForPitch, apSurfaceGain, apBankLimit, apBankAglFactor, apTerrainFloor,
-  aircraftDragLengthM, apBankClimbFactor, apVsLimits,
+  aircraftDragLengthM, apBankClimbFactor, apVsLimits, apTerrainEscapeVs, apVtolHoverAngles,
 } = ctx;
 
 // 13-autopilot.js / 10-flight.js の同名の定数と同じ値。vmコンテキストの外からは
@@ -2786,6 +2786,129 @@ function autopilotFlight(opts) {
     + ` 目標より低くて沈む:${(tBelowSinking * 100).toFixed(0)}%`);
   check(tBelowSinking > tAboveSinking, '目標高度より低いのに沈んでいるときだけ、出力を余分に戻す',
     `${(tAboveSinking * 100).toFixed(0)}% < ${(tBelowSinking * 100).toFixed(0)}%`);
+}
+
+// (8) 山を越えるときは、機体が出せるだけ上げること。
+//
+// 「推力の大きい高速機が、標高の高い山で上昇が間に合わない。手で操縦すれば
+// 急上昇できるのに」という報告。地形回避の指示昇降率が AP_CLIMB_DEG（7°）で
+// 頭打ちになっていて、出せる上昇角（実測で T/W2.4 なら63°、T/W20 なら89°）の
+// ごく一部しか使えていなかった。
+{
+  const fast = { airspeed: 300, verticalSpeed: 0 };
+  const spd = { stall: 60, cruise: 400, approach: 78, bankMax: 30 };
+  const normal = apVsLimits(fast).up;
+  const escape = apTerrainEscapeVs(fast, spd);
+  note('地形回避で許す上昇率', `ふだん ${normal.toFixed(0)}m/s（7°）`
+    + ` → 山を越えるとき ${escape.toFixed(0)}m/s（${(Math.asin(escape / fast.airspeed) * 180 / Math.PI).toFixed(0)}°）`);
+  check(escape > normal * 2, '速度に余裕があれば、ふだんよりずっと大きい上昇率を許す',
+    `${escape.toFixed(0)} > ${normal.toFixed(0)}`);
+  check(escape <= fast.airspeed * Math.sin(30 * Math.PI / 180) + 1e-6,
+    '許すのは30°まで（青天井にはしない）', escape.toFixed(0) + 'm/s');
+  // 速度の余裕が無いときは、ふだんの上限まで落ちる（失速側へは転ばない）
+  const slow = { airspeed: 70, verticalSpeed: 0 };
+  check(apTerrainEscapeVs(slow, spd) >= apVsLimits(slow).up - 1e-6,
+    '余裕が無くても、ふだんの上限は下回らない');
+  check(apTerrainEscapeVs(fast, undefined) === normal,
+    '速度の表（spd）が無ければ、ふだんの上限のまま');
+
+  // 離陸してすぐ前方に標高3800mの山。以前は突っ込んでいた距離で越えられること。
+  {
+    const cfg = defaultAircraftConfig();
+    cfg.modelMaxSpeedValue = 2; cfg.modelMaxSpeedUnit = 'mach';
+    for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 7;
+    const m2 = buildAircraftModel(cfg);
+    const startM = 12000, topM = 3800;
+    const ridge = (x, z) => (z <= -startM && z >= -(startM + 20000)) ? topM : 0;
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(m2, st, 0, 0, 0, ridge);
+    settleAircraftOnGround(m2, st, ridge);
+    const ap = createAutopilotState();
+    ap.full = true; ap.phase = 'takeoff'; ap.takeoffHeadingDeg = 0;
+    ap.targetAltitudeM = 2000; ap.destAirportId = 'DST';
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 0, z: -200000, elevationM: 0 },
+      { runwayLengthM: 3000, headingDeg: 0 }, 180);
+    let t = 0, minAgl = Infinity, crashed = false, passed = false, maxPitch = -99;
+    for (; t < 600; t += 1 / 60) {
+      stepAutopilot(m2, st, c, ap, 1 / 60, { groundHeightAt: ridge });
+      advanceFlight(m2, st, c, noWind, ridge, 1 / 60);
+      if (ridge(st.position.x, st.position.z) > 100) minAgl = Math.min(minAgl, st.altitudeAglM);
+      maxPitch = Math.max(maxPitch, st.pitchDeg || 0);
+      if (st.crashed) { crashed = true; break; }
+      if (st.position.z < -(startM + 21000)) { passed = true; break; }
+    }
+    note('離陸12km先の標高3800mの山', `最低対地高度 ${minAgl === Infinity ? '—' : minAgl.toFixed(0) + 'm'}`
+      + ` 最大ピッチ ${maxPitch.toFixed(0)}°（直す前は対地-81mで突っ込んでいた）`);
+    check(!crashed && passed, '推力の大きい機体は、近くて高い山でも越えられる',
+      crashed ? '墜落' : (passed ? '越えた' : '未通過'));
+    check(minAgl > 100, '山の上でも余裕を残して越える', minAgl.toFixed(0) + 'm');
+  }
+}
+
+// (9) 垂直着陸は、前へ進む速度を止めてから降りること。
+//
+// 「垂直離着陸機が、前進速度が残ったまま着陸しようとして、脚が後ろ寄りの機体
+// （サンダーバード1号など）はそのまま前に転ける」という報告。垂直降下の沈下率を
+// 高さだけで決めていたので、進入速度のまま降りはじめて減速しきる前に接地し、
+// ブレーキが効くにつれて前へ転がっていた（実測で接地後16G・ロール180°）。
+{
+  const cfg = defaultAircraftConfig();
+  cfg.modelMaxSpeedValue = 2; cfg.modelMaxSpeedUnit = 'mach';
+  for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 20;
+  // 翼を小さくして進入速度を上げる（速い垂直離着陸機にする）
+  for (const p of cfg.parts) {
+    if (p.type !== 'wing' || !p.props || !p.props.corners || p.props.role !== 'main') continue;
+    for (const k in p.props.corners) { const v = p.props.corners[k]; v.x *= 0.45; v.z *= 0.45; }
+  }
+  // 脚を後ろ寄りにする（前に転びやすい機体）
+  for (const p of cfg.parts) if (p.type === 'landing_gear') p.position.z += 1.2;
+  const lift = cfg.modelWeightKg * 1.6 / 4;
+  const eng = (id, x, z) => ({ id, type: 'engine', name: '垂直' + id,
+    position: { x, y: 0.4, z }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: { thrustKgf: lift, spinAxis: 'y' } });
+  cfg.parts = cfg.parts.concat([eng('v1', -1.2, -1.5), eng('v2', 1.2, -1.5),
+    eng('v3', -1.2, 1.5), eng('v4', 1.2, 1.5)]);
+  const m3 = buildAircraftModel(cfg);
+  const spd3 = apSpeedSchedule(m3);
+
+  const st = createFlightState(), c = createFlightControls();
+  const plan = apMakeApproachPlan({ id: 'DST', x: 0, z: -60000, elevationM: 0 },
+    { runwayLengthM: 3000, headingDeg: 0 }, 180);
+  st.position.set(plan.threshold.x, 1200, plan.threshold.z + 25000);
+  st.altitudeM = 1200;
+  st.velocity.set(0, 0, -spd3.approach);
+  st.headingDeg = plan.heading;
+  const ap = createAutopilotState();
+  ap.full = true; ap.vtolLanding = true; ap.destAirportId = 'DST';
+  ap.plan = plan; ap.phase = 'vtol_approach'; ap.targetAltitudeM = 1200;
+
+  let t = 0, wasAir = false, tdGs = null, tdDist = null, maxRoll = 0, maxPitch = 0;
+  let done = false, crashed = false;
+  for (; t < 900; t += 1 / 60) {
+    stepAutopilot(m3, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+    advanceFlight(m3, st, c, noWind, flatGround, 1 / 60);
+    if (!st.onGround) wasAir = true;
+    if (st.onGround && wasAir && tdGs === null) {
+      tdGs = st.groundSpeed;
+      tdDist = Math.hypot(st.position.x - plan.threshold.x, st.position.z - plan.threshold.z);
+    }
+    if (st.onGround) {
+      maxRoll = Math.max(maxRoll, Math.abs(st.rollDeg || 0));
+      maxPitch = Math.max(maxPitch, Math.abs(st.pitchDeg || 0));
+    }
+    if (st.crashed) { crashed = true; break; }
+    if (ap.phase === 'done') { done = true; break; }
+  }
+  note('垂直着陸（進入157kt・脚が後ろ寄り）', `接地時の対地速度 ${tdGs === null ? '—' : (tdGs * KT).toFixed(0) + 'kt'}`
+    + ` / 着地点からのずれ ${tdDist === null ? '—' : tdDist.toFixed(0) + 'm'}`
+    + ` / 接地後の最大ロール ${maxRoll.toFixed(0)}°（直す前は15kt・32m・180°）`);
+  check(done && !crashed, '垂直着陸できる', crashed ? '墜落' : (done ? '着陸' : '未完了'));
+  check(tdGs !== null && tdGs < 3, '前へ進む速度を止めてから接地する',
+    tdGs === null ? '—' : (tdGs * KT).toFixed(0) + 'kt');
+  check(maxRoll < 30 && maxPitch < 30, '接地して前や横へ転がらない',
+    `ロール${maxRoll.toFixed(0)}° ピッチ${maxPitch.toFixed(0)}°`);
+  check(tdDist !== null && tdDist < 100, '着地点のそばに降りる',
+    tdDist === null ? '—' : tdDist.toFixed(0) + 'm');
 }
 
 // --- 計算の速さ ---------------------------------------------------------------

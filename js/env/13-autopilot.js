@@ -62,6 +62,11 @@ const AP_VTOL_TRANSITION_AGL_M = 30; // これより高く上がったら、前�
 const AP_VTOL_HOVER_AGL_M = 80;  // 着陸時、この高さまで来たら垂直降下に切り替える
 const AP_VTOL_HOVER_RADIUS_MIN_M = 300; // 着陸点からこの距離まで来たら垂直降下に切り替える（下限）
 const AP_VTOL_CUT_SEC = 3;       // 接地後、垂直エンジンを抜ききるまでの秒数
+// 垂直降下：対地速度がこれ以上あるうちは降りない（止まってから降ろす）。
+// ここまで落ちれば、接地してブレーキを踏んでも前へ転がらない。
+const AP_VTOL_DESCENT_GS_MPS = 4;
+// 垂直降下：この高さから下では、ホバーの傾きを水平へ戻していく(m)
+const AP_VTOL_LEVEL_AGL_M = 25;
 const AP_VTOL_SETTLE_MPS = 0.5;  // 接地したあと弾んで浮いたときの、静かな沈下率(m/s)
 const AP_VTOL_TILT_MAX = 10;     // ホバー中、水平移動のために傾ける角度の上限(°)
 const AP_VTOL_POS_KP = 0.08;     // 着地点までの距離1mあたり、何度傾けるか
@@ -87,15 +92,16 @@ function apVtolThrottleForVs(controls, currentVs, targetVs, dt) {
 // 実機のVTOL機と同じで、機首を下げれば前へ、右へ傾ければ右へ進む
 // （実測して符号を決めてある。ピッチは上げるほど後ろへ、ロールは
 // 右へ倒すほど右へ動く）。位置の誤差と速度の誤差、両方を見て収束させる。
-function apVtolHoverAngles(state, targetX, targetZ) {
+function apVtolHoverAngles(state, targetX, targetZ, tiltMaxDeg) {
+  const tiltMax = tiltMaxDeg === undefined ? AP_VTOL_TILT_MAX : tiltMaxDeg;
   const fwd = apForward(state.headingDeg), right = apRight(state.headingDeg);
   const dx = targetX - state.position.x, dz = targetZ - state.position.z;
   const along = dx * fwd.x + dz * fwd.z;   // +なら目標は前方
   const cross = dx * right.x + dz * right.z; // +なら目標は右
   const vAlong = state.velocity.x * fwd.x + state.velocity.z * fwd.z;
   const vCross = state.velocity.x * right.x + state.velocity.z * right.z;
-  const pitchTilt = apClamp(along * AP_VTOL_POS_KP - vAlong * AP_VTOL_VEL_KD, -AP_VTOL_TILT_MAX, AP_VTOL_TILT_MAX);
-  const bankTilt = apClamp(cross * AP_VTOL_POS_KP - vCross * AP_VTOL_VEL_KD, -AP_VTOL_TILT_MAX, AP_VTOL_TILT_MAX);
+  const pitchTilt = apClamp(along * AP_VTOL_POS_KP - vAlong * AP_VTOL_VEL_KD, -tiltMax, tiltMax);
+  const bankTilt = apClamp(cross * AP_VTOL_POS_KP - vCross * AP_VTOL_VEL_KD, -tiltMax, tiltMax);
   return { wantPitchDeg: -pitchTilt, wantBankDeg: bankTilt };
 }
 
@@ -139,10 +145,10 @@ const AP_CRUISE_SINK_URGENCY_MPS = 10;
 // 素通りしたのと同じ話なので、ここでも**要る昇降率を直接出す**。
 // 距離dの先に標高hがあるなら、そこへ着くまでの時間は d/v なので、
 // 要る昇降率は (h + 余裕 − いまの高度) / (d/v)。前方の最大を取る。
-function apTerrainFloor(state, env, clearanceM) {
+function apTerrainFloor(state, env, clearanceM, spd) {
   // vsNeed の「制限なし」は 0 ではなく -Infinity。0 にすると
   // Math.max(降下率, 0) になって、降下そのものを止めてしまう。
-  const none = { floorM: -Infinity, vsNeed: -Infinity };
+  const none = { floorM: -Infinity, vsNeed: -Infinity, rising: false };
   const gh = env && env.groundHeightAt;
   if (typeof gh !== 'function') return none;
   const v = Math.max(state.airspeed, 1);
@@ -151,7 +157,7 @@ function apTerrainFloor(state, env, clearanceM) {
   const look = apClamp(v * AP_TERRAIN_LOOKAHEAD_SEC,
     AP_TERRAIN_LOOKAHEAD_MIN_M, AP_TERRAIN_LOOKAHEAD_MAX_M);
   const up = Math.max(apVsLimits(state).up * AP_TERRAIN_CLIMB_MARGIN, 0.1);
-  let floorM = -Infinity, vsNeed = -Infinity;
+  let floorM = -Infinity, vsNeed = -Infinity, maxGroundAhead = -Infinity;
   // i=0（真下、d=0）も見る。前方サンプルは look/AP_TERRAIN_SAMPLES 間隔
   // （遅い機体でも最低10km/24点≈417m刻み）なので、越えている地形の
   // 残りがその刻み幅より短くなると前方サンプルが全部その先の平地を
@@ -168,12 +174,27 @@ function apTerrainFloor(state, env, clearanceM) {
     const top = h + clearanceM;
     const need = top - up * (d / v);
     if (need > floorM) floorM = need;
+    if (h > maxGroundAhead) maxGroundAhead = h;
     if (d <= 0) continue;
     const vs = (top - state.altitudeM) / (d / v);
     if (vs > vsNeed) vsNeed = vs;
   }
   // 出せる以上の昇降率を指示しても仕方がない（機首だけ上がって速度を失う）
-  const need = Math.min(vsNeed, apVsLimits(state).up);
+  // **越えるのに要る昇降率は、機体が出せるところまで許す**（apTerrainEscapeVs）。
+  // ここを AP_CLIMB_DEG（7°）で頭打ちにしていたので、推力の大きい機体ほど
+  // 出せる上昇率の一部しか使えず、山に間に合わなかった。
+  // なお上の `up`（どこまで登れるかの見積もり＝床の高さを決めるほう）は
+  // 7°のままにしてある——見積もりを甘くすると「まだ登らなくていい」と
+  // 判断して登りはじめが遅れるので、**床は今までどおり早めに要求し、
+  // 指示だけ出せるところまで出す**という組み合わせにする。
+  // 急ぐのは**地面そのものが自分より高いとき**だけ。「余裕300mより低い」で
+  // 見てはいけない——平らな地面でも離陸直後はこれを満たすので、ふつうの
+  // 離陸がぜんぶ全力上昇になってしまう（実測でBoeing747の上昇の形が変わり、
+  // そのまま進入に乗れず着陸できなくなった）。越える相手が自分の上に
+  // あるときだけ、出せるところまで出す。
+  const rising = maxGroundAhead > state.altitudeM;
+  const need = Math.min(vsNeed,
+    rising ? apTerrainEscapeVs(state, spd) : apVsLimits(state).up);
   // **上がれと言うときだけ効かせる**。vsNeed は「前方の地面を越えるのに要る
   // 上昇率」で、下限として使われる（Math.max(指示, vsNeed)）。ところが地面が
   // 自分より下にあると、これは「これ以上速く降りるな」という上限に化ける——
@@ -181,22 +202,23 @@ function apTerrainFloor(state, env, clearanceM) {
   // 実測でBoeing 747の降下が -19m/s 出せるところを -9.3m/s に抑えられて、
   // 進入開始で経路より580m高いところに入っていた。地面より高いところに
   // いるあいだは、そもそも越えるべきものが無い。
-  return { floorM, vsNeed: need > 0 ? need : -Infinity };
+  return { floorM, vsNeed: need > 0 ? need : -Infinity, rising };
 }
 
 // 測り直しは AP_TERRAIN_REFRESH_SEC ごと（地面の高さを引くのは安くない）。
 // 空港へ近づくぶんだけ余裕を細らせる（AP_TERRAIN_TAPER_M のコメント参照）。
-function apUpdateTerrainFloor(state, ap, env, dt, distToGoM) {
+function apUpdateTerrainFloor(state, ap, env, dt, distToGoM, spd) {
   ap.terrainClock = (ap.terrainClock || 0) + dt;
   if (ap.terrainFloorM === undefined || ap.terrainClock >= AP_TERRAIN_REFRESH_SEC) {
     ap.terrainClock = 0;
     const taper = distToGoM === undefined ? 1
       : apClamp(distToGoM / AP_TERRAIN_TAPER_M, 0, 1);
-    const r = apTerrainFloor(state, env, AP_TERRAIN_CLEARANCE_M * taper);
+    const r = apTerrainFloor(state, env, AP_TERRAIN_CLEARANCE_M * taper, spd);
     ap.terrainFloorM = r.floorM;
     ap.terrainVsNeed = r.vsNeed;
+    ap.terrainRising = r.rising;
   }
-  return { floorM: ap.terrainFloorM, vsNeed: ap.terrainVsNeed };
+  return { floorM: ap.terrainFloorM, vsNeed: ap.terrainVsNeed, rising: !!ap.terrainRising };
 }
 
 // --- 低いところでは深く傾けない -------------------------------------------------
@@ -407,6 +429,30 @@ function apVsLimits(state) {
     up: v * Math.sin(AP_CLIMB_DEG * Math.PI / 180),
     down: v * Math.sin(AP_SINK_DEG * Math.PI / 180),
   };
+}
+
+// **地形を越えるときだけは、機体が出せるだけ上げる**。
+//
+// AP_CLIMB_DEG（7°）は「高度を取り戻すときの、乗っていて気持ちのいい上昇角」で、
+// ふだんの高度合わせにはこれでいい。ところが山を越える指示（apTerrainFloor の
+// vsNeed）にも同じ上限が掛かっていたので、**推力の大きい機体が、出せる上昇率の
+// ごく一部しか使えないまま山へ近づいていた**——実測（全開・指示ピッチを変えて
+// 60秒）で、出せる上昇角は 練習機5° / T/W2.4の高速機63° / T/W20のロケット機89° /
+// T/W0.6の大型機20°。手で操縦すれば急上昇できるのに自動操縦だけ登れない、
+// という報告になっていた。
+//
+// どこまで許すかは「速度の余裕」で決める（apClimbCap と同じ考え方）——
+// 高度を追いかけて速度を使い切るのが自動操縦のいちばん危ない壊れ方なので、
+// 余裕があるぶんだけ。出せない機体は、指示に届かないまま速度が落ち、
+// apClimbCap が自分で絞ってくれる（＝上限を上げても失速側へは転ばない）。
+const AP_TERRAIN_ESCAPE_DEG = 30; // 地形回避で許す上昇角の上限(°)
+const AP_TERRAIN_PITCH_MAX = 35;  // 地形回避で許す指示ピッチの上限(°)
+function apTerrainEscapeVs(state, spd) {
+  const lim = apVsLimits(state);
+  if (!spd) return lim.up;
+  const byAngle = Math.max(state.airspeed, 10)
+    * Math.sin(AP_TERRAIN_ESCAPE_DEG * Math.PI / 180);
+  return apClamp(apClimbCap(state, spd), lim.up, byAngle);
 }
 
 // 高度のずれ → 目標の昇降率(m/s)。上限は上下で別（上げるのは推力次第、下げるのは自由）
@@ -752,11 +798,22 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   const distTouchdown = plan
     ? Math.hypot(state.position.x - plan.aim.x, state.position.z - plan.aim.z)
     : undefined;
-  const terrain = apUpdateTerrainFloor(state, ap, env, dt, distTouchdown);
+  const terrain = apUpdateTerrainFloor(state, ap, env, dt, distTouchdown, spd);
   const floorM = terrain.floorM;
   const overTerrain = (altM) => (floorM > -1e5 ? Math.max(altM, floorM) : altM);
   // 山を越えるのに要る昇降率。指示が足りなければこれで底上げする
   const overTerrainVs = (vs) => Math.max(vs, terrain.vsNeed);
+  // 山に押されて、ふだんの上昇角（AP_CLIMB_DEG）より急に登らされているあいだは、
+  // 指示ピッチの頭打ちも上げる——**上げないと指示した昇降率が出せない**。
+  // 経路角30°で登るには、迎角ぶんを足して35°ほどの姿勢が要るのに、
+  // ふだんの上限（15°）のままでは姿勢が足りず、せっかく上げた指示が
+  // そのまま捨てられる。
+  // 見るのは**地形の要求（terrain.vsNeed）だけ**。「指示が大きいかどうか」で
+  // 見ると、ふつうの巡航高度合わせ（目標まで遠ければ指示は大きくなる）でも
+  // 上限が上がってしまい、重い機体の姿勢が振れて経路に乗れなくなる
+  // ——実測でBoeing747が進入まで行けず着陸しなくなった。
+  const terrainPushing = terrain.rising && terrain.vsNeed > apVsLimits(state).up;
+  const terrainPitchMax = () => (terrainPushing ? AP_TERRAIN_PITCH_MAX : undefined);
 
   // ---- 垂直離陸：真上へ上がる -------------------------------------------------
   if (ap.phase === 'vtol_takeoff') {
@@ -881,7 +938,13 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     const sinkUrgency = apClamp(-state.verticalSpeed / AP_CRUISE_SINK_URGENCY_MPS, 0, 1);
     const overspeedCut = overCruise > 0 ? apClamp(1 - overCruise * 0.1, 0, 1) : 1;
     controls.throttle = Math.max(overspeedCut, sinkUrgency);
-    const want = apClamp(state.pitchDeg + (state.airspeed - spd.climb) * 0.8, 0, AP_PITCH_MAX);
+    // 山に追われているあいだは姿勢の頭打ちも上げる。上昇の姿勢は「上昇速度を
+    // 保つところまで」で自分から止まるので、上限を上げても速度は割らない
+    // （出せない機体は、上げたところで速度が落ちて勝手に戻る）。
+    // 「床より低い」で見てはいけない——平らな地面でも離陸直後は余裕300mの
+    // 床より低いので、ふつうの離陸がぜんぶ急上昇になってしまう。
+    const pitchMax = terrainPushing ? AP_TERRAIN_PITCH_MAX : AP_PITCH_MAX;
+    const want = apClamp(state.pitchDeg + (state.airspeed - spd.climb) * 0.8, 0, pitchMax);
     controls.pitch = apElevatorForPitch(state, controls, want, dt, spd, ap);
     ap.vsCmd = state.verticalSpeed;
     // 山があれば、目標高度に届いても上りつづける。
@@ -955,7 +1018,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
       ? apClamp(-state.verticalSpeed / AP_CRUISE_SINK_URGENCY_MPS, 0, 1) : 0;
     controls.throttle = Math.max(apThrottleForSpeed(state, controls, spd.cruise, dt), sinkUrgency);
     ap.vsCmd = overTerrainVs(apVsForAltitude(state, overTerrain(ap.targetAltitudeM), apClimbCap(state, spd)));
-    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd, ap);
+    controls.pitch = apElevatorForPitch(state, controls,
+      apPitchForVs(state, ap.vsCmd, undefined, terrainPitchMax()), dt, spd, ap);
     // 3°で降りきれる距離まで詰まったら降下へ。少し余裕を持たせる。
     if (plan) {
       const drop = Math.max(state.altitudeM - plan.fafAltM, 0);
@@ -1008,7 +1072,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 目標が巡航高度で頭打ちのあいだは、まだ坂に乗っていない＝前送りは要らない
     const onSlope = wantAlt < ap.targetAltitudeM - 1;
     ap.vsCmd = overTerrainVs(apVsForPath(state, wantAlt, onSlope ? AP_DESCENT_SLOPE : 0, apClimbCap(state, spd)));
-    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd, ap);
+    controls.pitch = apElevatorForPitch(state, controls,
+      apPitchForVs(state, ap.vsCmd, undefined, terrainPitchMax()), dt, spd, ap);
     if (distFaf < 2500) {
       say(ap.vtolLanding && model.hasVtol ? 'vtol_approach' : 'approach',
         ap.vtolLanding && model.hasVtol ? '最終進入（垂直着陸）' : '最終進入');
@@ -1035,8 +1100,13 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 中心線に乗せる必要が無いぶん、進入はずっと単純——垂直降下を始めていい
     // 高さまでただ寄せるだけでいい
     const hoverAltM = plan.elevationM + AP_VTOL_HOVER_AGL_M;
-    ap.vsCmd = apVsForAltitude(state, hoverAltM, apClimbCap(state, spd));
-    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd, ap);
+    // **垂直着陸の進入も地形を見る**。ここだけ overTerrain/overTerrainVs が
+    // 抜けていたので、着地点の手前に山があると、ホバーの高さ（対地80m）へ
+    // まっすぐ降りながら山へ突っ込めた。滑走路を使う進入（approach）と
+    // 同じだけ地形は避けなければいけない。
+    ap.vsCmd = overTerrainVs(apVsForAltitude(state, overTerrain(hoverAltM), apClimbCap(state, spd)));
+    controls.pitch = apElevatorForPitch(state, controls,
+      apPitchForVs(state, ap.vsCmd, undefined, terrainPitchMax()), dt, spd, ap);
 
     if (distToTouchdown < apVtolHoverEngageRadius(spd)) say('vtol_descent', '垂直降下');
     return;
@@ -1048,13 +1118,34 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.flap = 1;
     controls.throttle = 0; // 前へ進む推力は切る。速度は抗力任せで落ちていく
 
-    const hover = apVtolHoverAngles(state, plan.threshold.x, plan.threshold.z);
+    // **接地の直前は水平に戻す**。ホバーの傾きは水平移動のためのものだが、
+    // 傾いたまま降りると脚が1本だけ先に着く——そこで垂直エンジンが切れると
+    // 支える力が無くなり、そのまま倒れる（実測でサンダーバード2号が
+    // ピッチ-9.5°・ロール-12.6°のまま片脚接地し、24.9Gで転がった）。
+    // 低いところでは位置を直すより、水平に降りることを優先する。
+    const tiltMax = AP_VTOL_TILT_MAX
+      * apClamp(state.altitudeAglM / AP_VTOL_LEVEL_AGL_M, 0.15, 1);
+    const hover = apVtolHoverAngles(state, plan.threshold.x, plan.threshold.z, tiltMax);
     controls.pitch = apElevatorForPitch(state, controls, hover.wantPitchDeg, dt, spd, ap);
     controls.roll = apAileronForBank(state, hover.wantBankDeg, spd);
     controls.yaw = apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP, -1, 1);
 
     // 沈下率は残りの高さに比例させる（引き起こしと同じ考え方。高いうちは速く、近づくほどゆっくり）
-    const targetVs = -apClamp(state.altitudeAglM * AP_VTOL_SINK_KP, 0.3, AP_VTOL_SINK_MAX);
+    //
+    // **ただし、前へ進む速度が残っているうちは降りない**。ここは沈下率を
+    // 高さだけで決めていたので、進入速度のまま垂直降下に入った機体が、
+    // 減速しきる前に接地していた——実測（進入157ktの垂直離着陸機）で、
+    // 対地80mから降りはじめて対地速度15ktのまま接地し、そこから
+    // ブレーキが効くにつれてピッチが 0.6°→-30°→-62° と突っ込んで、
+    // **脚が重心より後ろ寄りの機体（サンダーバード1号など）はそのまま前へ転がった**
+    // （接地後16G・ロール180°）。止まる前に降りてしまうと、着地点も
+    // 通り過ぎる（実測で32m先に降り、そのまま滑っていった）。
+    // ホバーの傾き（apVtolHoverAngles）は速度を打ち消す向きに働くので、
+    // 降りずに待っていれば止まる。止まってから降りる。
+    const slowEnough = apClamp(
+      (AP_VTOL_DESCENT_GS_MPS - state.groundSpeed) / AP_VTOL_DESCENT_GS_MPS, 0, 1);
+    const targetVs = -apClamp(state.altitudeAglM * AP_VTOL_SINK_KP, 0.3, AP_VTOL_SINK_MAX)
+      * slowEnough;
     controls.vtolThrottle = apVtolThrottleForVs(controls, state.verticalSpeed, targetVs, dt);
 
     if (state.onGround) { say('vtol_touchdown', '接地'); return; }
@@ -1207,7 +1298,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     const wantAlt = overTerrain(plan.fafAltM + 150);
     ap.vsCmd = overTerrainVs(apVsForAltitude(state, wantAlt, apClimbCap(state, spd)));
     ap.targetSpeedMps = spd.climb;
-    controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd, ap);
+    controls.pitch = apElevatorForPitch(state, controls,
+      apPitchForVs(state, ap.vsCmd, undefined, terrainPitchMax()), dt, spd, ap);
     // 最終進入開始点に戻って、高度も合っていれば進入をやり直す
     if (distFaf < 2500 && Math.abs(state.altitudeM - wantAlt) < 250) say('approach', '最終進入');
     return;
@@ -1517,6 +1609,7 @@ if (typeof module !== 'undefined' && module.exports) {
     apWrap180, apBearingTo, apForward, apRight,
     apElevatorForPitch, apAileronForBank, apAileronForTrack, apGroundTrackDeg,
     apSurfaceGain, apBankLimit, apTerrainFloor, apBankAglFactor, apBankClimbFactor, apVsLimits,
+    apTerrainEscapeVs, apVtolHoverAngles,
   apPitchForVs, apBankForHeading, apFlareHeight,
     apVsForAltitude, apThrottleForSpeed,
   };
