@@ -148,13 +148,23 @@ function apTerrainFloor(state, env, clearanceM) {
     AP_TERRAIN_LOOKAHEAD_MIN_M, AP_TERRAIN_LOOKAHEAD_MAX_M);
   const up = Math.max(apVsLimits(state).up * AP_TERRAIN_CLIMB_MARGIN, 0.1);
   let floorM = -Infinity, vsNeed = -Infinity;
-  for (let i = 1; i <= AP_TERRAIN_SAMPLES; i++) {
+  // i=0（真下、d=0）も見る。前方サンプルは look/AP_TERRAIN_SAMPLES 間隔
+  // （遅い機体でも最低10km/24点≈417m刻み）なので、越えている地形の
+  // 残りがその刻み幅より短くなると前方サンプルが全部その先の平地を
+  // 拾ってしまい、まだ真下・すぐ先に残っている地形を見失う——実測で
+  // 幅4kmの尾根の終端付近（残り400m）で floorM が数フレームで
+  // 300m台からマイナスへ落ち、対地0mまで沈んでいた。真下を毎回
+  // 混ぜておけば、地形の上にいるあいだは floorM が地形の高さを
+  // 下回らない。d=0 は vsNeed（d/v で割る）には使わない——真下の
+  // ぶんは「これから何秒で着くか」という話ではないので馴染まない。
+  for (let i = 0; i <= AP_TERRAIN_SAMPLES; i++) {
     const d = look * i / AP_TERRAIN_SAMPLES;
     const h = gh(state.position.x + dir.x * d, state.position.z + dir.z * d);
     if (!(h > -1e5)) continue;
     const top = h + clearanceM;
     const need = top - up * (d / v);
     if (need > floorM) floorM = need;
+    if (d <= 0) continue;
     const vs = (top - state.altitudeM) / (d / v);
     if (vs > vsNeed) vsNeed = vs;
   }
@@ -198,6 +208,28 @@ function apBankAglFactor(state) {
   if (state.onGround) return 0;
   return apClamp((state.altitudeAglM - AP_BANK_AGL_LO)
     / (AP_BANK_AGL_HI - AP_BANK_AGL_LO), 0, 1);
+}
+
+// --- 登る必要があるときは深く傾けない ---------------------------------------------
+//
+// バンク角φで水平を保つだけで揚力を1/cosφ倍に増やす必要があり、揚力係数が
+// 上がったぶん誘導抗力はその2乗（Cdi∝Cl²）で増える。推力の余りはそこに
+// 食われ、登る/降りるための力が残らない。実測（内蔵の練習機、指示+3m/s）：
+//   バンク 0°→実際2.5m/s（ほぼ指示どおり）　15°→2.3m/s　30°→0.5m/s（8割減）
+//   45°→ -1.5m/s（登るどころか沈む）　60°→ -5.3m/s
+// 前方の地形を越えるのに昇降率が要る（terrain.vsNeed）とき、これまでは
+// バンクを navから独立に旋回半径だけで決めていたので、旋回に揚力を使い切って
+// 登れないまま地面へ近づいていく——「曲がり続けて地面が迫っても登ろうとしない」
+// に見える壊れ方はこれ。実測で、Boeing 747・サンダーバード2号とも、目的地が
+// 近く大きく旋回しながら山を越える場面で対地高度がほぼ0m（機体によっては
+// 山にめり込んで負の値）まで落ちていた。
+// TAWSの引き起こし操作が「バンクを戻して真っ直ぐ引き起こす」のと同じ理由で、
+// 越えるのに要る昇降率が、出せる上昇率に対してどれだけ切迫しているかでバンクを絞る。
+const AP_BANK_CLIMB_RATIO_ZERO = 0.5; // 要る昇降率が出せる上限のこの割合に達したら水平まで戻す
+function apBankClimbFactor(state, vsNeededMps) {
+  if (!(vsNeededMps > 0)) return 1;
+  const up = Math.max(apVsLimits(state).up, 0.1);
+  return apClamp(1 - (vsNeededMps / up) / AP_BANK_CLIMB_RATIO_ZERO, 0, 1);
 }
 
 // --- 経路の形 -----------------------------------------------------------------
@@ -701,9 +733,22 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   const distFaf = Math.hypot(state.position.x - tx, state.position.z - tz);
   ap.distanceM = distFaf;
 
-  // 前方の地面から決まる「下回ってはいけない高度」。上昇・巡航・降下で使う
-  // （進入から先は滑走路そのものへ降りるので掛けない）。
-  const terrain = apUpdateTerrainFloor(state, ap, env, dt, plan ? distFaf : undefined);
+  // 前方の地面から決まる「下回ってはいけない高度」。離陸から着陸まで、
+  // どの段でも同じものを使う。
+  //
+  // 空港へ近づくほど余裕を減らす（タラップ参照）タイミングは、**接地点までの
+  // 距離**で測る——distFaf（最終進入開始点までの距離）だと、FAFを過ぎたとたん
+  // 「FAFから離れた距離」に転じて増えはじめ、滑走路のすぐ上で余裕300mが
+  // 復活して接地の引き起こしと喧嘩する。それだけでなく、やり直し（goaround）は
+  // 逆にFAFへ向かって戻るので、FAFの手前でdistFafが小さくなり、やり直し側の
+  // 余裕だけ先に0へ近づく——進入と要求する高さが食い違って、
+  // やり直し⇄進入を1秒に何度も往復する暴走が実際に起きた。
+  // 接地点までの距離なら、FAFの前でもあとでも、やり直し中でも、着陸に近づくほど
+  // 単調に減っていくので、どの段からでも同じ答えになる。
+  const distTouchdown = plan
+    ? Math.hypot(state.position.x - plan.aim.x, state.position.z - plan.aim.z)
+    : undefined;
+  const terrain = apUpdateTerrainFloor(state, ap, env, dt, distTouchdown);
   const floorM = terrain.floorM;
   const overTerrain = (altM) => (floorM > -1e5 ? Math.max(altM, floorM) : altM);
   // 山を越えるのに要る昇降率。指示が足りなければこれで底上げする
@@ -792,8 +837,9 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   const nav = () => {
     const want = plan ? apBearingTo(state.position.x, state.position.z, tx, tz) : state.headingDeg;
     ap.targetHeadingDeg = want;
-    // 対地高度が低いうちは浅く（apBankAglFactor 参照）
-    const bankLim = spd.bankMax * apBankAglFactor(state);
+    // 対地高度が低いうちは浅く（apBankAglFactor）、地形を越えるのに昇降率が
+    // 要るときも浅く（apBankClimbFactor）——登るほうを旋回より優先する。
+    const bankLim = spd.bankMax * apBankAglFactor(state) * apBankClimbFactor(state, terrain.vsNeed);
     controls.roll = apAileronForTrack(state, want, bankLim, spd);
     controls.yaw = apRudderForCoordination(state);
   };
@@ -1033,10 +1079,33 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
       : apRudderForCoordination(state);
 
     // 縦：接地点まであと何mかで高度が決まる
-    const wantAlt = plan.elevationM + Math.max(t.before, 0) * plan.glide;
-    // 進入では上げ過ぎない（高すぎたときは降りるほうを優先する）
-    ap.vsCmd = apVsForPath(state, wantAlt, plan.glide,
-      Math.min(apClimbCap(state, spd), Math.max(state.airspeed * 0.05, 2)));
+    const glideAlt = plan.elevationM + Math.max(t.before, 0) * plan.glide;
+
+    // **最終進入区間にも地形を見る**。ここから先は「滑走路そのものへ降りるので
+    // 掛けない」としていたが、それはFAF〜滑走路の9kmが山を越えていない前提の
+    // 話——進入計画そのものが山を越えている空港（実際にありうる）では、
+    // 見ないと引き起こしの直前まで気づけない。outer scope の floorM は
+    // 接地点までの距離でタラップしてある（apStepFullの冒頭を参照）ので、
+    // やり直し（goaroundはFAFへ戻るのでdistFafが縮む）と進入（滑走路へ
+    // 進むのでt.beforeが縮む）とで要求する高さが食い違わない。
+    //
+    // **越えているあいだは、進入の細かい制御をいったん脇へ置く**。
+    // 「地形の床がいまの3°経路より高い＝床のほうへ乗せる」だけを goaround への
+    // 分岐でやろうとすると、床はまだ前方にあり続けるので、越えきって
+    // 現在高度が十分でも「3°経路そのものはまだ床の下」という理由でgoaroundへ
+    // 戻ってしまい、goaroundの再進入判定（FAFに近い・高さが合っている）も
+    // すぐ満たしてしまうため、**1フレームおきに進入とやり直しを何百回も往復する
+    // 暴走**になった（実測）。越えているあいだ（floorM>glideAlt）は素直に
+    // 床そのものを目標にし、上昇の段と同じ上昇率まで許す——ここを
+    // 「3°経路を細かく追う」ぶんの小さな上限（Math.max(speed*0.05,2)）に
+    // 絞ったままだと、失速速度ぎりぎりに貼り付いて出力が0%⇔100%を往復する
+    // 不安定な這うような飛び方になった（実測、対地高度70m前後で数百秒
+    // 動けなくなった）。越え終えたらこれまでどおりの細かい経路追従へ戻る。
+    const overFloor = floorM > -1e5 && floorM > glideAlt;
+    const wantAlt = overFloor ? floorM : glideAlt;
+    const upMax = overFloor ? apClimbCap(state, spd)
+      : Math.min(apClimbCap(state, spd), Math.max(state.airspeed * 0.05, 2));
+    ap.vsCmd = apVsForPath(state, wantAlt, overFloor ? 0 : plan.glide, upMax);
     controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd, -8, 12), dt, spd, ap);
 
     // **経路より高いときは出力を切る**。高いのに速度を出力で保とうとすると、
@@ -1052,10 +1121,15 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 低いときは**目標速度のほうを上げる**。出力を直接足すやり方だと、推力が
     // 桁外れな機体（サンダーバード1号は推力重量比325）が一瞬で加速して
     // 経路から飛び出す。速度で足せば、速度の輪がそのまま出力を押さえてくれる。
-    const pathErr = state.altitudeM - wantAlt; // 正なら経路より高い
+    //
+    // **地形の床を追っているあいだは「高いから絞る」を掛けない**。山を
+    // 越えるために意図して3°経路より高く飛んでいるので、それを「高すぎる」と
+    // 見て出力を切ると、登るための力を自分で奪ってしまう（実測、これが
+    // 抜けていたときに失速速度ぎりぎりの這うような飛び方になっていた）。
+    const pathErr = state.altitudeM - glideAlt; // 正なら経路より高い
     const low = apClamp(-pathErr / AP_LOW_ON_PATH_M, 0, 1);
     ap.targetSpeedMps = spd.approach * (1 + AP_LOW_ON_PATH_GAIN * low);
-    controls.throttle = pathErr > AP_HIGH_ON_PATH_M
+    controls.throttle = (!overFloor && pathErr > AP_HIGH_ON_PATH_M)
       ? 0 : apThrottleForSpeed(state, controls, ap.targetSpeedMps, dt);
     controls.gearDown = true;
     // フラップは残りの距離で下ろす。高度で決めると、高い空港と低い空港で
@@ -1094,8 +1168,12 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.gearDown = false;
     controls.throttle = 1;
     nav();
-    const wantAlt = plan.fafAltM + 150;
-    ap.vsCmd = apVsForAltitude(state, wantAlt, apClimbCap(state, spd));
+    // **やり直しも地形を見る**。ここだけ overTerrain/overTerrainVs を掛けて
+    // いなかったので、山のそばの空港でやり直すと、最終進入開始点の高さまでしか
+    // 上がらず山へ突っ込めた。逃げる動きなのだから、行き先の空港と同じだけ
+    // 地形は避けなければいけない。
+    const wantAlt = overTerrain(plan.fafAltM + 150);
+    ap.vsCmd = overTerrainVs(apVsForAltitude(state, wantAlt, apClimbCap(state, spd)));
     ap.targetSpeedMps = spd.climb;
     controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd, ap);
     // 最終進入開始点に戻って、高度も合っていれば進入をやり直す
@@ -1406,7 +1484,7 @@ if (typeof module !== 'undefined' && module.exports) {
     apMakeApproachPlan, apPickRunwayHeading, apTrackPosition,
     apWrap180, apBearingTo, apForward, apRight,
     apElevatorForPitch, apAileronForBank, apAileronForTrack, apGroundTrackDeg,
-    apSurfaceGain, apBankLimit, apTerrainFloor, apBankAglFactor,
+    apSurfaceGain, apBankLimit, apTerrainFloor, apBankAglFactor, apBankClimbFactor, apVsLimits,
   apPitchForVs, apBankForHeading, apFlareHeight,
     apVsForAltitude, apThrottleForSpeed,
   };

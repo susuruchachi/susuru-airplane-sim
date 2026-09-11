@@ -45,7 +45,7 @@ const {
   createAutopilotState, stepAutopilot, apSpeedSchedule, apMakeApproachPlan,
   apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo, apBankMaxFor,
   apElevatorForPitch, apSurfaceGain, apBankLimit, apBankAglFactor, apTerrainFloor,
-  aircraftDragLengthM,
+  aircraftDragLengthM, apBankClimbFactor, apVsLimits,
 } = ctx;
 
 // 13-autopilot.js / 10-flight.js の同名の定数と同じ値。vmコンテキストの外からは
@@ -2418,6 +2418,109 @@ function autopilotFlight(opts) {
     check(bankLow < 3, '離陸してすぐ、対地高度が低いうちは傾けない（沈んで地面に触る）',
       bankLow.toFixed(0) + '°');
     check(bankHigh > 10, '高度が取れたら、ふつうに旋回する', bankHigh.toFixed(0) + '°');
+  }
+}
+
+// --- 旋回中は登れなくなる／やり直し・進入も地形を見る ------------------------------
+//
+// 「旋回中に墜落しやすい、とくに降下中の旋回で、地面が近いのに曲がり続けて
+// 登ろうとしない」という報告を、実測しながら追いかけた。
+{
+  // (1) バンク角φは水平を保つだけで揚力を1/cosφ倍に増やす必要があり、
+  //     誘導抗力がその2乗で増えるぶん、登る/降りるための力が残らない。
+  //     実測（内蔵の練習機、指示+3m/s）：
+  //       0°→実際2.5m/s（ほぼ指示どおり）　30°→0.5m/s（8割減）　45°→ -1.5m/s（沈む）
+  //     地形を越えるのに要る昇降率（vsNeeded）が出せる上昇率に近づくほど、
+  //     バンクを浅くして登るほうへ回す。
+  check(apBankClimbFactor({ airspeed: 60 }, 0) === 1,
+    '登る必要が無ければ、バンクはそのまま');
+  check(apBankClimbFactor({ airspeed: 60 }, -5) === 1,
+    '降りるだけなら、バンクはそのまま');
+  const up = apVsLimits({ airspeed: 60 }).up;
+  const none = apBankClimbFactor({ airspeed: 60 }, up * 0.01);
+  const some = apBankClimbFactor({ airspeed: 60 }, up * 0.3);
+  const most = apBankClimbFactor({ airspeed: 60 }, up * 0.9);
+  note('バンクと登る余裕', `わずかに要る:${none.toFixed(2)} そこそこ要る:${some.toFixed(2)} かなり要る:${most.toFixed(2)}`);
+  check(none > 0.95, '要る昇降率がわずかなら、バンクはほぼそのまま', none.toFixed(2));
+  check(some < none && most < some, '要る昇降率が増えるほど、バンクは単調に浅くなる',
+    `${none.toFixed(2)} > ${some.toFixed(2)} > ${most.toFixed(2)}`);
+  check(most < 0.3, '出せる上昇率に迫るほど要るときは、ほぼ水平まで戻す', most.toFixed(2));
+
+  // (2) やり直し（goaround）は、これまで地形をまったく見ていなかった。
+  //     FAFへ戻る途中に山があれば、そのまま突っ込んでいた。
+  {
+    const ridge = (x, z) => (z < -3000 && z > -12000 ? 1200 : 0);
+    const fly = () => {
+      const st = createFlightState(), c = createFlightControls();
+      st.position.set(0, 1800, 0); st.velocity.set(0, 0, -80);
+      st.headingDeg = 0;
+      const ap = createAutopilotState();
+      ap.full = true; ap.phase = 'goaround'; ap.destAirportId = 'DST'; ap.targetAltitudeM = 1800;
+      ap.plan = apMakeApproachPlan({ id: 'DST', x: 0, z: -20000, elevationM: 0 },
+        { runwayLengthM: 2400, headingDeg: 0 }, 0);
+      let minAgl = Infinity;
+      for (let i = 0; i < 60 * 300; i++) {
+        stepAutopilot(model, st, c, ap, 1 / 60, { groundHeightAt: ridge });
+        advanceFlight(model, st, c, noWind, ridge, 1 / 60);
+        if (ridge(st.position.x, st.position.z) > 100) minAgl = Math.min(minAgl, st.altitudeAglM);
+        if (st.crashed) break;
+      }
+      return minAgl;
+    };
+    const minAgl = fly();
+    note('やり直し中に山を越える', `尾根上の最低対地高度 ${minAgl.toFixed(0)}m`);
+    check(minAgl > 100, 'やり直し（goaround）も、FAFへ戻る途中の山を越える', minAgl.toFixed(0) + 'm');
+  }
+
+  // (3) 最終進入区間（FAF〜滑走路）に山を挟む空港でも、突っ込まず、
+  //     かつ「やり直し⇄進入」を1秒間に何度も往復する暴走にもならないこと。
+  //     風は180°（headingDeg=0の滑走路がそのまま選ばれる向き）で固定する。
+  {
+    const flyApproach = (ridgeH, ridgeFarZ, seconds) => {
+      const ridge = (x, z) => (z < -3000 && z > ridgeFarZ ? ridgeH : 0);
+      const st = createFlightState(), c = createFlightControls();
+      const ap = createAutopilotState();
+      ap.full = true; ap.destAirportId = 'DST';
+      ap.plan = apMakeApproachPlan({ id: 'DST', x: 0, z: -9000, elevationM: 0 },
+        { runwayLengthM: 2400, headingDeg: 0 }, 180);
+      st.position.set(0, ap.plan.fafAltM, ap.plan.faf.z + 200);
+      st.velocity.set(0, 0, -80);
+      st.headingDeg = ap.plan.heading;
+      ap.phase = 'approach'; ap.targetAltitudeM = ap.plan.fafAltM;
+      let minAgl = Infinity, transitions = 0, prev = 'approach', done = false, crashed = false, t = 0;
+      for (; t < seconds; t += 1 / 60) {
+        stepAutopilot(model, st, c, ap, 1 / 60, { groundHeightAt: ridge });
+        advanceFlight(model, st, c, noWind, ridge, 1 / 60);
+        if (ridge(st.position.x, st.position.z) > 100) minAgl = Math.min(minAgl, st.altitudeAglM);
+        if (ap.phase !== prev) { transitions++; prev = ap.phase; }
+        if (st.crashed) { crashed = true; break; }
+        if (ap.phase === 'done') { done = true; break; }
+      }
+      return { minAgl, transitions, done, crashed, t, phase: ap.phase };
+    };
+
+    // 平らな地面（回帰確認）：これまでどおり素直に着陸できる
+    const flat = flyApproach(0, -7000, 500);
+    check(flat.done && !flat.crashed, '山が無ければ、これまでどおり進入して着陸する',
+      `${flat.done ? '着陸' : (flat.crashed ? '墜落' : '未着陸')} t=${flat.t.toFixed(0)}秒`);
+
+    // 小さい丘（150m、幅1000m）：滑走路まで十分距離を残して越え、そのまま着陸できる
+    const hill = flyApproach(150, -4000, 800);
+    check(hill.minAgl > 30, '進入経路上の小さい丘は、越えて安全な高さを保つ', hill.minAgl.toFixed(0) + 'm');
+    check(hill.done && !hill.crashed, '小さい丘を越えたあとも、ちゃんと着陸できる',
+      `t=${hill.t.toFixed(0)}秒`);
+
+    // 大きな尾根（500m、幅4000m・滑走路の800m手前まで迫る）：3°経路には
+    // どのみち収まりきらない配置なので着陸は求めない——越えきれず
+    // やり直しを繰り返しても、突っ込まず、暴走もしないことだけを見る。
+    const big = flyApproach(500, -7000, 1500);
+    note('最終進入区間に大きな尾根がある空港', `段=${big.phase || '?'} 尾根上の最低対地高度 ${big.minAgl.toFixed(0)}m`
+      + ` / ${big.t.toFixed(0)}秒での段の切り替え ${big.transitions}回`);
+    check(!big.crashed, '越えきれない尾根でも突っ込まない', big.minAgl.toFixed(0) + 'm');
+    check(big.minAgl > -20, '尾根の上を通るときも、対地高度が大きく負に振れない',
+      big.minAgl.toFixed(0) + 'm');
+    check(big.transitions < 20, '進入とやり直しを1秒に何度も往復する暴走にならない',
+      `${big.transitions}回/${big.t.toFixed(0)}秒`);
   }
 }
 
