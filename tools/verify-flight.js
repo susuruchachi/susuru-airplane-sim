@@ -46,6 +46,7 @@ const {
   apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo, apBankMaxFor,
   apElevatorForPitch, apSurfaceGain, apBankLimit, apBankAglFactor, apTerrainFloor,
   aircraftDragLengthM, apBankClimbFactor, apVsLimits, apTerrainEscapeVs, apVtolHoverAngles,
+  apAileronForBank,
 } = ctx;
 
 // 13-autopilot.js / 10-flight.js の同名の定数と同じ値。vmコンテキストの外からは
@@ -2909,6 +2910,111 @@ function autopilotFlight(opts) {
     `ロール${maxRoll.toFixed(0)}° ピッチ${maxPitch.toFixed(0)}°`);
   check(tdDist !== null && tdDist < 100, '着地点のそばに降りる',
     tdDist === null ? '—' : tdDist.toFixed(0) + 'm');
+}
+
+// (10) 回っている最中に、舵が回転を助ける側へ入らないこと。
+//
+// 「ふとローリングがかかると自動制御が必死にエルロンを当てるが、180度
+// ひっくり返ったあたりの、やっと止まってくれそうなタイミングで舵を逆転させて
+// しまい、止まらないままグルグル回り続けて進路変更不能になる」という報告。
+// バンク角のずれだけで舵を決めていたので、回りながら±180°をまたぐたびに
+// 指示が丸ごと逆転し（実測：ロール179°で-1.00、-179°で+1.00）、その反転が
+// 回転と同じ周期で入って、ブランコを押すように回転を育てていた。
+{
+  const spd = { stall: 140, cruise: 400, approach: 180, bankMax: 85 };
+  const at = (rollDeg, rateDegS, want) => apAileronForBank(
+    { rollDeg, airspeed: 200, angularVelocity: { x: 0, y: 0, z: rateDegS * Math.PI / 180 } },
+    want || 0, spd);
+
+  // 止まっているときは今までどおり、近いほうへ起こす
+  check(at(30, 0) < -0.1 && at(-30, 0) > 0.1, '止まっているときは、傾きを戻す向きに当てる',
+    `30°:${at(30, 0).toFixed(2)} -30°:${at(-30, 0).toFixed(2)}`);
+  // ずれは±180°で見る（折り返さないと、背面付近で遠回りのほうへ回そうとする）
+  check(at(-170, 0, 85) < 0, 'バンク目標が大きくても、近いほうへ回す（遠回りしない）',
+    at(-170, 0, 85).toFixed(2));
+
+  // 速く回っているあいだは、背面をまたいでも舵が逆転しない
+  const rows = [90, 120, 200, 300].map((r) => {
+    const a = at(179, -r), b = at(-179, -r);
+    return { r, a, b, same: Math.sign(a) === Math.sign(b) };
+  });
+  note('背面をまたぐときの指示エルロン', rows.map((x) =>
+    `${x.r}°/s:${x.a.toFixed(2)}→${x.b.toFixed(2)}`).join(' '));
+  check(rows.every((x) => x.same), '速く回っているあいだは、背面をまたいでも舵が逆転しない',
+    rows.map((x) => (x.same ? '○' : '×')).join(''));
+  // しかもその向きは、回転を止める向きであること
+  check(rows.every((x) => x.a < 0 && x.b < 0), '回転を止める向きに当て続ける');
+
+  // 上限を超えて回っているときは、回転を育てる側の指示を出さない
+  const fastDriving = at(-179, -200);   // 角度だけ見れば「右へ回せ」と言う場面
+  check(fastDriving < 0, '上限を超えて回っているときは、回転を育てる側へ出さない',
+    fastDriving.toFixed(2));
+
+  // 実際に回してみて、止まって水平に戻ること
+  {
+    const cfg = defaultAircraftConfig();
+    cfg.modelMaxSpeedValue = 2; cfg.modelMaxSpeedUnit = 'mach';
+    for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 20;
+    const m4 = buildAircraftModel(cfg);
+    const s4 = apSpeedSchedule(m4);
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, 8000, 0); st.altitudeM = 8000;
+    st.velocity.set(0, 0, -s4.cruise * 0.5);
+    st.quaternion.setFromEuler(new THREE.Euler(0, 0, -170 * Math.PI / 180, 'YXZ'));
+    st.angularVelocity.z = -2.5;   // 背面で、速く回っている
+    const ap = createAutopilotState();
+    ap.full = true; ap.phase = 'cruise'; ap.targetAltitudeM = 8000; ap.destAirportId = 'DST';
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 200000, z: -200000, elevationM: 0 },
+      { runwayLengthM: 3000, headingDeg: 0 }, 180);
+    let t = 0, prevRoll = st.rollDeg, turns = 0, levelAt = null, maxRate = 0;
+    for (; t < 60; t += 1 / 60) {
+      stepAutopilot(m4, st, c, ap, 1 / 60, {});
+      advanceFlight(m4, st, c, noWind, flatGround, 1 / 60);
+      let d = st.rollDeg - prevRoll;
+      if (d > 180) d -= 360; if (d < -180) d += 360;
+      turns += Math.abs(d) / 360; prevRoll = st.rollDeg;
+      maxRate = Math.max(maxRate, Math.abs(st.angularVelocity.z));
+      if (levelAt === null && Math.abs(st.angularVelocity.z) < 0.2) levelAt = t;
+      if (st.crashed) break;
+    }
+    note('背面・2.5rad/sから立て直す', `60秒で回った量 ${turns.toFixed(1)}回転`
+      + ` / 回転が収まるまで ${levelAt === null ? '収まらず' : levelAt.toFixed(1) + '秒'}`);
+    check(levelAt !== null && levelAt < 10, '速い回転でも、数秒で止まる',
+      levelAt === null ? '止まらない' : levelAt.toFixed(1) + '秒');
+    check(turns < 3, '止まるまでに何回転もしない', turns.toFixed(1) + '回転');
+  }
+
+  // やり直し（goaround）でも、曲がれる速さを大きく超えたら出力を絞ること。
+  // ここだけ全開のままだったので、推力重量比が桁外れな機体は13,000ktまで
+  // 加速し、その速さでは舵がほとんど効かずロールを止められなかった。
+  {
+    const cfg2 = defaultAircraftConfig();
+    for (const p of cfg2.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 60;
+    const m5 = buildAircraftModel(cfg2);
+    const plan5 = apMakeApproachPlan({ id: 'DST', x: 60000, z: 0, elevationM: 0 },
+      { runwayLengthM: 3000, headingDeg: 90 }, 270);
+    // stepAutopilot が使うのと同じ距離で、その経路の「曲がれる速さ」を出す
+    const distToFaf = Math.hypot(plan5.faf.x, plan5.faf.z);
+    const cruise5 = apSpeedSchedule(m5, distToFaf, 100).cruise;
+    const goaroundThrottle = (airspeed) => {
+      const st = createFlightState(), c = createFlightControls();
+      st.position.set(0, 2000, 0); st.altitudeM = 2000;
+      st.airspeed = airspeed; st.groundSpeed = airspeed; st.headingDeg = 90;
+      const ap = createAutopilotState();
+      ap.full = true; ap.phase = 'goaround'; ap.destAirportId = 'DST';
+      ap.targetAltitudeM = 2000;
+      ap.plan = plan5;
+      stepAutopilot(m5, st, c, ap, 1 / 60, {});
+      return c.throttle;
+    };
+    const slow = goaroundThrottle(cruise5 * 0.8);  // 曲がれる速さの内側
+    const fast = goaroundThrottle(cruise5 * 4);    // 曲がれる速さをはるかに超えている
+    note('やり直し中の出力', `曲がれる速さ${(cruise5 * KT).toFixed(0)}kt に対して`
+      + ` その0.8倍:${(slow * 100).toFixed(0)}% 4倍:${(fast * 100).toFixed(0)}%`);
+    check(slow > 0.9, 'やり直しは基本、全開で登る', (slow * 100).toFixed(0) + '%');
+    check(fast < 0.1, '曲がれる速さを大きく超えたら、やり直しでも出力を絞る',
+      (fast * 100).toFixed(0) + '%');
+  }
 }
 
 // --- 計算の速さ ---------------------------------------------------------------

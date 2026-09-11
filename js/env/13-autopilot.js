@@ -407,9 +407,40 @@ function apElevatorForPitch(state, controls, wantPitchDeg, dt, spd, ap) {
 
 // 指示のバンク角を保つエルロン。ロール角速度は符号が逆なので足す。
 // ゲインの速度による割り引きはエレベーターと同じ（apSurfaceGain 参照）。
+// **回っている最中は、角度を合わせにいく前に回転を止める**。
+//
+// バンク角のずれだけで舵を決めていたので、機体が回りはじめると次の2つが起きた。
+//   1. ずれを折り返していなかったので、背面付近では「遠回りのほう」へ回そうと
+//      した。バンク上限の大きい機体（サンダーバード1号は85°）では、
+//      最大265°ぶんのずれを指示にしていた。
+//   2. 回りながら±180°をまたぐたびに指示が**丸ごと逆転**する
+//      （実測：ロール179°で-1.00、-179°で+1.00）。回転と同じ周期で
+//      反転が入るので、ブランコを押すのと同じで回転を育てる側に回る。
+//      「やっと止まりそうなところで舵が逆になり、また回りだす」という
+//      報告そのもの——実測でサンダーバード1号が200°/sで回り続け、
+//      方位を変えられないまま高度が±190kmで暴れて戻れなくなった。
+// 直し方は2つ。ずれは±180°で折り返して近いほうへ回す。そのうえで、
+// **いまの回転を育てる向きの角度項だけ**を、ロール率が上限に近いほど薄める
+// （回転を止める向きなら薄めない）。こうすると速く回っているあいだ、舵は
+// ロール角がどこにあっても必ず回転を止める向きになり、背面をまたいでも
+// 逆転しない。止まってから起こす、という実機の立て直しと同じ順番になる。
+// ついでにロール率がこの上限で頭打ちになる——ピッチに入れてある
+// apPitchRateLimit と同じで、自動操縦が使っていい回転の速さの上限。
+// ふつうの旋回で使うロール率は実測で 練習機16°/s・747で51°/s・TB2で25°/s
+// なので、69°/sを上限にすれば通常の飛行には触らない。
+const AP_ROLL_RATE_MAX = 1.2; // 自動操縦が使っていいロール率の上限(rad/s ≒ 69°/s)
 function apAileronForBank(state, wantBankDeg, spd) {
-  return apClamp(((wantBankDeg - state.rollDeg) * AP_ROLL_KP
-    + state.angularVelocity.z * AP_ROLL_KD) * apSurfaceGain(state, spd), -1, 1);
+  const err = apWrap180(wantBankDeg - state.rollDeg);
+  const rate = state.angularVelocity.z;
+  const damp = rate * AP_ROLL_KD;      // 回転を止める向き
+  const angle = err * AP_ROLL_KP;      // 角度を合わせにいく向き
+  // 残っている回転の余裕。いまの回転が上限に近いほど、回転を育てる指示を薄める
+  // （上限に達したら0＝それ以上は回さない）。回転を止める向きなら薄めない。
+  const headroom = apClamp(
+    (AP_ROLL_RATE_MAX - Math.abs(rate)) / (AP_ROLL_RATE_MAX * 0.5), 0, 1);
+  const driving = angle * damp < 0;    // 減衰と逆向き＝いまの回転を育てる向き
+  return apClamp(((driving ? angle * headroom : angle) + damp)
+    * apSurfaceGain(state, spd), -1, 1);
 }
 
 // --- 中間の段 -----------------------------------------------------------------
@@ -1289,7 +1320,14 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   if (ap.phase === 'goaround') {
     controls.flap = 0.5;
     controls.gearDown = false;
-    controls.throttle = 1;
+    // **やり直しでも、曲がれる速さを大きく超えたら出力を絞る**（climbと同じ）。
+    // ここだけ全開のままだったので、推力重量比が桁外れな機体はやり直しに
+    // 入った瞬間から青天井に加速した——実測でサンダーバード1号が13,000ktに達し、
+    // その速さでは動圧で割り引いた舵（apSurfaceGain）がほとんど効かなくなって、
+    // 一度入ったロールを止められないまま回り続けた。曲がれない速さで
+    // 飛び続けても、やり直しの目的（FAFへ戻る）は果たせない。
+    const overCruise = state.airspeed - spd.cruise * 1.5;
+    controls.throttle = overCruise > 0 ? apClamp(1 - overCruise * 0.1, 0, 1) : 1;
     nav();
     // **やり直しも地形を見る**。ここだけ overTerrain/overTerrainVs を掛けて
     // いなかったので、山のそばの空港でやり直すと、最終進入開始点の高さまでしか
