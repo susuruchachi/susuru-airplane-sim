@@ -33,6 +33,10 @@ const GEAR_BRAKE_FRICTION = 0.55;  // ブレーキ全踏み
 const GEAR_SIDE_FRICTION = 0.85;   // 横滑りに耐えるタイヤの摩擦
 const GEAR_STEER_MAX_DEG = 32;
 
+// 逆噴射は止まりかけでは切る。実機の逆推力装置も止まる前に格納する決まりで、
+// 入れっぱなしにすると機体が後ろへ走り出す（手で引きっぱなしにしても同じ）。
+const REVERSE_FADE_MPS = 2;
+
 // --- 大気 -------------------------------------------------------------------
 
 // 国際標準大気（対流圏）。高いほど薄くなり、揚力も推力も落ちる。
@@ -98,6 +102,10 @@ function createFlightControls() {
     throttle: 0,                 // 0〜1（前へ進むエンジン）
     vtolThrottle: 0,             // 0〜1（垂直離陸用のリフトエンジン。別のレバー）
     flap: 0,                     // 0〜1
+    // スポイラー（エアブレーキ）。揚力を削って抗力を出す、フラップとは別のレバー。
+    spoiler: 0,                  // 0〜1
+    // 逆噴射。地上でだけ効く（10-flight.js の推力の項を参照）。
+    reverse: 0,                  // 0〜1
     brake: 0,                    // 0〜1
     gearDown: true,
     parkingBrake: true,
@@ -156,6 +164,11 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
 
     // 舵角を足す
     const flapPart = s.flap * controls.flap;
+    // スポイラーは翼の上に板を立てるもの。揚力の側は「キャンバーを逆へ折る」
+    // ぶんとしてフラップと同じ土俵で足し（符号は逆）、板そのものの抗力は
+    // 下の cd に別口で足す。
+    const spoilerCmd = THREE.MathUtils.clamp(controls.spoiler || 0, 0, 1);
+    const spoilerPart = -(s.spoiler || 0) * spoilerCmd;
     // トリムは別勘定。水平尾翼を持つ機体では**安定板まるごとの取付角**を動かすので、
     // エレベーターとは足し算になる。尾翼を持たない機体ではトリムもエレベーターと
     // 同じ蝶番の舵を動かす（09-aircraft.js の assignTrimAuthority 参照）。
@@ -167,7 +180,7 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
       + (s.trimHinged === false ? 0 : trimDefl);
     // 翼まるごとの取付角が変わるぶん（安定板トリム）。力は空力中心にそのまま掛かる。
     const trimmed = s.trimHinged === false ? trimDefl : 0;
-    const deflect = hinged + trimmed + flapPart;
+    const deflect = hinged + trimmed + flapPart + spoilerPart;
     const alphaEff = alpha + deflect;
 
     // フラップは「翼のキャンバーを増やす」もの。迎角をずらすだけの扱いにすると、
@@ -184,12 +197,13 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
     // 失速角そのものは「機体の迎角で何度か」で決める（s.alphaGain の説明を参照）。
     // 舵とフラップのぶんは、もう翼が感じる角度で足してあるので倍率は掛けない。
     const stallLimit = stallRad * (s.alphaGain || 1)
-      + Math.abs(flapPart) + Math.abs(hinged + trimmed);
+      + Math.abs(flapPart) + Math.abs(spoilerPart) + Math.abs(hinged + trimmed);
 
     const cl = liftCoefficient(alphaEff, stallLimit);
     const cdi = (cl * cl) / (Math.PI * s.aspect * AERO_DEFAULTS.oswald);
     const cd = AERO_DEFAULTS.cd0Wing + cdi + stallDragExtra(alphaEff, stallLimit)
-      + Math.abs(deflect) * 0.35; // 舵を切れば抗力も増える
+      + Math.abs(deflect) * 0.35 // 舵を切れば抗力も増える
+      + (s.spoilerCd || 0) * spoilerCmd; // 立てた板そのものの抗力
 
     const q = 0.5 * rho * v2 * s.area;
 
@@ -217,7 +231,7 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
     // 動く舵とは別物だから。入れると、フラップ全開で機首下げが勝ってしまい、
     // 内蔵の練習機がエレベーターを一杯に引いても失速させられなくなった（実測）。
     if (hinged) {
-      let dCl = cl - liftCoefficient(alpha + trimmed + flapPart, stallLimit);
+      let dCl = cl - liftCoefficient(alpha + trimmed + flapPart + spoilerPart, stallLimit);
       // **失速した舵は効かなくなるだけで、逆には効かない**。揚力の曲線の差で
       // 出すと、翼が崩れたところでは差の符号まで裏返り、当てた向きと逆の
       // モーメントが出る。実測で Concorde が迎角12°から「機首下げ」を当てると
@@ -273,11 +287,23 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
   // 前へも押されてしまい、ホバリングも垂直着陸もできない。
   const vtolScale = (controls.vtolThrottle || 0) * envScale;
   const mainScale = controls.throttle * envScale;
+  // 逆噴射。ジェットは排気を前へ振り向け、ターボプロップは羽根を裏返して後ろへ引く。
+  // どちらも順推力そのままは出ないので reverseFraction ぶんに絞る。
+  // **地上で、前へ走っているあいだだけ効かせる**——空中で使えると、自動操縦も手動も
+  // 「減速したいから引く」を高度でやってしまい、実機なら空中分解する使い方が
+  // 最適解になってしまう。止まりかけで切るのは REVERSE_FADE_MPS の説明を参照。
+  // 接地判定は前のフレームのものだが、1フレーム（16ms）のずれは効果に出ない。
+  const revScale = state.onGround
+    ? THREE.MathUtils.clamp(controls.reverse || 0, 0, 1) * envScale
+      * AERO_DEFAULTS.reverseFraction
+      * THREE.MathUtils.clamp(-vAirBody.z / REVERSE_FADE_MPS, 0, 1)
+    : 0;
   let thrustTotal = 0, vtolTotal = 0;
   for (const e of model.engines) {
     // 垂直離陸用エンジンは前後バランス（trimScale）ぶん絞ってある。
     // ここで掛け忘れると、モデル構築時に消したはずの機首振りが物理では復活する。
-    const t = e.lift ? e.thrustN * e.trimScale * vtolScale : e.thrustN * mainScale;
+    const t = e.lift ? e.thrustN * e.trimScale * vtolScale
+      : e.thrustN * (mainScale - (e.canReverse ? revScale : 0));
     if (e.lift) vtolTotal += t; else thrustTotal += t;
     out.force.addScaledVector(e.axis, t);
     out.torque.add(_fv.tmp.crossVectors(e.position, _fv.f.copy(e.axis).multiplyScalar(t)));

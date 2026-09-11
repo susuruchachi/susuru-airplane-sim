@@ -23,6 +23,20 @@ const AERO_DEFAULTS = {
   controlMaxDeg: 28,     // 舵面の最大舵角（Builderのmin/maxDegがあればそちらを使う）
   surfaceEffect: 0.55,   // 舵角に対する迎角の変化率（薄翼理論の目安）
   flapEffect: 0.35,      // フラップは面積が小さいので効きも小さい（全開でCl+0.85ほど）
+  // スポイラー（＝エアブレーキ）。翼の上に板を立てて、揚力を削り抗力を出す。
+  // 揚力のほうはフラップを逆に使うのと同じ「キャンバーが減る」扱い、
+  // 抗力のほうは立てた板の正面投影ぶん（翼面積基準）として別に足す。
+  //
+  // spoilerEffect は実測で合わせた。実機の旅客機は進入でスポイラーを全部立てると
+  // 揚力が3割ほど落ちて揚抗比がだいたい半分になる。0.25 だと Thunderbird2 で
+  // 揚力-48%・揚抗比9.3→3.2、軽い三式戦闘機では-78%まで落ちて飛べなくなり、
+  // 0.15 なら -29%(9.3→4.4)、-22%、-47% と機体をまたいで実機並みに収まる。
+  // spoilerDragCd のほうは、舵角20°で有害抗力+0.068（実機の0.06〜0.08）。
+  spoilerEffect: 0.15,
+  spoilerDragCd: 0.20,
+  // 逆噴射で出せる推力（順推力に対する割合）。実機のターボファンの逆推力は
+  // 定格の40〜50%ほど。
+  reverseFraction: 0.45,
   fuselageCd: 1.00,      // 胴体の抗力係数（前面投影面積基準）
   gearCd: 1.00,          // 出した脚の抗力係数（gearDragArea 基準）
   fuselageSideCd: 0.80,  // 横滑りしたときの側面抗力
@@ -342,6 +356,8 @@ function buildAircraftModel(config) {
       side: center.x > 0.05 ? 'right' : (center.x < -0.05 ? 'left' : 'center'),
       // 舵の効き。舵面を割り当てるときに埋める
       pitch: 0, roll: 0, yaw: 0, flap: 0,
+      // スポイラー（別のレバー）。揚力を削るぶんと、立てた板が出す抗力
+      spoiler: 0, spoilerCd: 0,
     };
     surf.alphaGain = surfaceAlphaGain(surf);
     surfaces.push(surf);
@@ -379,7 +395,15 @@ function buildAircraftModel(config) {
     else if (kind === 'rudder') target.yaw += gain;
     else if (kind === 'aileron') target.roll += gain * (target.side === 'left' ? 1 : -1);
     else if (kind === 'flap') target.flap += THREE.MathUtils.degToRad(maxDeg) * AERO_DEFAULTS.flapEffect;
-    else if (kind === 'spoiler') target.flap -= THREE.MathUtils.degToRad(maxDeg) * AERO_DEFAULTS.flapEffect * 0.5;
+    // スポイラーは**フラップとは別のレバー**。ここを target.flap の引き算にすると、
+    // フラップを下ろした瞬間にスポイラーも一緒に立ち上がり、増えるはずの揚力を
+    // 自分で削ってしまう——実測で Thunderbird2 のフラップ全開が、スポイラーを
+    // 積んでいるせいで揚力+94%から+47%まで落ち、抗力も52kNから34kNしか出ず、
+    // 「スポイラーを付けるほど降りられず止まれない機体」になっていた。
+    else if (kind === 'spoiler') {
+      target.spoiler += THREE.MathUtils.degToRad(maxDeg) * AERO_DEFAULTS.spoilerEffect;
+      target.spoilerCd += Math.sin(THREE.MathUtils.degToRad(maxDeg)) * AERO_DEFAULTS.spoilerDragCd;
+    }
   }
 
   // 舵面が1枚も無い機体でも飛べるように、役割から最低限の効きを与える
@@ -433,6 +457,10 @@ function buildAircraftModel(config) {
       axis: axis.applyQuaternion(qFix).normalize(),
       axisNoTilt: axisNoTilt.applyQuaternion(qFix).normalize(),
       thrustN: Math.max((p.props && p.props.thrustKgf) || 0, 0) * 9.80665,
+      // 逆噴射できるか。ジェットは排気を前へ振り向け、ターボプロップは羽根の角度を
+      // 裏返して後ろへ引ける。**ふつうのプロペラ機（固定ピッチ）はできない**ので、
+      // Builderの「逆噴射なし」で切れるようにしてある（内蔵の練習機や三式戦闘機）。
+      canReverse: !(p.props && p.props.noReverse) && spin !== 'y',
     };
   }).filter((e) => e.thrustN > 0);
   applyVtolTrim(engines);
@@ -491,6 +519,12 @@ function buildAircraftModel(config) {
     vtolThrustN: engines.reduce((a, e) => a + (e.lift ? e.thrustN * e.trimScale : 0), 0),
     vtolThrustNRaw: engines.reduce((a, e) => a + (e.lift ? e.thrustN : 0), 0),
     hasVtol: engines.some((e) => e.lift),
+    // 減速装置を持っているか。自動操縦と計器は「積んでいる機体だけ使う」ので、
+    // 持っていない機体に効かないレバーを引かせないためにここで数えておく。
+    hasSpoiler: surfaces.some((s) => s.spoiler > 0 || s.spoilerCd > 0),
+    // 逆噴射で実際に出せる力（絞ったあと）。自動操縦はこれでレバーの量を決める。
+    reverseThrustN: engines.reduce((a, e) => a + (e.canReverse ? e.thrustN : 0), 0)
+      * AERO_DEFAULTS.reverseFraction,
     // 壊れた取付角を捨てたか（性能診断に出す）
     engineTiltIgnored,
     // 車輪の高さ（接地点が重心からどれだけ下か）
@@ -1017,7 +1051,8 @@ function defaultAircraftConfig() {
       {
         id: 'eng_1', type: 'engine', name: 'エンジン',
         position: { x: 0, y: 1.25, z: -1.85 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
-        props: { thrustKgf: 380, spinAxis: 'z' },
+        // 練習機は固定ピッチのプロペラ機。羽根の角度を裏返せないので逆噴射はできない。
+        props: { thrustKgf: 380, spinAxis: 'z', noReverse: true },
       },
       gear('g_nose', '前脚', 'nose', 0, -1.35),
       gear('g_main_l', '主脚 左', 'main_left', -1.30, 0.35),

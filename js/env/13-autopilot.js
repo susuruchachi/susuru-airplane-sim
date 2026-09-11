@@ -58,10 +58,18 @@ const AP_VTOL_CLIMB_MPS = 3;     // 垂直離陸で目指す上昇率(m/s)。姿
 const AP_VTOL_SINK_KP = 0.15;    // 垂直着陸：残り高度1mあたりの目標沈下率(m/s)
 const AP_VTOL_SINK_MAX = 3;      // 垂直着陸：目標沈下率の上限(m/s)
 const AP_VTOL_VS_KP = 0.20;      // 昇降率のずれ1m/sあたり、毎秒どれだけ垂直エンジン出力を動かすか
+// 上下の加速度に対する減衰。**これが無いと必ず振動する**——垂直エンジンの出力は
+// 加速度を決めるもので、そこから昇降率まではもう一段の積分がある。その二重積分を
+// 積分だけ（AP_VTOL_VS_KP）で回すと位相が180°遅れて、止まらない往復になる。
+// 実測でサンダーバード1号が接地の直前に昇降率+120〜-240fpmを2.5秒周期で振り、
+// 接地の硬さが「その瞬間どの位相だったか」で2.2G〜4.0Gに散らばっていた。
+const AP_VTOL_VS_KD = 0.15;
+const AP_VTOL_ACCEL_TAU = 0.25; // 加速度の測り方をならす時定数(秒)。差分そのままは跳ねる
 const AP_VTOL_TRANSITION_AGL_M = 30; // これより高く上がったら、前へ進むエンジンへ切り替え始める
 const AP_VTOL_HOVER_AGL_M = 80;  // 着陸時、この高さまで来たら垂直降下に切り替える
 const AP_VTOL_HOVER_RADIUS_MIN_M = 300; // 着陸点からこの距離まで来たら垂直降下に切り替える（下限）
-const AP_VTOL_CUT_SEC = 3;       // 接地後、垂直エンジンを抜ききるまでの秒数
+const AP_VTOL_CUT_SEC = 3;       // 接地後、垂直エンジンの出力が1/eまで落ちる秒数
+const AP_VTOL_CUT_FLOOR = 0.02;  // 割合で抜くだけだと0に着かないので、足す絶対の速さ(毎秒)
 // 垂直降下：対地速度がこれ以上あるうちは降りない（止まってから降ろす）。
 // ここまで落ちれば、接地してブレーキを踏んでも前へ転がらない。
 const AP_VTOL_DESCENT_GS_MPS = 4;
@@ -82,9 +90,21 @@ function apVtolHoverEngageRadius(spd) {
 }
 
 // 垂直エンジンの出力を、目標の昇降率へ少しずつ近づける（apThrottleForSpeedと同じ形）
-function apVtolThrottleForVs(controls, currentVs, targetVs, dt) {
+function apVtolThrottleForVs(controls, currentVs, targetVs, dt, ap) {
   const err = targetVs - currentVs;
-  return apClamp((controls.vtolThrottle || 0) + err * AP_VTOL_VS_KP * dt, 0, 1);
+  // いまの上下の加速度を、昇降率の差分から測ってならす（AP_VTOL_VS_KDの説明を参照）。
+  let accel = 0;
+  if (ap) {
+    if (ap.vtolLastVs !== undefined && dt > 0) {
+      const raw = (currentVs - ap.vtolLastVs) / dt;
+      const k = apClamp(dt / AP_VTOL_ACCEL_TAU, 0, 1);
+      ap.vtolAccel = (ap.vtolAccel || 0) + (raw - (ap.vtolAccel || 0)) * k;
+    }
+    ap.vtolLastVs = currentVs;
+    accel = ap.vtolAccel || 0;
+  }
+  return apClamp((controls.vtolThrottle || 0)
+    + (err * AP_VTOL_VS_KP - accel * AP_VTOL_VS_KD) * dt, 0, 1);
 }
 
 // ホバー中に目標地点（世界座標）へ寄せるための、目標ピッチ角・バンク角。
@@ -278,6 +298,24 @@ const AP_LOW_ON_PATH_GAIN = 0.15; // 上乗せの最大（進入速度の何割�
 const AP_DECEL_MPS2 = 0.7;
 // ルートのうち、減速に使っていいと見なす割合（apSpeedSchedule の slowableV）
 const AP_DECEL_ROUTE_FRACTION = 0.5;
+
+// --- 減速装置（スポイラー・逆噴射） ---------------------------------------------
+//
+// どちらも実機の進入と着陸でいちばん頼る減速手段なのに、自動操縦はこれまで
+// 「出力を絞る」「脚を出す」「フラップを下ろす」しか持っていなかった。そのせいで
+// 降りることと減速することが姿勢ひとつの取り合いになり、推力の大きい機体は
+// 進入までに落としきれずにやり直しを繰り返していた。
+//
+// **どちらも割合で効かせる**。0か1で切り替えると60Hzで往復して平均50%の
+// 中途半端な効きになる（この自動操縦で何度も踏んだ失敗）。
+const AP_SPOILER_OVERSPEED = 0.06; // 目標速度をこの割合こえたら全開
+const AP_SPOILER_PATH_M = 120;     // 経路をこれだけ上回ったら全開(m)
+const AP_SPOILER_THR_GATE = 0.25;  // 出力がこれ以上入っていたら立てない
+// 逆噴射で足す減速度の目安(m/s²)。推力が桁外れな機体（推力重量比300超の
+// フィクション機がある）にレバーを一杯まで入れさせると、逆向きに10Gが掛かって
+// 機体を裏返す。「止まるのに要るぶんだけ」出すよう、力ではなく減速度で決める。
+const AP_REVERSE_DECEL_MPS2 = 3.0;
+const AP_REVERSE_FADE_MPS = 8;     // これより遅くなったらレバーを戻す(m/s)
 
 // --- 小道具 -------------------------------------------------------------------
 
@@ -564,6 +602,27 @@ function apThrottleForSpeed(state, controls, targetMps, dt) {
   return apClamp(controls.throttle + err * AP_THR_KP_REL * dt, 0, 1);
 }
 
+// スポイラーをどれだけ立てるか。
+// 「出力を絞っているのに、まだ速い／まだ高い」ぶんだけ立てる。速度のずれは
+// 割合で見る——出力と同じ理由で、絶対値だと速い機体ほど同じずれで激しく動く。
+// 出力が入っているあいだは立てない（推力とエアブレーキを同時に使うのは、
+// 自分で自分と綱引きしているだけ）。
+function apSpoilerCommand(model, controls, state, targetSpeedMps, aboveM) {
+  if (!model.hasSpoiler) return 0;
+  const fast = apClamp((state.airspeed / Math.max(targetSpeedMps, 1) - 1)
+    / AP_SPOILER_OVERSPEED, 0, 1);
+  const high = apClamp((aboveM || 0) / AP_SPOILER_PATH_M, 0, 1);
+  const idle = apClamp(1 - controls.throttle / AP_SPOILER_THR_GATE, 0, 1);
+  return Math.max(fast, high) * idle;
+}
+
+// 逆噴射をどれだけ入れるか。狙った減速度になるぶんだけ。
+function apReverseCommand(model, state) {
+  if (!(model.reverseThrustN > 0)) return 0;
+  const want = model.massKg * AP_REVERSE_DECEL_MPS2 / model.reverseThrustN;
+  return apClamp(want, 0, 1) * apClamp(state.groundSpeed / AP_REVERSE_FADE_MPS, 0, 1);
+}
+
 // 旋回の釣り合い。横滑りを打ち消す向きへラダーを当てる。
 function apRudderForCoordination(state) {
   return apClamp(-state.betaDeg * AP_YAW_KP, -0.5, 0.5);
@@ -785,6 +844,8 @@ function createAutopilotState() {
     pitchCmdDeg: undefined, // 実際に舵へ渡している指示ピッチ（変化率を制限したあと）
     rotating: false,        // 離陸滑走で機首上げを始めたか
     descentSpeedCapMps: 0,  // 降下中の速度の上限（降下に入った時点の速さ）
+    // 垂直エンジンの輪の減衰に使う、上下の加速度（apVtolThrottleForVs）
+    vtolLastVs: undefined, vtolAccel: 0,
     // 表示用
     vsCmd: 0, targetHeadingDeg: 0, targetSpeedMps: 0, distanceM: 0,
   };
@@ -807,6 +868,11 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   };
 
   controls.parkingBrake = false;
+  // 減速装置は「使う段が毎フレーム入れ直す」ことにする。段をまたいだときに
+  // 前の段の指示が残っていると、たとえば進入で立てたスポイラーがやり直しの
+  // 上昇にそのまま付いてくる。
+  controls.spoiler = 0;
+  controls.reverse = 0;
 
   // 目的地までの距離（進入計画があれば最終進入開始点まで）
   const tx = plan ? plan.faf.x : state.position.x;
@@ -858,7 +924,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.yaw = apClamp(err * AP_STEER_KP, -1, 1);
     controls.pitch = apElevatorForPitch(state, controls, 0, dt, spd, ap);
     controls.roll = apAileronForBank(state, 0, spd);
-    controls.vtolThrottle = apVtolThrottleForVs(controls, state.verticalSpeed, AP_VTOL_CLIMB_MPS, dt);
+    controls.vtolThrottle = apVtolThrottleForVs(controls, state.verticalSpeed, AP_VTOL_CLIMB_MPS, dt, ap);
     if (state.altitudeAglM > AP_VTOL_TRANSITION_AGL_M) say('vtol_transition', '前進エンジンへ切替');
     return;
   }
@@ -1100,6 +1166,11 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     } else {
       controls.gearDown = false;
     }
+    // 出力を絞ってもまだ速い／まだ高いぶんだけスポイラーを立てる。
+    // 脚と同じ「降りることと減速することを姿勢の取り合いにしない」ための道具で、
+    // 脚より効きが大きく、引っ込めるのも速い。
+    controls.spoiler = apSpoilerCommand(model, controls, state,
+      ap.targetSpeedMps, state.altitudeM - wantAlt);
     // 目標が巡航高度で頭打ちのあいだは、まだ坂に乗っていない＝前送りは要らない
     const onSlope = wantAlt < ap.targetAltitudeM - 1;
     ap.vsCmd = overTerrainVs(apVsForPath(state, wantAlt, onSlope ? AP_DESCENT_SLOPE : 0, apClimbCap(state, spd)));
@@ -1177,7 +1248,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
       (AP_VTOL_DESCENT_GS_MPS - state.groundSpeed) / AP_VTOL_DESCENT_GS_MPS, 0, 1);
     const targetVs = -apClamp(state.altitudeAglM * AP_VTOL_SINK_KP, 0.3, AP_VTOL_SINK_MAX)
       * slowEnough;
-    controls.vtolThrottle = apVtolThrottleForVs(controls, state.verticalSpeed, targetVs, dt);
+    controls.vtolThrottle = apVtolThrottleForVs(controls, state.verticalSpeed, targetVs, dt, ap);
 
     if (state.onGround) { say('vtol_touchdown', '接地'); return; }
     return;
@@ -1197,9 +1268,25 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 一度弾んで浮いたときにそのまま落ちる——実測でサンダーバード1号が接地後
     // 3.7m跳ね上がり、推力が抜けきったところから-8m/sで落ちて8.8Gを記録した。
     // 浮いているあいだは静かに沈むぶんだけ出しておく。
-    controls.vtolThrottle = state.onGround
-      ? Math.max((controls.vtolThrottle || 0) - dt / AP_VTOL_CUT_SEC, 0)
-      : apVtolThrottleForVs(controls, state.verticalSpeed, -AP_VTOL_SETTLE_MPS, dt);
+    //
+    // 抜く速さは**いまの出力に対する割合**で決める。「毎秒いくら」という絶対の
+    // 速さにすると、推力が桁外れな機体はホバーに6%しか使っていないので
+    // 0.2秒で抜けきってしまう——片脚が着いた瞬間（機体はまだ沈みきっておらず、
+    // 傾いていれば残りの脚は宙に浮いている）に支えが消え、そこから自由落下する。
+    // 実測でサンダーバード2号が対地0.85mで片脚接地 → 0.18秒で推力0 → 残り0.57mを
+    // -2.2m/sまで加速して落ち、静かな接地(-23fpm)のはずが9.7Gになっていた。
+    // 割合で抜けば、ホバー出力がいくつの機体でも同じ時定数で沈んでいく。
+    // 最後に小さい絶対値ぶんを引くのは、割合だけだと0に着かないから。
+    //
+    // **抜くのは、沈むのが止まってから**。接地の判定は脚が1本でも触れれば立つので、
+    // 傾いた機体は「まだ0.6m浮いていて、残りの脚は宙にある」状態でも接地扱いになる。
+    // そこで抜きはじめると支えが消えてそのぶんを落ちる。沈下率が静かな値より速い
+    // あいだは、地面に触れていても昇降率の輪を回して受け止める。
+    const v0 = controls.vtolThrottle || 0;
+    const settling = state.onGround && state.verticalSpeed > -AP_VTOL_SETTLE_MPS;
+    controls.vtolThrottle = settling
+      ? Math.max(v0 - (v0 / AP_VTOL_CUT_SEC + AP_VTOL_CUT_FLOOR) * dt, 0)
+      : apVtolThrottleForVs(controls, state.verticalSpeed, -AP_VTOL_SETTLE_MPS, dt, ap);
     controls.pitch = apElevatorForPitch(state, controls, 0, dt, spd, ap);
     controls.roll = apAileronForBank(state, 0, spd);
     controls.trim = 0;
@@ -1285,6 +1372,13 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     ap.targetSpeedMps = spd.approach * (1 + AP_LOW_ON_PATH_GAIN * low);
     controls.throttle = (!overFloor && pathErr > AP_HIGH_ON_PATH_M)
       ? 0 : apThrottleForSpeed(state, controls, ap.targetSpeedMps, dt);
+    // スポイラーも「高い・速い」ときの手。ただし**地形の床を追って登っている
+    // あいだは使わない**（出力を切るのと同じ理由で、越えるための揚力を自分で削る）。
+    // 引き起こしが近づいたら畳む——接地の直前に揚力を削ると、そのまま落ちる。
+    const flareFade = apClamp(
+      state.altitudeAglM / Math.max(apFlareHeight(model) * 3, 1) - 1, 0, 1);
+    controls.spoiler = overFloor ? 0
+      : apSpoilerCommand(model, controls, state, ap.targetSpeedMps, pathErr) * flareFade;
     controls.gearDown = true;
     // フラップは残りの距離で下ろす。高度で決めると、高い空港と低い空港で
     // 下ろす場所がずれる（進入経路のどこにいるかが本当に効く量）。
@@ -1378,8 +1472,16 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.pitch = 0;
     controls.trim = 0; // 接地で溜めた機首上げを残すと、前輪が浮いて舵が効かない
     controls.brake = 1;
+    // 接地したらスポイラーを全開にする（実機の「揚力を捨てる」操作）。
+    // 車輪のブレーキは車輪に掛かっている重さのぶんしか効かないので、
+    // 翼が揚力を出したままだと踏んでも減速しない。逆噴射は車輪の効きとは
+    // 無関係に効くので、濡れた滑走路の代わりに翼が浮いている状態でも使える。
+    controls.spoiler = model.hasSpoiler ? 1 : 0;
+    controls.reverse = apReverseCommand(model, state);
     if (state.groundSpeed < 1.5) {
       controls.brake = 0;
+      controls.spoiler = 0;
+      controls.reverse = 0;
       controls.parkingBrake = true;
       controls.yaw = 0;
       say('done', `${plan.airportId} に着陸しました`);
@@ -1449,6 +1551,10 @@ function startFullAutopilot() {
   ap.phase = f.state.onGround ? (vtolTakeoff ? 'vtol_takeoff' : 'takeoff') : 'cruise';
   ap.rotating = false;
   ap.pitchCmdDeg = undefined;
+  // 自動操縦の状態は飛行をまたいで使い回されるので、前の着陸で溜めた
+  // 加速度の記憶を持ち込まない
+  ap.vtolLastVs = undefined;
+  ap.vtolAccel = 0;
   ap.statusText = f.state.onGround ? '離陸' : '巡航';
   announceFlight(`自動操縦：${dest.id} ${dest.name} へ — ${ap.statusText}`);
   updateAutopilotUI();
@@ -1462,6 +1568,10 @@ function stopAutopilot(reason) {
   ap.altHold = false;
   ap.phase = 'off';
   ap.statusText = '';
+  // 減速装置は自動操縦が立てたもの。手に戻すときに出しっぱなしにすると、
+  // 解除した覚えのない機体がスポイラーを立てたまま飛ぶことになる。
+  const c = EnvState.flight && EnvState.flight.controls;
+  if (c) { c.spoiler = 0; c.reverse = 0; }
   announceFlight(reason || '自動操縦：解除');
   updateAutopilotUI();
 }
@@ -1648,7 +1758,8 @@ if (typeof module !== 'undefined' && module.exports) {
     apElevatorForPitch, apAileronForBank, apAileronForTrack, apGroundTrackDeg,
     apSurfaceGain, apBankLimit, apTerrainFloor, apBankAglFactor, apBankClimbFactor, apVsLimits,
     apTerrainEscapeVs, apVtolHoverAngles,
-  apPitchForVs, apBankForHeading, apFlareHeight,
+    apSpoilerCommand, apReverseCommand,
+    apPitchForVs, apBankForHeading, apFlareHeight,
     apVsForAltitude, apThrottleForSpeed,
   };
 }

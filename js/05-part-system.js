@@ -6,6 +6,8 @@ function defaultPropsForType(type) {
       return {
         thrustKgf: 2000,       // 最大推力（kgf、参考値・後の飛行モデルで使用）
         spinAxis: 'z',         // プロペラ/ファンの回転軸
+        // 着陸滑走で推力を後ろ向きに使えないエンジン（固定ピッチのプロペラ機）
+        noReverse: false,
       };
     case 'wing':
       return {

@@ -46,7 +46,7 @@ const {
   apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo, apBankMaxFor,
   apElevatorForPitch, apSurfaceGain, apBankLimit, apBankAglFactor, apTerrainFloor,
   aircraftDragLengthM, apBankClimbFactor, apVsLimits, apTerrainEscapeVs, apVtolHoverAngles,
-  apAileronForBank,
+  apAileronForBank, apSpoilerCommand, apReverseCommand,
 } = ctx;
 
 // 13-autopilot.js / 10-flight.js の同名の定数と同じ値。vmコンテキストの外からは
@@ -3015,6 +3015,217 @@ function autopilotFlight(opts) {
     check(fast < 0.1, '曲がれる速さを大きく超えたら、やり直しでも出力を絞る',
       (fast * 100).toFixed(0) + '%');
   }
+
+// (11) スポイラーと逆噴射。
+//
+// 「逆噴射能力がないのと、スポイラーを飛行中に使ってる?」という指摘から。
+// 逆噴射はそもそも無く、スポイラーは**フラップのレバーを引き算する**形で
+// 付いていた——つまりスポイラーを積んだ機体はフラップを下ろすほど
+// スポイラーも一緒に立ち上がり、増えるはずの揚力を自分で削っていた。
+// 減速の手立てが「出力を絞る・脚を出す」しかないせいで、推力の大きい機体が
+// 進入までに落としきれないという、この自動操縦でずっと続いていた問題の根でもある。
+{
+  // スポイラーを2枚積んだ練習機（フラップはそのまま）
+  const withSpoiler = () => {
+    const cfg = defaultAircraftConfig();
+    const mk = (id, name, wingId, x) => ({
+      id, type: 'control_surface', name,
+      position: { x, y: 1.55, z: 0.3 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+      props: { kind: 'spoiler', parentWingId: wingId, minDeg: -20, maxDeg: 20, hingeAxis: 'x', spanS: 0.5 },
+    });
+    cfg.parts.push(mk('cs_sp_l', 'スポイラー 左', 'w_main_l', -2.6));
+    cfg.parts.push(mk('cs_sp_r', 'スポイラー 右', 'w_main_r', 2.6));
+    return buildAircraftModel(cfg);
+  };
+  const plain = buildAircraftModel(defaultAircraftConfig());
+  const sp = withSpoiler();
+
+  // (a) スポイラーを積んでもフラップの効きが減らないこと
+  const flapGain = (m) => m.surfaces.filter((s) => s.role === 'main')
+    .reduce((a, s) => a + s.flap, 0) / 2;
+  note('主翼のフラップの効き', `スポイラー無し ${(flapGain(plain) * 180 / Math.PI).toFixed(1)}°`
+    + ` / スポイラー有り ${(flapGain(sp) * 180 / Math.PI).toFixed(1)}°`);
+  check(Math.abs(flapGain(sp) - flapGain(plain)) < 1e-9,
+    'スポイラーを積んでもフラップの効きは変わらない',
+    `${(flapGain(plain) * 180 / Math.PI).toFixed(1)}° → ${(flapGain(sp) * 180 / Math.PI).toFixed(1)}°`);
+  check(sp.hasSpoiler && !plain.hasSpoiler, 'スポイラーを積んだ機体だけ hasSpoiler が立つ',
+    `有り:${sp.hasSpoiler} 無し:${plain.hasSpoiler}`);
+
+  // (b) スポイラーを立てると揚力が減り、抗力が増えること
+  const probe = (m, opt) => {
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, 1000, 0); st.altitudeM = 1000;
+    st.quaternion.setFromEuler(new THREE.Euler(THREE.MathUtils.degToRad(6), 0, 0, 'YXZ'));
+    st.velocity.set(0, 0, -60);
+    c.throttle = 0; c.parkingBrake = false; c.gearDown = false;
+    c.flap = opt.flap || 0; c.spoiler = opt.spoiler || 0;
+    refreshFlightReadouts(m, st, flatGround);
+    const v0 = st.velocity.clone();
+    advanceFlight(m, st, c, noWind, flatGround, 1 / 600);
+    const dv = st.velocity.clone().sub(v0).multiplyScalar(600);
+    dv.y += FLIGHT_GRAVITY_FOR_TEST;
+    return { lift: dv.y * m.massKg, drag: dv.z * m.massKg };
+  };
+  const clean = probe(sp, {});
+  const out = probe(sp, { spoiler: 1 });
+  const liftDrop = 1 - out.lift / clean.lift;
+  const dragUp = out.drag / clean.drag - 1;
+  note('スポイラー全開', `揚力 ${(clean.lift / 1000).toFixed(1)}kN→${(out.lift / 1000).toFixed(1)}kN`
+    + `(${(-liftDrop * 100).toFixed(0)}%) 抗力 ${(clean.drag / 1000).toFixed(2)}kN→${(out.drag / 1000).toFixed(2)}kN`
+    + `(+${(dragUp * 100).toFixed(0)}%) 揚抗比 ${(clean.lift / clean.drag).toFixed(1)}→${(out.lift / out.drag).toFixed(1)}`);
+  check(liftDrop > 0.1 && liftDrop < 0.6, 'スポイラーは揚力を削る（実機の進入で3割前後）',
+    (liftDrop * 100).toFixed(0) + '%');
+  check(dragUp > 0.15, 'スポイラーは抗力を増やす', '+' + (dragUp * 100).toFixed(0) + '%');
+  check(out.lift / out.drag < clean.lift / clean.drag * 0.75,
+    'スポイラーを立てれば揚抗比が落ちる（＝急に降りられる）',
+    `${(clean.lift / clean.drag).toFixed(1)}→${(out.lift / out.drag).toFixed(1)}`);
+
+  // (c) フラップとスポイラーを両方使っても、フラップぶんの揚力は残ること
+  const flapOnly = probe(sp, { flap: 1 });
+  const both = probe(sp, { flap: 1, spoiler: 1 });
+  note('フラップ全開', `素 ${(clean.lift / 1000).toFixed(1)}kN`
+    + ` → フラップ ${(flapOnly.lift / 1000).toFixed(1)}kN`
+    + ` → フラップ+スポイラー ${(both.lift / 1000).toFixed(1)}kN`);
+  check(flapOnly.lift > clean.lift * 1.3, 'フラップは揚力を増やす',
+    `+${((flapOnly.lift / clean.lift - 1) * 100).toFixed(0)}%`);
+  check(both.lift > clean.lift, 'スポイラーを積んでいてもフラップは素より揚力が出る',
+    `${((both.lift / clean.lift - 1) * 100).toFixed(0)}%`);
+
+  // (d) 逆噴射：地上でだけ効く／「逆噴射なし」のエンジンは出さない／止まりかけで切れる
+  const jet = () => {
+    const cfg = defaultAircraftConfig();
+    for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.noReverse = false;
+    return buildAircraftModel(cfg);
+  };
+  const prop = buildAircraftModel(defaultAircraftConfig()); // 内蔵の練習機＝逆噴射なし
+  check(prop.reverseThrustN === 0, '「逆噴射なし」のエンジンは逆推力を持たない',
+    (prop.reverseThrustN / 1000).toFixed(1) + 'kN');
+  check(jet().reverseThrustN > 0, '逆噴射できるエンジンは逆推力を持つ',
+    (jet().reverseThrustN / 1000).toFixed(1) + 'kN');
+
+  const decel = (m, opt) => {
+    const st = createFlightState(), c = createFlightControls();
+    if (opt.air) { st.position.set(0, 1000, 0); st.altitudeM = 1000; st.velocity.set(0, 0, -opt.v); }
+    else { placeAircraftOnGround(m, st, 0, 0, 0, flatGround); settleAircraftOnGround(m, st, flatGround); st.velocity.set(0, 0, -opt.v); }
+    c.throttle = 0; c.parkingBrake = false; c.reverse = opt.reverse || 0;
+    refreshFlightReadouts(m, st, flatGround);
+    const v0 = st.velocity.z;
+    for (let i = 0; i < 6; i++) advanceFlight(m, st, c, noWind, flatGround, 1 / 60);
+    return (st.velocity.z - v0) / (6 / 60); // +なら減速している
+  };
+  const j = jet();
+  const groundNo = decel(j, { v: 50, reverse: 0 });
+  const groundRev = decel(j, { v: 50, reverse: 1 });
+  const airRev = decel(j, { v: 50, reverse: 1, air: true });
+  const airNo = decel(j, { v: 50, reverse: 0, air: true });
+  const propRev = decel(prop, { v: 50, reverse: 1 });
+  const propNo = decel(prop, { v: 50, reverse: 0 });
+  note('逆噴射の効き（毎秒の減速）', `地上 ${groundNo.toFixed(2)}→${groundRev.toFixed(2)}m/s²`
+    + ` / 空中 ${airNo.toFixed(2)}→${airRev.toFixed(2)}m/s²`
+    + ` / 逆噴射なしの機体 ${propNo.toFixed(2)}→${propRev.toFixed(2)}m/s²`);
+  check(groundRev > groundNo + 0.5, '地上では逆噴射が効く',
+    `${groundNo.toFixed(2)}→${groundRev.toFixed(2)}m/s²`);
+  check(Math.abs(airRev - airNo) < 1e-6, '空中では逆噴射は効かない',
+    `${airNo.toFixed(3)}→${airRev.toFixed(3)}m/s²`);
+  check(Math.abs(propRev - propNo) < 1e-6, '「逆噴射なし」の機体はレバーを引いても変わらない',
+    `${propNo.toFixed(3)}→${propRev.toFixed(3)}m/s²`);
+  // 止まりかけで切れること（切れないと後ろへ走り出す）
+  const crawl = decel(j, { v: 0.5, reverse: 1 });
+  check(crawl < groundRev * 0.5, '止まりかけでは逆噴射を抜く（後ろへ走り出さない）',
+    `50m/s:${groundRev.toFixed(2)} 0.5m/s:${crawl.toFixed(2)}m/s²`);
+
+  // (e) 自動操縦が、進入では速すぎるときだけスポイラーを立て、
+  //     接地したら全開にして逆噴射も入れること
+  {
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, 1000, 0); st.altitudeM = 1000; st.altitudeAglM = 1000;
+    st.airspeed = 100;
+    c.throttle = 0;
+    const onSpeed = apSpoilerCommand(sp, c, st, 100, 0);
+    const tooFast = apSpoilerCommand(sp, c, st, 80, 0);
+    const tooHigh = apSpoilerCommand(sp, c, st, 100, 300);
+    c.throttle = 0.8;
+    const powered = apSpoilerCommand(sp, c, st, 80, 300);
+    note('自動操縦のスポイラー', `速度・高さとも合っている:${(onSpeed * 100).toFixed(0)}%`
+      + ` 速すぎ:${(tooFast * 100).toFixed(0)}% 高すぎ:${(tooHigh * 100).toFixed(0)}%`
+      + ` 出力80%で速すぎ:${(powered * 100).toFixed(0)}%`);
+    check(onSpeed === 0, '経路どおりならスポイラーは立てない', (onSpeed * 100).toFixed(0) + '%');
+    check(tooFast > 0.9, '速すぎればスポイラーを立てる', (tooFast * 100).toFixed(0) + '%');
+    check(tooHigh > 0.9, '高すぎればスポイラーを立てる', (tooHigh * 100).toFixed(0) + '%');
+    check(powered === 0, '出力を入れているあいだはスポイラーを立てない',
+      (powered * 100).toFixed(0) + '%');
+    const noneModel = apSpoilerCommand(plain, c, st, 80, 300);
+    check(noneModel === 0, 'スポイラーの無い機体には指示を出さない', String(noneModel));
+
+    // 逆噴射は「狙った減速度になるぶんだけ」。推力が桁外れでも一杯には入れない
+    const big = (() => {
+      const cfg = defaultAircraftConfig();
+      for (const p of cfg.parts) if (p.type === 'engine' && p.props) {
+        p.props.noReverse = false; p.props.thrustKgf *= 300;
+      }
+      return buildAircraftModel(cfg);
+    })();
+    st.groundSpeed = 60;
+    const revNormal = apReverseCommand(j, st);
+    const revBig = apReverseCommand(big, st);
+    st.groundSpeed = 1;
+    const revSlow = apReverseCommand(j, st);
+    note('自動操縦の逆噴射', `ふつうの推力:${(revNormal * 100).toFixed(0)}%`
+      + ` 300倍の推力:${(revBig * 100).toFixed(0)}% 対地1m/s:${(revSlow * 100).toFixed(0)}%`);
+    check(revBig < revNormal, '推力が大きい機体ほどレバーを絞る',
+      `${(revNormal * 100).toFixed(0)}% → ${(revBig * 100).toFixed(0)}%`);
+    check(revSlow < revNormal, '止まりかけたらレバーを戻す',
+      `${(revNormal * 100).toFixed(0)}% → ${(revSlow * 100).toFixed(0)}%`);
+    check(apReverseCommand(prop, st) === 0, '「逆噴射なし」の機体には指示を出さない',
+      String(apReverseCommand(prop, st)));
+  }
+
+  // (f) 減速装置を使うぶん、着陸滑走が短くなること。
+  //     自動操縦の rollout の段をそのまま回して、装置を殺した場合と比べる
+  //     （ただ地面に置いて速度を与えるだけだと、舵を押さえる者がいないので
+  //      機体がそのまま浮き上がり、滑走ではなく弾道飛行を測ることになる）。
+  {
+    const jetSp = (() => {
+      const cfg = defaultAircraftConfig();
+      for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.noReverse = false;
+      const mk = (id, name, wingId, x) => ({
+        id, type: 'control_surface', name,
+        position: { x, y: 1.55, z: 0.3 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+        props: { kind: 'spoiler', parentWingId: wingId, minDeg: -20, maxDeg: 20, hingeAxis: 'x', spanS: 0.5 },
+      });
+      cfg.parts.push(mk('cs_sp_l', 'スポイラー 左', 'w_main_l', -2.6));
+      cfg.parts.push(mk('cs_sp_r', 'スポイラー 右', 'w_main_r', 2.6));
+      return buildAircraftModel(cfg);
+    })();
+    const roll = (m, useDevices) => {
+      const st = createFlightState(), c = createFlightControls();
+      placeAircraftOnGround(m, st, 0, 0, 90, flatGround);
+      settleAircraftOnGround(m, st, flatGround);
+      st.velocity.set(40, 0, 0); // 滑走路の向き（方位90°＝+X）へ
+      c.parkingBrake = false;
+      refreshFlightReadouts(m, st, flatGround);
+      const ap = createAutopilotState();
+      ap.full = true; ap.phase = 'rollout'; ap.destAirportId = 'DST';
+      ap.plan = apMakeApproachPlan({ id: 'DST', x: 0, z: 0, elevationM: 0 },
+        { runwayLengthM: 3000, headingDeg: 90 }, 0);
+      const x0 = st.position.x;
+      let t = 0;
+      for (; t < 180; t += 1 / 60) {
+        stepAutopilot(m, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+        if (!useDevices) { c.spoiler = 0; c.reverse = 0; }
+        advanceFlight(m, st, c, noWind, flatGround, 1 / 60);
+        if (ap.phase === 'done' || st.groundSpeed < 1.5) break;
+      }
+      return Math.abs(st.position.x - x0);
+    };
+    const bare = roll(jetSp, false);
+    const eq = roll(jetSp, true);
+    note('着陸滑走（78kt から停止まで。自動操縦の rollout そのまま）',
+      `ブレーキだけ ${bare.toFixed(0)}m / スポイラー+逆噴射 ${eq.toFixed(0)}m`);
+    check(eq < bare * 0.95, '減速装置を使えば着陸滑走が短くなる',
+      `${bare.toFixed(0)}m → ${eq.toFixed(0)}m`);
+  }
+}
 }
 
 // --- 計算の速さ ---------------------------------------------------------------

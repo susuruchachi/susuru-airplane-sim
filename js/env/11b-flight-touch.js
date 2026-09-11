@@ -21,7 +21,7 @@ const _flightTouch = {
   // 自分で切り替えたか（保存から戻した場合も含む）。真なら端末の自動判定より優先する。
   explicit: false,
   // 指で押さえている間だけ真になる。離れていればキーボード側の値を使う。
-  hold: { pitch: false, roll: false, yaw: 0, brake: false },
+  hold: { pitch: false, roll: false, yaw: 0, brake: false, reverse: false },
   pitch: 0, roll: 0,
 };
 
@@ -73,6 +73,8 @@ function initFlightTouch() {
       <button type="button" class="ft-btn" data-tap="gear">脚</button>
       <button type="button" class="ft-btn" data-tap="flapDown">FLAP ▼</button>
       <button type="button" class="ft-btn" data-tap="flapUp">FLAP ▲</button>
+      <button type="button" class="ft-btn" id="ftSpoiler" data-tap="spoiler" hidden>スポイラー</button>
+      <button type="button" class="ft-btn" id="ftReverse" data-hold="reverse" hidden>逆噴射</button>
       <button type="button" class="ft-btn" data-tap="trim">トリム</button>
       <button type="button" class="ft-btn" data-tap="park">駐機</button>
       <button type="button" class="ft-btn" data-tap="camera">視点</button>
@@ -104,7 +106,7 @@ function setFlightTouchEnabled(on, explicit) {
 // 指がどこかへ行ってしまったとき（機体を切り替えた、飛行を終えた等）に舵を戻す
 function releaseFlightTouch() {
   const t = _flightTouch;
-  t.hold.pitch = t.hold.roll = t.hold.brake = false;
+  t.hold.pitch = t.hold.roll = t.hold.brake = t.hold.reverse = false;
   t.hold.yaw = 0;
   t.pitch = t.roll = 0;
   if (_flightTouch.el) {
@@ -219,6 +221,7 @@ function bindFlightTouchHold(btn) {
     btn.classList.toggle('on', on);
     const t = _flightTouch;
     if (what === 'brake') t.hold.brake = on;
+    else if (what === 'reverse') t.hold.reverse = on;
     else if (what === 'yawLeft') t.hold.yaw = on ? -1 : 0;
     else if (what === 'yawRight') t.hold.yaw = on ? 1 : 0;
   };
@@ -241,7 +244,7 @@ function bindFlightTouchTap(btn) {
   const what = btn.getAttribute('data-tap');
   const codes = {
     gear: 'KeyG', flapDown: 'KeyV', flapUp: 'KeyC', trim: 'KeyT',
-    park: 'KeyP', camera: 'Tab', reset: 'KeyR',
+    spoiler: 'KeyK', park: 'KeyP', camera: 'Tab', reset: 'KeyR',
   };
   btn.addEventListener('click', (e) => {
     e.preventDefault();
@@ -261,6 +264,7 @@ function flightTouchOverride(name) {
   if (name === 'roll') return t.hold.roll ? t.roll : null;
   if (name === 'yaw') return t.hold.yaw !== 0 ? t.hold.yaw : null;
   if (name === 'brake') return t.hold.brake ? 1 : null;
+  if (name === 'reverse') return t.hold.reverse ? 1 : null;
   return null;
 }
 
@@ -273,6 +277,14 @@ function updateFlightTouchReadout() {
   const model = f.aircraft && f.aircraft.model;
   const vtol = t.el.querySelector('#ftVtol');
   if (vtol) vtol.hidden = !(model && model.hasVtol);
+  // 減速装置のボタンは、積んでいる機体にだけ出す
+  const spoilerBtn = t.el.querySelector('#ftSpoiler');
+  if (spoilerBtn) {
+    spoilerBtn.hidden = !(model && model.hasSpoiler);
+    spoilerBtn.classList.toggle('on', (f.controls.spoiler || 0) > 0.5);
+  }
+  const revBtn = t.el.querySelector('#ftReverse');
+  if (revBtn) revBtn.hidden = !(model && model.reverseThrustN > 0);
 
   const paint = (id, v) => {
     const lever = t.el.querySelector(id);

@@ -38,6 +38,8 @@ const FLIGHT_KEYMAP = {
   trimUp: ['KeyY'],
   trimDown: ['KeyH'],
   brake: ['KeyB', 'Space'],
+  // 逆噴射は押しているあいだだけ。ブレーキと同時に使うので、Bのとなりに置く。
+  reverse: ['KeyN'],
 };
 
 const FLIGHT_TRIM_RATE = 0.35; // トリムが端から端まで動く速さ（毎秒）
@@ -75,6 +77,15 @@ function handleFlightKeyPress(code) {
     case 'KeyG': f.controls.gearDown = !f.controls.gearDown; announceFlight(f.controls.gearDown ? '脚 下げ' : '脚 上げ'); return true;
     case 'KeyV': f.controls.flap = Math.min(f.controls.flap + 0.5, 1); announceFlight(`フラップ ${Math.round(f.controls.flap * 100)}%`); return true;
     case 'KeyC': f.controls.flap = Math.max(f.controls.flap - 0.5, 0); announceFlight(`フラップ ${Math.round(f.controls.flap * 100)}%`); return true;
+    case 'KeyK': {
+      // スポイラーは出し入れするもの（フラップのように段を刻むものではない）ので、
+      // 実機のレバーと同じく全開と格納の切り替えにする。
+      const m = f.aircraft && f.aircraft.model;
+      if (m && !m.hasSpoiler) { announceFlight('この機体にスポイラーはありません'); return true; }
+      f.controls.spoiler = (f.controls.spoiler || 0) > 0.5 ? 0 : 1;
+      announceFlight(f.controls.spoiler ? 'スポイラー 展開' : 'スポイラー 格納');
+      return true;
+    }
     case 'KeyP': f.controls.parkingBrake = !f.controls.parkingBrake; announceFlight(f.controls.parkingBrake ? '駐機ブレーキ' : '駐機ブレーキ解除'); return true;
     case 'KeyT': autoTrimFlight(); return true;
     case 'KeyO': if (typeof toggleAltitudeHold === 'function') toggleAltitudeHold(); return true;
@@ -133,6 +144,11 @@ function updateFlightInput(dt) {
 
   c.brake = touch('brake') !== null ? 1 : (_keyDown(FLIGHT_KEYMAP.brake) ? 1 : 0);
   if (c.brake > 0) c.parkingBrake = false;
+
+  // 逆噴射は押しているあいだだけ。地上で前へ走っているときしか効かないのは
+  // 物理の側で見ている（10-flight.js の推力の項）ので、ここでは素直にレバーを渡す。
+  c.reverse = touch('reverse') !== null ? 1 : (_keyDown(FLIGHT_KEYMAP.reverse) ? 1 : 0);
+  if (c.reverse > 0) c.parkingBrake = false;
 }
 
 // --- カメラ -------------------------------------------------------------------
@@ -225,6 +241,8 @@ function initFlightHUD() {
       <div class="hud-tile sm" id="hudVtolTile" hidden><span class="k">垂直</span><b id="hudVtol">0</b><span class="u">%</span></div>
       <div class="hud-tile sm"><span class="k">トリム</span><b id="hudTrim">0</b><span class="u">%</span></div>
       <div class="hud-tile sm"><span class="k">フラップ</span><b id="hudFlap">0</b><span class="u">%</span></div>
+      <div class="hud-tile sm" id="hudSpoilerTile" hidden><span class="k">スポイラー</span><b id="hudSpoiler">0</b><span class="u">%</span></div>
+      <div class="hud-tile sm" id="hudRevTile" hidden><span class="k">逆噴射</span><b id="hudRev">0</b><span class="u">%</span></div>
       <div class="hud-tile sm"><span class="k">脚</span><b id="hudGear">下</b></div>
       <div class="hud-tile sm"><span class="k">迎角</span><b id="hudAoa">0</b><span class="u">°</span></div>
       <div class="hud-tile sm"><span class="k">G</span><b id="hudG">1.0</b></div>
@@ -236,6 +254,7 @@ function initFlightHUD() {
     <div id="hudHelp">
       W/S・↑↓ ピッチ ／ A/D・←→ ロール ／ Q/E ラダー ／ Shift・Ctrl 出力 ／ X/Z 垂直エンジン ／
       T トリムを取る ／ Y/H トリム微調整 ／ B・Space ブレーキ ／ G 脚 ／ V・C フラップ ／
+      K スポイラー ／ N 逆噴射（地上のみ） ／
       O 高度維持 ／ I 全自動（離陸〜着陸） ／
       P 駐機 ／ Tab 視点 ／ R 滑走路へ戻る ／ F 飛行終了
     </div>`;
@@ -278,6 +297,14 @@ function updateFlightHUD() {
   if (hasVtol) set('hudVtol', Math.round((c.vtolThrottle || 0) * 100));
   set('hudTrim', `${(c.trim || 0) >= 0 ? '+' : ''}${Math.round((c.trim || 0) * 100)}`);
   set('hudFlap', Math.round(c.flap * 100));
+  // 減速装置は、積んでいる機体にだけ計器を出す（持っていない機体に0%を並べない）
+  const model = f.aircraft && f.aircraft.model;
+  const spoilerTile = document.getElementById('hudSpoilerTile');
+  if (spoilerTile) spoilerTile.hidden = !(model && model.hasSpoiler);
+  if (model && model.hasSpoiler) set('hudSpoiler', Math.round((c.spoiler || 0) * 100));
+  const revTile = document.getElementById('hudRevTile');
+  if (revTile) revTile.hidden = !(model && model.reverseThrustN > 0);
+  if (model && model.reverseThrustN > 0) set('hudRev', Math.round((c.reverse || 0) * 100));
   set('hudGear', c.gearDown ? '下' : '上');
   set('hudAoa', s.alphaDeg.toFixed(1));
   set('hudG', s.loadFactor.toFixed(1));

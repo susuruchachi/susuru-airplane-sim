@@ -388,6 +388,14 @@ function renderTypeSpecificFields(part) {
         </select>
       </div>
       <div class="hint">位置は推力の作用点（機体重心からのオフセット）として飛行モデルに使用されます。</div>
+      <div class="toggle-row" style="margin-top:6px;">
+        <label>逆噴射なし</label>
+        <label class="switch">
+          <input type="checkbox" id="fNoReverse" ${part.props.noReverse ? 'checked' : ''}>
+          <span class="slider-toggle"></span>
+        </label>
+      </div>
+      <div class="hint">着陸滑走で推力を後ろ向きに使えるかどうか。ジェットは排気を前へ振り向け、可変ピッチのターボプロップは羽根を裏返して逆推力を出せますが、固定ピッチのプロペラ機（レシプロ機など）はできません。オンにすると、この機体は着陸で逆噴射を使わずブレーキとスポイラーだけで止まります。上向き（Y軸）のリフトエンジンは、そもそも逆噴射しません。</div>
       <div class="divider"></div>
       <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
       ${part.props.spinAxis === 'y' ? vtolBalancePanelHtml() : ''}
@@ -397,6 +405,9 @@ function renderTypeSpecificFields(part) {
     });
     document.getElementById('fSpinAxis').addEventListener('change', (e) => {
       part.props.spinAxis = e.target.value;
+    });
+    document.getElementById('fNoReverse').addEventListener('change', (e) => {
+      part.props.noReverse = e.target.checked;
     });
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
     const vtolBtn = document.getElementById('btnVtolBalance');
