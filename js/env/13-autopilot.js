@@ -123,6 +123,10 @@ const AP_TERRAIN_REFRESH_SEC = 0.25;  // 何秒ごとに測り直すか（毎コ
 const AP_TERRAIN_TAPER_M = 15000;
 // 巡航中、床が現在高度よりこれ以上高くなったら上昇の段へ戻す(m)
 const AP_TERRAIN_CLIMB_BACK_M = 60;
+// 巡航中、目標高度より低いのに沈んでいるとき、この沈み方（m/s）で
+// 出力を全開まで戻す。小さすぎると平常の速度調整まで出力を戻してしまい、
+// 大きすぎると手遅れになるまで気付けない。
+const AP_CRUISE_SINK_URGENCY_MPS = 10;
 
 // 前方の地面を見て、2つ返す。地面の高さが分からなければ「制限なし」。
 //   floorM  … いま下回ってはいけない高度(m)。段の切り替えと、降下の目標に使う
@@ -859,7 +863,24 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 目的地の周りを永遠に旋回するはめになる（実際、旋回できずフラフラする
     // 報告になった）。曲がれる速さの1.5倍を超えたら、そこだけ出力を絞る。
     const overCruise = state.airspeed - spd.cruise * 1.5;
-    controls.throttle = overCruise > 0 ? apClamp(1 - overCruise * 0.1, 0, 1) : 1;
+    // **ズームクライムが尽きて沈み始めたら、速度超過中でも出力を戻す**。
+    // 推力重量比が極端な機体は、離陸直後に全開のまま曲がれる速さの何倍もへ
+    // 加速し、この速度超過カットで出力0%のまま姿勢だけで登る（＝運動エネルギーを
+    // 高度へ変えるズームクライム）。上っているうちはそれでいいが、エネルギーを
+    // 使い切って昇降率が負に転じても速度がまだ超過しているというだけで
+    // 出力0%が続くと、あとは沈むだけになる——実測（推力重量比約30の
+    // フィクション機、目標高度12000m）で、対地3500m付近まで無出力の
+    // ズームクライムで上がったあと、そのまま無出力で降下に転じ、
+    // 高度を全部失って墜落した。沈み始めたら「曲がれる速さまで落とす」より
+    // 「これ以上沈まない」を優先する。
+    // **昇降率0を境にした二値の切り替えにしない**——ちょうどそのあたりで
+    // 昇降率は±0付近を毎フレーム細かく上下するため、二値だと出力が
+    // 0%⇔100%を毎フレーム往復し、平均すると速度超過カットが半分しか
+    // 効かなくなって**かえって加速し続けた**（実測、1030ktから1150kt超まで
+    // 1秒少々で加速）。沈み方に応じて滑らかに戻す。
+    const sinkUrgency = apClamp(-state.verticalSpeed / AP_CRUISE_SINK_URGENCY_MPS, 0, 1);
+    const overspeedCut = overCruise > 0 ? apClamp(1 - overCruise * 0.1, 0, 1) : 1;
+    controls.throttle = Math.max(overspeedCut, sinkUrgency);
     const want = apClamp(state.pitchDeg + (state.airspeed - spd.climb) * 0.8, 0, AP_PITCH_MAX);
     controls.pitch = apElevatorForPitch(state, controls, want, dt, spd, ap);
     ap.vsCmd = state.verticalSpeed;
@@ -921,7 +942,18 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     }
     nav();
     ap.targetSpeedMps = spd.cruise;
-    controls.throttle = apThrottleForSpeed(state, controls, spd.cruise, dt);
+    // **目標高度より低いのに沈んでいるときは、速度超過中でも出力を残す**。
+    // 出力は「巡航速度を保つぶん」だけで決めていたので、上のズームクライム
+    // （climbの項を参照）がエネルギー切れで沈みに転じたあとにこの段へ
+    // 来ても、速度がまだ巡航の1.5倍を超えているというだけで出力0%が続き、
+    // 高度を全部失って墜落していた（実測、目標高度12000mに対し対地3500m付近で
+    // 頭打ちになったあとそのまま墜落）。沈み方に応じて滑らかに出力を戻す
+    // ——二値の切り替えだと、沈み方がしきい値をまたぐたびに出力が飛んで
+    // 昇降そのものが暴れる。
+    const belowTarget = state.altitudeM < overTerrain(ap.targetAltitudeM);
+    const sinkUrgency = belowTarget
+      ? apClamp(-state.verticalSpeed / AP_CRUISE_SINK_URGENCY_MPS, 0, 1) : 0;
+    controls.throttle = Math.max(apThrottleForSpeed(state, controls, spd.cruise, dt), sinkUrgency);
     ap.vsCmd = overTerrainVs(apVsForAltitude(state, overTerrain(ap.targetAltitudeM), apClimbCap(state, spd)));
     controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd, ap);
     // 3°で降りきれる距離まで詰まったら降下へ。少し余裕を持たせる。

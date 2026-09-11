@@ -2726,6 +2726,68 @@ function autopilotFlight(opts) {
     `${(near.cruise * KT).toFixed(0)}kt`);
 }
 
+// (7) 沈み始めたら、速度超過中でも出力を戻す（NOVA→NORIでTB2が実際に見つけた壊れ方）。
+//
+// 推力重量比が桁外れな機体は、離陸直後に曲がれる速さの何倍もへ加速し、
+// climb/cruiseの「曲がれる速さの1.5倍を超えたら出力を絞る」判定で出力0%のまま
+// 姿勢だけで登る（＝運動エネルギーを高度へ変えるズームクライム）。エネルギーを
+// 使い切って昇降率が負に転じても、速度がまだ超過しているというだけで出力0%が
+// 続くと、あとは沈むだけになる——実測（推力重量比30・翼面荷重2160kg/m²の
+// フィクション機、目標高度12000m）で、対地3500m付近まで無出力のズームクライムで
+// 上がったあと、そのまま無出力で降下に転じ、高度を全部失って墜落していた。
+{
+  const cfg = defaultAircraftConfig();
+  cfg.name = '推力過剰機（沈み込みテスト）';
+  for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 60;
+  const m2 = buildAircraftModel(cfg);
+
+  const mkState = (vs, altitudeM) => {
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, altitudeM, 0); st.altitudeM = altitudeM;
+    st.airspeed = 500; st.groundSpeed = 500; st.verticalSpeed = vs;
+    st.headingDeg = 90; st.pitchDeg = 5;
+    return { st, c };
+  };
+  const ap = createAutopilotState();
+  ap.full = true; ap.destAirportId = 'DST'; ap.targetAltitudeM = 12000;
+  ap.plan = apMakeApproachPlan({ id: 'DST', x: 100000, z: 0, elevationM: 0 },
+    { runwayLengthM: 2400, headingDeg: 90 }, 270);
+
+  const climbAt = (vs) => {
+    ap.phase = 'climb';
+    const { st, c } = mkState(vs, 3000);
+    stepAutopilot(m2, st, c, ap, 1 / 60, {});
+    return c.throttle;
+  };
+  const tClimbing = climbAt(50), tSinking = climbAt(-15);
+  note('上昇中・速度超過での出力', `登り(+50m/s):${(tClimbing * 100).toFixed(0)}%`
+    + ` 沈み(-15m/s):${(tSinking * 100).toFixed(0)}%`);
+  check(tClimbing < 0.3, '順調に登っているあいだは、速度超過なら出力を絞ったまま',
+    (tClimbing * 100).toFixed(0) + '%');
+  check(tSinking > 0.5, '沈み始めたら、速度超過中でも出力を戻す',
+    (tSinking * 100).toFixed(0) + '%');
+
+  // 昇降率0付近で出力が0%⇔100%を往復しない（しきい値の二値判定だと往復する——
+  // 実測でこの往復が原因で速度超過カットが平均半分しか効かず、かえって加速し続けた）
+  const near = [-2, -1, 0, 1, 2].map((vs) => climbAt(vs));
+  const jumps = near.slice(1).map((v, i) => Math.abs(v - near[i]));
+  check(Math.max(...jumps) < 0.3, '昇降率0付近で出力が飛び石にならない（往復のもと）',
+    near.map((v) => (v * 100).toFixed(0)).join('→') + '%');
+
+  const cruiseAt = (vs, altitudeM) => {
+    ap.phase = 'cruise';
+    const { st, c } = mkState(vs, altitudeM);
+    stepAutopilot(m2, st, c, ap, 1 / 60, {});
+    return c.throttle;
+  };
+  const tAboveSinking = cruiseAt(-15, 12500); // 目標より高いところを沈みながら戻る＝正常
+  const tBelowSinking = cruiseAt(-15, 8000);  // 目標より低いのに沈んでいる＝危険
+  note('巡航中・目標高度との関係での出力', `目標より高くて沈む:${(tAboveSinking * 100).toFixed(0)}%`
+    + ` 目標より低くて沈む:${(tBelowSinking * 100).toFixed(0)}%`);
+  check(tBelowSinking > tAboveSinking, '目標高度より低いのに沈んでいるときだけ、出力を余分に戻す',
+    `${(tAboveSinking * 100).toFixed(0)}% < ${(tBelowSinking * 100).toFixed(0)}%`);
+}
+
 // --- 計算の速さ ---------------------------------------------------------------
 {
   const st = createFlightState();
