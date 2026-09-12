@@ -56,6 +56,7 @@ const PART_TYPE_LABELS = {
   control_surface: '可動翼面',
   light: '航行灯',
   landing_gear: '着陸脚',
+  viewpoint: 'コックピット視点',
 };
 
 const PART_TYPE_COLORS = {
@@ -64,6 +65,7 @@ const PART_TYPE_COLORS = {
   control_surface: '#4fd18b',
   light: '#e0e0ff',
   landing_gear: '#c8ccd2',
+  viewpoint: '#ffd84f',
 };
 
 // 翼パーツの役割（主翼／水平尾翼／垂直尾翼）

@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flight Sim — 環境プレビュー</title>
+<style>
+  :root{
+    --bg:#0b1016;
+    --panel:#121a24;
+    --panel-2:#0e151d;
+    --line:#233042;
+    --text:#dbe6f0;
+    --text-dim:#7f93a8;
+    --accent:#3fa9ff;
+    --accent-dim:#1c4a6e;
+    --warn:#ff9f40;
+    --ok:#4fd18b;
+    --danger:#ff5d5d;
+    --mono: 'SF Mono', 'Consolas', 'Menlo', monospace;
+    --sans: -apple-system, 'Hiragino Sans', 'Yu Gothic', 'Segoe UI', sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;height:100dvh;background:var(--bg);color:var(--text);font-family:var(--sans);overflow:hidden;}
+  #app{display:grid;grid-template-columns:1fr 300px;grid-template-rows:48px 1fr;height:100%;height:100dvh;}
+
+  #topbar{
+    grid-column:1/3;grid-row:1;display:flex;align-items:center;gap:12px;padding:0 16px;
+    background:var(--panel-2);border-bottom:1px solid var(--line);
+    height:48px;box-sizing:border-box;flex-wrap:nowrap;overflow:hidden;min-height:0;
+  }
+  #topbar .brand{font-weight:600;letter-spacing:.02em;font-size:14px;color:var(--text);white-space:nowrap;}
+  #topbar .brand span{color:var(--accent);}
+  #topbar .sep{width:1px;height:22px;background:var(--line);}
+  #topbar a.navlink{
+    color:var(--text-dim);text-decoration:none;font-size:12.5px;padding:6px 12px;border:1px solid var(--line);
+    border-radius:6px;white-space:nowrap;
+  }
+  #topbar a.navlink:hover{border-color:var(--accent-dim);color:var(--text);}
+  #topbar .spacer{flex:1 1 auto;min-width:0;}
+
+  #envCenter{grid-column:1;grid-row:2;position:relative;background:#000;overflow:hidden;}
+  /* 指の操作はこちらで全部受ける。touch-actionを既定のままにしておくと、
+     2本指を置いた瞬間にブラウザが「ページの拡大」だと判断して pointercancel を
+     投げてくるので、**ピンチが一度も届かない**（機体固定の視点で実際そうなった。
+     OrbitControlsは touchstart/touchmove を自分で preventDefault していたので
+     気づけなかった）。 */
+  #envViewport{width:100%;height:100%;display:block;touch-action:none;}
+  #versionTag{
+    position:absolute;bottom:8px;left:10px;font-size:11px;color:var(--text-dim);font-family:var(--mono);
+    white-space:pre-wrap;max-width:70%;pointer-events:none;
+  }
+  #versionTag.err{color:var(--danger);}
+  #versionTag.ok{color:var(--text-dim);}
+
+  #right{grid-column:2;grid-row:2;background:var(--panel);border-left:1px solid var(--line);overflow-y:auto;}
+  /* メニューを畳む。閉じたら3D側が画面いっぱいに広がる（列そのものを0にする） */
+  body.panel-collapsed #app{grid-template-columns:1fr 0;}
+  body.panel-collapsed #right{display:none;}
+  #envBtnPanel{
+    margin-left:auto;background:var(--panel-2);border:1px solid var(--line);color:var(--text-dim);
+    padding:6px 12px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:var(--sans);
+    white-space:nowrap;
+  }
+  #envBtnPanel:hover{border-color:var(--accent-dim);color:var(--text);}
+  #right .section-title{padding:14px 14px 8px;font-size:11px;letter-spacing:.04em;color:var(--text-dim);text-transform:uppercase;}
+  .env-group{padding:0 14px 16px;border-bottom:1px solid var(--line);margin-bottom:4px;}
+  .env-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;font-size:12.5px;}
+  .env-row label{color:var(--text-dim);}
+  .env-row .val{font-family:var(--mono);color:var(--text);font-size:12px;min-width:56px;text-align:right;}
+  .env-group input[type=range]{width:100%;accent-color:var(--accent);}
+  .env-group input[type=number], .env-group select{
+    width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+    padding:6px 8px;border-radius:6px;font-size:12.5px;font-family:var(--mono);
+  }
+  .env-group select{font-family:var(--sans);}
+  .env-note{font-size:11px;color:var(--text-dim);line-height:1.5;margin-top:4px;}
+  #envBtnToggleTime, #envBtnReset, #envBtnToggleAirport, #envBtnFocusAirport,
+  #envBtnFly, #envBtnFlightReset, #envBtnCgReset{
+    width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+    padding:8px 10px;border-radius:6px;font-size:12.5px;cursor:pointer;font-family:var(--sans);margin-top:6px;
+  }
+  #envBtnToggleTime:hover, #envBtnReset:hover, #envBtnFly:hover, #envBtnFlightReset:hover, #envBtnCgReset:hover,
+  #envBtnToggleAirport:hover, #envBtnFocusAirport:hover{border-color:var(--accent-dim);}
+  #envBtnFly.primary{background:var(--accent-dim);border-color:#2f6fb5;color:#eaf4ff;font-weight:600;}
+  #envBtnFly.primary:hover{background:#2f6fb5;}
+  #envBtnToggleTime.active{background:var(--accent-dim);border-color:var(--accent-dim);}
+  #envTimeReadout, #envSunElevationReadout{font-family:var(--mono);color:var(--accent);}
+
+  @media (max-width: 760px){
+    #app{grid-template-columns:1fr;grid-template-rows:48px 1fr 40vh;}
+    #envCenter{grid-column:1;grid-row:2;}
+    #right{grid-column:1;grid-row:3;border-left:none;border-top:1px solid var(--line);}
+    /* 狭い画面ではメニューが下の段なので、畳むときは行の高さを0にする */
+    body.panel-collapsed #app{grid-template-columns:1fr;grid-template-rows:48px 1fr 0;}
+  }
+
+  /* ミニマップのズーム切り替え */
+  #envMinimapZoom button {
+    flex: 1; padding: 3px 0; font-size: 11px; margin: 0;
+  }
+  #envMinimapZoom button.active {
+    background: #2f6fb5; border-color: #3d84cf; color: #fff;
+  }
+
+/* --- 飛行の計器（画面の上下に重ねる） --- */
+#flightHud { position:absolute; inset:0; pointer-events:none; display:none;
+  font-family:'SF Mono',Menlo,Consolas,monospace; color:#e8f0f8; }
+body.flying #flightHud { display:block; }
+body.flying #versionTag { display:none; }
+#flightHud .hud-row { position:absolute; left:0; right:0; display:flex; gap:8px;
+  justify-content:center; flex-wrap:wrap; padding:0 12px; }
+#flightHud .hud-top { top:12px; }
+#flightHud .hud-bottom { bottom:36px; }
+#flightHud .hud-tile { background:rgba(8,14,22,0.62); border:1px solid rgba(120,170,220,0.22);
+  border-radius:6px; padding:5px 10px; min-width:86px; text-align:center;
+  backdrop-filter:blur(3px); }
+#flightHud .hud-tile.sm { min-width:62px; padding:4px 8px; }
+#flightHud .hud-tile .k { display:block; font-size:10px; color:#8fa8c0; letter-spacing:.04em; }
+#flightHud .hud-tile b { font-size:20px; font-weight:600; letter-spacing:.01em; }
+#flightHud .hud-tile.sm b { font-size:15px; }
+#flightHud .hud-tile .u { font-size:10px; color:#8fa8c0; margin-left:2px; }
+#hudWarn { position:absolute; top:50%; left:0; right:0; text-align:center;
+  font-size:22px; font-weight:700; letter-spacing:.14em; text-shadow:0 2px 10px rgba(0,0,0,.8); }
+#hudWarn.stall { color:#ffb020; animation:hudBlink .55s steps(2,end) infinite; }
+#hudWarn.crash { color:#ff5555; }
+#hudWarn.note  { color:#8fa8c0; font-size:14px; letter-spacing:.08em; }
+@keyframes hudBlink { 50% { opacity:.25; } }
+#hudMsg { position:absolute; top:88px; left:0; right:0; text-align:center; font-size:14px;
+  color:#cfe3ff; text-shadow:0 1px 6px rgba(0,0,0,.9); transition:opacity .5s; opacity:0; }
+#hudHelp { position:absolute; bottom:8px; left:0; right:0; text-align:center;
+  font-size:10.5px; color:rgba(180,205,230,0.55); padding:0 12px; }
+/* 水平器（人工水平儀）は**どの画面でも左上の隅**に置く。
+   もとは中央下に置いていたが、そこは機首の先——いちばん見たいところ——に
+   ちょうど重なる。狭い画面だけ左上へ逃がしていたものの、画面の幅で
+   置き場所が変わると目が迷うので、広い画面も同じ左上にそろえた。
+   左上なら計器の上段の下で、操縦装置のレバー（左下・右下）とも重ならない。
+   計器のタイルと同じ枠にして、並びから浮かないようにする。 */
+#hudAttitude { position:absolute; left:12px; top:76px;
+  width:150px; height:150px; border-radius:50%; overflow:hidden;
+  border:1px solid rgba(120,170,220,0.30); background:rgba(8,14,22,0.5);
+  backdrop-filter:blur(3px); }
+#hudAttitude canvas { display:block; width:100%; height:100%; }
+/* 消しておける（Uキー、またはタッチの「水平器」ボタン）。
+   狭い画面では計器そのものが視界をふさぐので、消せることが要る。 */
+body.hud-attitude-off #hudAttitude { display:none; }
+/* 狭い画面・低い画面では、置き場所は変えずに小さくするだけ。 */
+@media (max-width:820px){ #flightHud .hud-tile b{font-size:16px;} #hudHelp{display:none;}
+  #hudAttitude { width:96px; height:96px; left:10px; top:76px; } }
+@media (max-height:560px){
+  #hudAttitude { width:84px; height:84px; left:10px; top:70px; } }
+/* 隅へ寄せた水平器の上に計器のタイルが折り返してくると重なるので、
+   タイルの並びを水平器のぶんだけ右へ寄せる。消しているときは元に戻す。
+   広い画面では上段は水平器より上、下段はずっと下なので、寄せる必要はない。 */
+@media (max-width:820px){ #flightHud .hud-row { padding-left:114px; } }
+@media (max-height:560px){ #flightHud .hud-row { padding-left:102px; } }
+@media (max-width:820px){ body.hud-attitude-off #flightHud .hud-row { padding-left:12px; } }
+
+/* --- 画面の上の操縦装置（指で飛ばすため） --- */
+#flightTouch { position:absolute; inset:0; display:none; pointer-events:none;
+  font-family:'SF Mono',Menlo,Consolas,monospace; color:#e8f0f8;
+  touch-action:none; -webkit-user-select:none; user-select:none; }
+body.flying.touch-controls #flightTouch { display:block; }
+/* 操縦装置を出したぶん、下の計器を持ち上げて重ならないようにする */
+body.touch-controls #flightHud .hud-bottom { bottom:150px; }
+/* 指で飛ばしているあいだはキーの一覧を出さない（ボタンと重なるうえに読む相手がいない） */
+body.touch-controls #hudHelp { display:none; }
+/* 昇降舵・補助翼は親指が届く画面の隅に置き、ラダーはその下に並べる */
+#flightTouch .ft-left { position:absolute; left:14px; bottom:16px;
+  display:flex; flex-direction:column-reverse; align-items:center; gap:8px; pointer-events:auto; }
+#flightTouch .ft-attitude { display:flex; flex-direction:column; align-items:center; gap:8px; }
+#flightTouch .ft-rudder { display:flex; gap:6px; }
+#flightTouch .ft-right { position:absolute; right:14px; bottom:16px;
+  display:flex; gap:8px; pointer-events:auto; }
+#flightTouch .ft-lever { position:relative; width:56px; height:172px; border-radius:8px;
+  overflow:hidden; background:rgba(8,14,22,0.55); border:1px solid rgba(120,170,220,0.28);
+  backdrop-filter:blur(3px); }
+#flightTouch .ft-fill { position:absolute; left:0; right:0; bottom:0; height:0%;
+  background:linear-gradient(180deg,rgba(63,140,220,0.75),rgba(63,140,220,0.35)); }
+#flightTouch .ft-vtol .ft-fill { background:linear-gradient(180deg,rgba(90,200,140,0.75),rgba(90,200,140,0.35)); }
+/* 昇降舵・補助翼は中央から伸びる帯で舵の向きと大きさを示す（0からの塗りつぶしではない） */
+#flightTouch .ft-elevator, #flightTouch .ft-aileron { background:rgba(8,14,22,0.55); }
+#flightTouch .ft-elevator { width:58px; height:150px; }
+#flightTouch .ft-aileron { width:150px; height:58px; }
+#flightTouch .ft-elevator .ft-fill, #flightTouch .ft-aileron .ft-fill {
+  left:0; right:0; top:auto; bottom:auto; height:auto;
+  background:rgba(240,190,90,0.55); }
+#flightTouch .ft-aileron .ft-fill { left:auto; right:auto; top:0; bottom:0; }
+#flightTouch .ft-center-line { position:absolute; background:rgba(200,220,240,0.4); }
+#flightTouch .ft-center-h { left:6px; right:6px; top:50%; height:1px; }
+#flightTouch .ft-center-v { top:6px; bottom:6px; left:50%; width:1px; }
+#flightTouch .ft-lever-label { position:absolute; inset:0; display:flex; flex-direction:column;
+  align-items:center; justify-content:space-between; padding:6px 0; pointer-events:none; }
+#flightTouch .ft-lever-label span { font-size:10px; color:#cfe0f0; letter-spacing:.06em; }
+#flightTouch .ft-lever-label b { font-size:13px; }
+#flightTouch .ft-actions { position:absolute; left:50%; bottom:16px; transform:translateX(-50%);
+  display:flex; gap:6px; flex-wrap:wrap; justify-content:center; max-width:min(46vw,420px);
+  pointer-events:auto; }
+#flightTouch .ft-btn { font:inherit; font-size:11px; color:#dce9f6; padding:9px 11px;
+  border-radius:7px; background:rgba(8,14,22,0.62); border:1px solid rgba(120,170,220,0.28);
+  backdrop-filter:blur(3px); cursor:pointer; touch-action:none; }
+#flightTouch .ft-btn.on { background:rgba(63,140,220,0.6); border-color:rgba(160,205,245,0.7); }
+/* 止めているエンジングループは、消えていると分かるように暗くする */
+#flightTouch .ft-btn.ft-eng { min-width:38px; text-align:center; }
+#flightTouch .ft-btn.ft-eng.off { background:rgba(14,20,28,0.7); border-color:rgba(120,170,220,0.18);
+  color:rgba(170,190,210,0.45); text-decoration:line-through; }
+@media (max-width:640px){
+  #flightTouch .ft-lever { width:46px; height:140px; }
+  #flightTouch .ft-elevator { width:48px; height:128px; }
+  #flightTouch .ft-aileron { width:128px; height:48px; }
+  #flightTouch .ft-actions { max-width:38vw; }
+  body.touch-controls #flightHud .hud-bottom { bottom:126px; }
+}
+/* 横向きのスマホは縦が足りない。下段の計器は上段の下へ移し、操縦装置に場所を譲る */
+@media (max-height:560px){
+  body.touch-controls #flightHud .hud-bottom { top:60px; bottom:auto; }
+  #flightTouch .ft-lever { width:44px; height:118px; }
+  #flightTouch .ft-elevator { width:44px; height:104px; }
+  #flightTouch .ft-aileron { width:104px; height:44px; }
+  #flightTouch .ft-btn { padding:7px 9px; font-size:10.5px; }
+  #flightTouch .ft-actions { max-width:min(40vw,300px); bottom:10px; }
+  #flightTouch .ft-left, #flightTouch .ft-right { bottom:10px; }
+}
+
+/* --- 機体が飛べるかどうかの指摘 --- */
+#envFlightNotes { margin-top:6px; display:flex; flex-direction:column; gap:4px; }
+#envFlightNotes div { font-size:11px; line-height:1.5; padding:5px 7px; border-radius:5px;
+  border-left:3px solid; background:rgba(255,255,255,0.03); }
+#envFlightNotes div.error { border-color:#ff5d5d; color:#ffc4c4; }
+#envFlightNotes div.warn  { border-color:#ff9f40; color:#ffdcb8; }
+#envFlightNotes div.info  { border-color:#3fa9ff; color:#bcd9f2; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="topbar">
+    <div class="brand">FLIGHT SIM <span>ENVIRONMENT</span></div>
+    <div class="sep"></div>
+    <a class="navlink" href="index.html">← 機体設定（Builder）に戻る</a>
+    <div class="spacer"></div>
+    <button type="button" id="envBtnPanel" title="右のメニューを開け閉めする">メニューを閉じる</button>
+  </div>
+
+  <div id="envCenter">
+    <canvas id="envViewport"></canvas>
+    <div id="versionTag">起動中…</div>
+  </div>
+
+  <div id="right">
+    <div class="section-title">世界</div>
+    <div class="env-group">
+      <canvas id="envMinimap"
+              style="width:100%;max-width:232px;display:block;margin:0 auto 8px;border-radius:6px;border:1px solid #2a3340;background:#0a1017;"></canvas>
+      <div id="envMinimapZoom" style="display:flex;gap:6px;justify-content:center;margin-bottom:6px;"></div>
+      <div class="env-note" style="margin-top:0;">クリックした地点へ視点が移動します。</div>
+      <div class="env-row" style="margin-top:10px;"><label>現在地</label><span id="envRegionReadout" class="val">--</span></div>
+      <div class="env-row" style="margin-top:6px;"><label>地表の標高</label><span id="envGroundReadout" class="val">-- m</span></div>
+      <div class="env-row" style="margin-top:6px;"><label>最寄りの空港</label><span id="envNearestReadout" class="val">--</span></div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;">
+        <input type="checkbox" id="envShowLabels" checked>
+        <span>国名・都市名・空港名を表示</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:6px;cursor:pointer;">
+        <input type="checkbox" id="envShowTrees" checked>
+        <span>樹木を表示（低空のみ）</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:6px;cursor:pointer;">
+        <input type="checkbox" id="envShowRadar">
+        <span>気象レーダーを重ねる</span>
+      </label>
+    </div>
+
+    <div class="section-title">昼夜サイクル</div>
+    <div class="env-group">
+      <div class="env-row"><label>時刻</label><span id="envTimeReadout" class="val">09:00</span></div>
+      <input type="range" id="envTimeSlider" min="0" max="24" step="0.0167">
+      <button id="envBtnToggleTime">❚❚ 一時停止</button>
+      <div class="env-row" style="margin-top:10px;">
+        <label>周期（分＝24時間分）</label>
+      </div>
+      <input type="number" id="envCycleMinutes" min="1" max="1440" step="1">
+      <div class="env-row" style="margin-top:8px;">
+        <label>太陽の仰角</label><span id="envSunElevationReadout" class="val">--°</span>
+      </div>
+    </div>
+
+    <div class="section-title">天候</div>
+    <div class="env-group">
+      <select id="envWeatherPreset"></select>
+      <div class="env-note" style="margin-top:6px;">
+        「自動」は場所と時間で天気が移り変わります。3,000km飛べば天気も変わります。
+      </div>
+      <div class="env-row" style="margin-top:10px;"><label>いまの天候</label><span id="envWeatherReadout" class="val">--</span></div>
+      <div class="env-row" style="margin-top:6px;"><label>視程</label><span id="envVisibilityReadout" class="val">--</span></div>
+      <div class="env-row" style="margin-top:6px;"><label>雲底</label><span id="envCloudBaseReadout" class="val">--</span></div>
+
+      <div id="envWeatherManual" style="display:none;">
+        <div class="env-row" style="margin-top:12px;"><label>湿り（雲量）</label><span id="envCloudCoverageReadout" class="val">35%</span></div>
+        <input type="range" id="envCloudCoverage" min="0" max="100" step="1">
+        <div class="env-row" style="margin-top:10px;"><label>荒れ具合</label><span id="envStorminessReadout" class="val">0%</span></div>
+        <input type="range" id="envStorminess" min="0" max="100" step="1">
+        <div class="env-row" style="margin-top:10px;"><label>霧</label><span id="envFogginessReadout" class="val">0%</span></div>
+        <input type="range" id="envFogginess" min="0" max="100" step="1">
+      </div>
+    </div>
+
+    <div class="section-title">風</div>
+    <div class="env-group">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="envWindFromWeather" checked>
+        <span>風速を天候に任せる</span>
+      </label>
+      <div class="env-row" style="margin-top:10px;"><label>風速</label><span id="envWindSpeedReadout" class="val">20 km/h</span></div>
+      <input type="range" id="envWindSpeed" min="0" max="150" step="1">
+      <div class="env-row" style="margin-top:10px;"><label>風向</label><span id="envWindDirectionReadout" class="val">90°</span></div>
+      <input type="range" id="envWindDirection" min="0" max="360" step="1">
+    </div>
+
+    <div class="section-title">飛行</div>
+    <div class="env-group">
+      <button id="envBtnFly" class="primary">✈ この空港から飛ぶ</button>
+      <div class="env-note" style="margin-top:6px;">
+        選んでいる空港の滑走路に出ます。<b>Shift</b>で出力を上げ、<b>S</b>／<b>↓</b>で機首を上げてください。
+      </div>
+      <div class="env-row" style="margin-top:10px;"><label>機体</label></div>
+      <select id="envFlightAircraft"></select>
+      <div class="env-note" style="margin-top:6px;"><span id="envFlightSpecReadout">—</span></div>
+      <div class="env-note" style="margin-top:4px;"><span id="envFlightPerfReadout"></span></div>
+      <div id="envFlightNotes"></div>
+      <div class="env-row" style="margin-top:12px;">
+        <label>重心の調整</label><span id="envCgReadout" class="val">±0.00 m</span>
+      </div>
+      <div class="env-note" style="margin-top:0;">Builderで決めた重心からのずれです。前へ出すとピッチが安定し、後ろへ下げると軽く動きます。</div>
+      <div class="env-row" style="margin-top:8px;"><label>前後</label><span id="envCgZReadout" class="val">0.00 m</span></div>
+      <input type="range" id="envCgZ" min="-100" max="100" step="1" value="0">
+      <div class="env-row" style="margin-top:6px;"><label>上下</label><span id="envCgYReadout" class="val">0.00 m</span></div>
+      <input type="range" id="envCgY" min="-100" max="100" step="1" value="0">
+      <div class="env-row" style="margin-top:6px;"><label>左右</label><span id="envCgXReadout" class="val">0.00 m</span></div>
+      <input type="range" id="envCgX" min="-100" max="100" step="1" value="0">
+      <button id="envBtnCgReset" style="margin-top:6px;">重心を元に戻す</button>
+
+      <div class="env-row" style="margin-top:12px;">
+        <label for="envFlightTouch">画面に操縦装置</label>
+        <input type="checkbox" id="envFlightTouch">
+      </div>
+      <div class="hint" style="margin:2px 0 8px;">キーボードが無くても指で飛ばせます（タッチ画面では自動で入ります）。</div>
+
+      <div class="env-row"><label>視点</label></div>
+      <select id="envFlightCamera"></select>
+      <button id="envBtnFlightReset" style="margin-top:8px;">滑走路へ戻る（R）</button>
+    </div>
+
+    <div class="section-title">自動操縦</div>
+    <div class="env-group">
+      <div class="env-row">
+        <label for="envApAltHold">高度を維持（O）</label>
+        <input type="checkbox" id="envApAltHold">
+      </div>
+      <div class="hint" style="margin:2px 0 8px;">飛んでいる途中で入れると、そのときの高度を保ちます。</div>
+      <div class="env-row">
+        <label for="envApHover">ホバリング（J）</label>
+        <input type="checkbox" id="envApHover">
+      </div>
+      <div class="hint" style="margin:2px 0 8px;">垂直離着陸用エンジンを持つ機体だけ。その場に留まります。舵を当てているあいだは動かせて、離したところが新しい持ち場になります。</div>
+      <div class="env-row"><label>目標高度</label><span id="envApAltReadout" class="val">1,500 m</span></div>
+      <input type="range" id="envApAltitude" min="100" max="12000" step="50" value="1500">
+
+      <div class="env-row" style="margin-top:12px;"><label>目的地の空港</label></div>
+      <select id="envApDestination"></select>
+
+      <div class="env-row" style="margin-top:10px;">
+        <label for="envApVtolTakeoff">垂直離陸</label>
+        <input type="checkbox" id="envApVtolTakeoff">
+      </div>
+      <div class="env-row">
+        <label for="envApVtolLanding">垂直着陸</label>
+        <input type="checkbox" id="envApVtolLanding">
+      </div>
+      <div class="hint" id="envApVtolHint" style="margin:2px 0 8px;">
+        垂直離着陸用エンジンを持つ機体だけ選べます。入れると滑走路を使わず、真上へ上がって／真下へ降りて発着します。
+      </div>
+
+      <button id="envBtnApFull" class="primary" style="margin-top:8px;">🛫 全自動で離陸〜着陸（I）</button>
+      <div class="env-note" style="margin-top:6px;"><span id="envApReadout">—</span></div>
+      <div class="hint" style="margin-top:4px;">
+        出発はいまいる空港です。離陸・上昇・巡航・降下・進入・着陸まで通しでやります。
+      </div>
+    </div>
+
+    <div class="section-title">空港</div>
+    <div class="env-group">
+      <div class="env-row"><label>空港</label></div>
+      <select id="envAirportSelect"></select>
+      <div class="env-note" style="margin-top:6px;"><span id="envAirportInfoReadout">--</span></div>
+      <button id="envBtnNearestAirport">現在地の最寄りを選ぶ</button>
+      <div class="env-row" style="margin-top:10px;"><label>滑走路</label><span id="envAirportDesignatorReadout" class="val">09/27</span></div>
+      <button id="envBtnToggleAirport">空港を隠す</button>
+      <div class="env-row" style="margin-top:10px;"><label>滑走路の方位</label><span id="envRunwayHeadingReadout" class="val">090°</span></div>
+      <input type="range" id="envRunwayHeading" min="0" max="359" step="1">
+      <div class="env-row" style="margin-top:10px;"><label>滑走路の長さ</label><span id="envRunwayLengthReadout" class="val">2400 m</span></div>
+      <input type="range" id="envRunwayLength" min="800" max="4000" step="100">
+      <div class="env-row" style="margin-top:10px;"><label>滑走路の幅</label><span id="envRunwayWidthReadout" class="val">45 m</span></div>
+      <input type="range" id="envRunwayWidth" min="23" max="60" step="1">
+      <div class="env-row" style="margin-top:10px;"><label>灯火</label></div>
+      <select id="envAirportLights">
+        <option value="auto">自動（夜間に点灯）</option>
+        <option value="on">常時点灯</option>
+        <option value="off">消灯</option>
+      </select>
+      <button id="envBtnFocusAirport">この空港へ視点を移す</button>
+    </div>
+
+    <div class="section-title">高度（プレビュー）</div>
+    <div class="env-group">
+      <div class="env-row"><label>高度</label><span id="envAltitudeReadout" class="val">0 m</span></div>
+      <input type="range" id="envAltitude" min="0" max="15000" step="100">
+      <div class="env-note">空の色・霧の変化を確認するための仮スライダー。実際の機体高度と連動させるのは飛行シーン本体の実装後。</div>
+    </div>
+
+    <div class="section-title">保存</div>
+    <div class="env-group">
+      <div class="env-note" style="margin-top:0;">
+        時刻・雲・風・空港の変更は、この端末に自動で保存されます。
+        地形や空港の位置は種から決まる固定のものなので保存されません。
+      </div>
+      <button id="envBtnExport">設定を書き出す（.json）</button>
+      <button id="envBtnImport">設定を読み込む</button>
+      <input type="file" id="envImportFile" accept="application/json,.json" style="display:none;">
+      <button id="envBtnClearStorage">この端末の保存を消す</button>
+      <div class="env-note" id="envStorageStatus">--</div>
+    </div>
+
+    <div class="env-group" style="border-bottom:none;">
+      <button id="envBtnReset">初期値に戻す</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // 診断ログ：各<script>の読込成否をここに積み、画面左下(#versionTag)にまとめて表示する。
+  window._loadLog = { failedScripts: [], cdnOk: false };
+  function _markFailed(label) {
+    window._loadLog.failedScripts.push(label);
+    _renderVersionTag();
+  }
+  function _renderVersionTag() {
+    const el = document.getElementById('versionTag');
+    if (!el) return;
+    const log = window._loadLog;
+    if (log.failedScripts.length > 0) {
+      el.className = 'err';
+      el.textContent = '読込失敗: ' + log.failedScripts.join(', ') + '\n(パス／ネットワークをご確認ください)';
+      return;
+    }
+    if (typeof envBootstrapOk !== 'undefined' && envBootstrapOk) {
+      el.className = 'ok';
+      el.textContent = 'Flight Sim Environment ' + (typeof ENV_VERSION !== 'undefined' ? ENV_VERSION : '?');
+    }
+  }
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js" onerror="_markFailed('three.min.js (CDN)')"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js" onerror="_markFailed('GLTFLoader.js (CDN)')"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js" onerror="_markFailed('OrbitControls.js (CDN)')"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/objects/Sky.js" onerror="_markFailed('Sky.js (CDN)')"></script>
+<script>
+  window.addEventListener('DOMContentLoaded', () => {
+    if (typeof THREE === 'undefined') { _markFailed('THREE本体が未定義'); return; }
+    if (typeof THREE.OrbitControls === 'undefined') _markFailed('THREE.OrbitControlsが未定義');
+    if (typeof THREE.Sky === 'undefined') _markFailed('THREE.Skyが未定義');
+    window._loadLog.cdnOk = window._loadLog.failedScripts.length === 0;
+  });
+</script>
+
+<script src="js/env/01-env-state.js" onerror="_markFailed('js/env/01-env-state.js')"></script>
+<script src="js/env/02-env-scene.js" onerror="_markFailed('js/env/02-env-scene.js')"></script>
+<script src="js/env/03-sky.js" onerror="_markFailed('js/env/03-sky.js')"></script>
+<script src="js/env/03b-world.js" onerror="_markFailed('js/env/03b-world.js')"></script>
+<script src="js/env/03c-terrain.js" onerror="_markFailed('js/env/03c-terrain.js')"></script>
+<script src="js/env/03d-places.js" onerror="_markFailed('js/env/03d-places.js')"></script>
+<script src="js/env/03f-water.js" onerror="_markFailed('js/env/03f-water.js')"></script>
+<script src="js/env/03g-vegetation.js" onerror="_markFailed('js/env/03g-vegetation.js')"></script>
+<script src="js/env/03e-minimap.js" onerror="_markFailed('js/env/03e-minimap.js')"></script>
+<script src="js/env/04-clouds.js" onerror="_markFailed('js/env/04-clouds.js')"></script>
+<script src="js/env/04b-airport.js" onerror="_markFailed('js/env/04b-airport.js')"></script>
+<script src="js/env/05-daynight.js" onerror="_markFailed('js/env/05-daynight.js')"></script>
+<script src="js/env/05b-weather.js" onerror="_markFailed('js/env/05b-weather.js')"></script>
+<script src="js/env/09-aircraft.js" onerror="_markFailed('js/env/09-aircraft.js')"></script>
+<script src="js/env/09b-aircraft-visual.js" onerror="_markFailed('js/env/09b-aircraft-visual.js')"></script>
+<script src="js/env/10-flight.js" onerror="_markFailed('js/env/10-flight.js')"></script>
+<script src="js/env/11-flight-ui.js" onerror="_markFailed('js/env/11-flight-ui.js')"></script>
+<script src="js/env/11b-flight-touch.js" onerror="_markFailed('js/env/11b-flight-touch.js')"></script>
+<script src="js/env/12-flight-mode.js" onerror="_markFailed('js/env/12-flight-mode.js')"></script>
+<script src="js/env/13-autopilot.js" onerror="_markFailed('js/env/13-autopilot.js')"></script>
+<script src="js/env/06-env-ui.js" onerror="_markFailed('js/env/06-env-ui.js')"></script>
+<script src="js/env/08-env-storage.js" onerror="_markFailed('js/env/08-env-storage.js')"></script>
+<script src="js/env/07-env-main.js" onerror="_markFailed('js/env/07-env-main.js')"></script>
+<script>
+  window.addEventListener('DOMContentLoaded', () => {
+    setTimeout(_renderVersionTag, 300);
+  });
+</script>
+</body>
+</html>

@@ -69,6 +69,8 @@ function renderModelSettingsPanel() {
       </div>
     </div>
     <div class="hint" id="maxSpeedConverted"></div>
+
+    ${typeof engineFleetPanelHtml === 'function' ? engineFleetPanelHtml() : ''}
   `;
 
   // 軸選択の初期値を推定値にし、各軸の実寸も表示して判断材料にする
@@ -151,6 +153,8 @@ function renderModelSettingsPanel() {
     updateSpeedReadout();
   });
   updateSpeedReadout();
+
+  if (typeof bindEngineFleetPanel === 'function') bindEngineFleetPanel();
 }
 
 // 入力された最高速度を、もう片方の単位に目安換算して表示する（音速は高度により変わるため海面高度の目安値を使用）
@@ -237,16 +241,19 @@ function renderCgInspector(el) {
 
     <div class="divider"></div>
     <div class="subgroup-title">主翼から決定</div>
-    <div class="hint" style="margin-bottom:8px;">左翼・右翼として登録された主翼のX位置から、左右対称の中心をXに反映します（Y・Zは変更しません）。</div>
+    <div class="hint" style="margin-bottom:8px;">主翼の空力中心（前縁から1/4翼弦）へ重心を合わせます。X＝左右主翼の中心線、Z＝前後、Y＝主翼の面の高さ。前後がずれていると飛ばしたときに勝手に機首が上がり下がりします。</div>
     <button class="btn-danger-outline" id="btnCgFromWings" style="color:var(--accent);border-color:var(--accent-dim);">
       主翼から決定
     </button>
     ${!hasLeftRight ? '<div class="hint" style="color:var(--warn);margin-top:8px;">左翼・右翼それぞれ1つ以上必要です</div>' : ''}
+    ${typeof pbBalancePanelHtml === 'function' ? pbBalancePanelHtml() : ''}
   `;
 
   bindXyzFields('cg', State.cg.position, () => applyCgToGizmo());
 
   document.getElementById('btnCgFromWings').addEventListener('click', () => setCgFromWings());
+  const btnPb = document.getElementById('btnPitchBalance');
+  if (btnPb) btnPb.addEventListener('click', () => balancePitchTrim());
 }
 
 function renderInspector() {
@@ -373,6 +380,27 @@ function renderTypeSpecificFields(part) {
         <input type="text" inputmode="decimal" id="fThrust" value="${part.props.thrustKgf}">
       </div>
       <div class="field">
+        <label>種別</label>
+        <select id="fEngineKind">
+          <option value="prop" ${(part.props.engineKind || 'prop') === 'prop' ? 'selected' : ''}>プロペラ</option>
+          <option value="jet" ${part.props.engineKind === 'jet' ? 'selected' : ''}>ジェット</option>
+          <option value="jet_ab" ${part.props.engineKind === 'jet_ab' ? 'selected' : ''}>ジェット（アフターバーナー付き）</option>
+          <option value="rocket" ${part.props.engineKind === 'rocket' ? 'selected' : ''}>ロケット</option>
+        </select>
+      </div>
+      <div class="hint">プロペラは速度が上がるほど推力が落ち、空気が薄いと弱ります。ジェットは速度による落ちがゆるく、薄い空気にもプロペラより強い。アフターバーナー付きは出力レバーを9割より上げたときだけ推力が5割増しになり、炎を吹きます。ロケットは空気を使わないので、速度にも高度にもまったく左右されません。<br>見た目は、プロペラは何も出さず、ジェットはノズル後方の<b>陽炎</b>だけ（炎は出ません）。アフターバーナー付きは9割から上で炎、ロケットは炎と煙を吹きます。</div>
+      <div class="field">
+        <label>ノズルの直径（m／0で自動）</label>
+        <input type="text" inputmode="decimal" id="fPlumeWidth" value="${part.props.plumeWidth || 0}">
+      </div>
+      <div class="hint">ここで決めた太さの筒が画面のエンジンの形になり、飛行中の炎・排気もこの太さで出ます。<b>機体モデルのエンジンの大きさに合わせてください</b>。0なら推力から自動（いまは約 ${engineNozzleDiameter(part.props).toFixed(2)} m。実機のノズルは推力の平方根におよそ比例するので、それに合わせています）。<br>筒の<b>太いほうの円が噴射口</b>で、その向きがそのまま噴射の向きです。</div>
+      ${part.props.engineKind === 'prop' ? '' : `
+      <div class="field">
+        <label>炎・排気の長さ（倍率）</label>
+        <input type="text" inputmode="decimal" id="fPlumeLength" value="${part.props.plumeLength === undefined ? 1 : part.props.plumeLength}">
+      </div>
+      `}
+      <div class="field">
         <label>回転軸（プロペラ/ファン）</label>
         <select id="fSpinAxis">
           <option value="x" ${part.props.spinAxis === 'x' ? 'selected' : ''}>X軸</option>
@@ -381,16 +409,92 @@ function renderTypeSpecificFields(part) {
         </select>
       </div>
       <div class="hint">位置は推力の作用点（機体重心からのオフセット）として飛行モデルに使用されます。</div>
+      <div class="toggle-row" style="margin-top:6px;">
+        <label>逆噴射なし</label>
+        <label class="switch">
+          <input type="checkbox" id="fNoReverse" ${part.props.noReverse ? 'checked' : ''}>
+          <span class="slider-toggle"></span>
+        </label>
+      </div>
+      <div class="hint">着陸滑走で推力を後ろ向きに使えるかどうか。ジェットは排気を前へ振り向け、可変ピッチのターボプロップは羽根を裏返して逆推力を出せますが、固定ピッチのプロペラ機（レシプロ機など）はできません。オンにすると、この機体は着陸で逆噴射を使わずブレーキとスポイラーだけで止まります。上向き（Y軸）のリフトエンジンは、そもそも逆噴射しません。</div>
+      <div class="divider"></div>
+      ${part.props.spinAxis === 'y' ? `
+      <div class="subgroup-title">エンジングループ</div>
+      <div class="hint">上向き（Y軸）のリフトエンジンはグループに入りません。浮くための力なので、飛行中に数字キーで止められないようにしてあります。</div>
+      ` : `
+      <div class="subgroup-title">エンジングループ</div>
+      <div class="field">
+        <label>グループ</label>
+        <select id="fEngineGroup">
+          ${[1, 2, 3, 4].map((n) => `<option value="${n}" ${(part.props.engineGroup || 1) === n ? 'selected' : ''}>${n}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label>このグループの最高速度</label>
+        <div style="display:flex;gap:6px;">
+          <input type="text" inputmode="decimal" id="fGroupVmax" value="${part.props.groupMaxSpeedValue || 0}" style="flex:1;">
+          <select id="fGroupVmaxUnit" style="flex:0 0 80px;">
+            <option value="mach" ${(part.props.groupMaxSpeedUnit || 'mach') === 'mach' ? 'selected' : ''}>マッハ</option>
+            <option value="kt" ${part.props.groupMaxSpeedUnit === 'kt' ? 'selected' : ''}>kt</option>
+          </select>
+        </div>
+      </div>
+      <div class="hint">飛行中、数字キー<b>1〜4</b>でグループごとに止められます。最高速度は「そのグループのエンジンが推力を出せる上限の速度」で、0なら機体全体の最高速度をそのまま使います。たとえばロケットのグループだけマッハ21、ほかをマッハ5にしておくと、ロケットを止めているあいだはマッハ5で頭打ちになります。同じグループのエンジンに違う値を入れたときは、いちばん大きい値を使います。機体設定パネルの「エンジン出力」から、グループごとにその速度ぶんの推力を入れられます。</div>
+      `}
       <div class="divider"></div>
       <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
+      ${part.props.spinAxis === 'y' ? vtolBalancePanelHtml() : ''}
     `;
     document.getElementById('fThrust').addEventListener('change', (e) => {
       part.props.thrustKgf = parseFloat(e.target.value) || 0;
+      // 直径が「自動」なら推力から決まるので、形も作り直す
+      if (!(part.props.plumeWidth > 0)) updateEngineGizmoShape(part);
+      renderInspector();
+      renderModelSettingsPanel();
     });
     document.getElementById('fSpinAxis').addEventListener('change', (e) => {
       part.props.spinAxis = e.target.value;
+      // 筒の向き（＝噴射の向き）を合わせ直す
+      updateEngineGizmoShape(part);
+      // 回転軸を変えると、出す欄が変わる（リフトエンジンにはグループの欄が無く、
+      // 代わりに前後バランスの欄が出る）。選び直さないと切り替わらなかった。
+      renderInspector();
+      renderModelSettingsPanel();
+    });
+    document.getElementById('fNoReverse').addEventListener('change', (e) => {
+      part.props.noReverse = e.target.checked;
+    });
+    document.getElementById('fEngineKind').addEventListener('change', (e) => {
+      part.props.engineKind = e.target.value;
+      // プロペラには炎の欄が要らない（出ないので）。出し入れのために描き直す。
+      renderInspector();
+    });
+    const elPw = document.getElementById('fPlumeWidth');
+    if (elPw) elPw.addEventListener('change', (e) => {
+      part.props.plumeWidth = Math.max(parseFloat(e.target.value) || 0, 0);
+      updateEngineGizmoShape(part);
+      renderInspector();
+    });
+    const elPl = document.getElementById('fPlumeLength');
+    if (elPl) elPl.addEventListener('change', (e) => {
+      part.props.plumeLength = Math.max(parseFloat(e.target.value) || 0, 0);
+    });
+    // グループの欄はリフトエンジン（回転軸Y）では出さないので、無いことがある
+    const elGroup = document.getElementById('fEngineGroup');
+    if (elGroup) elGroup.addEventListener('change', (e) => {
+      part.props.engineGroup = parseInt(e.target.value, 10) || 1;
+    });
+    const elVmax = document.getElementById('fGroupVmax');
+    if (elVmax) elVmax.addEventListener('change', (e) => {
+      part.props.groupMaxSpeedValue = Math.max(parseFloat(e.target.value) || 0, 0);
+    });
+    const elVmaxUnit = document.getElementById('fGroupVmaxUnit');
+    if (elVmaxUnit) elVmaxUnit.addEventListener('change', (e) => {
+      part.props.groupMaxSpeedUnit = e.target.value;
     });
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
+    const vtolBtn = document.getElementById('btnVtolBalance');
+    if (vtolBtn) vtolBtn.addEventListener('click', () => balanceVtolThrust());
 
   } else if (part.type === 'wing') {
     const center = wingCornersCenter(part.props.corners);
@@ -595,6 +699,20 @@ function renderTypeSpecificFields(part) {
 
   } else if (part.type === 'landing_gear') {
     renderLandingGearFields(container, part);
+
+  } else if (part.type === 'viewpoint') {
+    container.innerHTML = `
+      <div class="subgroup-title">コックピット視点</div>
+      <div class="hint">飛行画面の「コックピット」視点で、ここが目の位置になります。
+        上の「位置」をギズモか数値で動かして、操縦席に合わせてください。
+        「回転」は視線の向きです（0なら真っ直ぐ前。X を下げると見下ろし、
+        Y を回すと横向きの席になります）。</div>
+      <div class="hint">置いていない機体は、これまでどおり機体の大きさから
+        見積もった位置（重心の少し前・少し上）を使います。1機に1つで足ります。</div>
+      <div class="divider"></div>
+      <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
+    `;
+    document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
   }
 }
 
