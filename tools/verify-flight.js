@@ -48,6 +48,7 @@ const {
   aircraftDragLengthM, apBankClimbFactor, apVsLimits, apTerrainEscapeVs, apVtolHoverAngles,
   apAileronForBank, apSpoilerCommand, apReverseCommand,
   aircraftBestClimb, apUpdateTerrainFloor,
+  maxForwardThrustAt, aircraftVMaxMps, engineThrustScale, engineAfterburner,
 } = ctx;
 
 // 13-autopilot.js / 10-flight.js の同名の定数と同じ値。vmコンテキストの外からは
@@ -3421,6 +3422,132 @@ function autopilotFlight(opts) {
       ap.pitchCmdDeg.toFixed(1) + '°');
   }
 }
+}
+
+// --- (13) エンジンの種別とグループ ---------------------------------------------
+//
+// プロペラ／ジェット／アフターバーナー付き／ロケットで、推力の出かたが
+// 「速度」と「空気の薄さ」にどう反応するかを測る。
+// グループの最高速度を入れたときに、そこで本当に頭打ちになることも見る。
+{
+  // 内蔵機のエンジンだけ差し替えた機体を作る
+  const withEngine = (props, extra) => {
+    const cfg = defaultAircraftConfig();
+    for (const p of cfg.parts) {
+      if (p.type !== 'engine') continue;
+      Object.assign(p.props, props);
+    }
+    Object.assign(cfg, extra || {});
+    return buildAircraftModel(cfg);
+  };
+
+  // 最高速度をマッハ1（340m/s）に揃えて、種別の違いだけを見る
+  const speedCfg = { modelMaxSpeedValue: 1, modelMaxSpeedUnit: 'mach' };
+  const kinds = ['prop', 'jet', 'jet_ab', 'rocket'];
+  const rows = [];
+  for (const kind of kinds) {
+    const m = withEngine({ engineKind: kind }, speedCfg);
+    const t0 = maxForwardThrustAt(m, 0, 0);
+    const tv = maxForwardThrustAt(m, 300, 0);            // マッハ0.88あたり
+    const th = maxForwardThrustAt(m, 0, 11000);          // 高度11km（ρ/ρ0≒0.30）
+    rows.push(`${kind} 静止${(t0 / 1000).toFixed(1)}kN`
+      + ` 300m/s ${(100 * tv / t0).toFixed(0)}%`
+      + ` 11km ${(100 * th / t0).toFixed(0)}%`);
+  }
+  note('エンジン種別ごとの推力', rows.join(' / '));
+
+  const mp = withEngine({ engineKind: 'prop' }, speedCfg);
+  const mj = withEngine({ engineKind: 'jet' }, speedCfg);
+  const mr = withEngine({ engineKind: 'rocket' }, speedCfg);
+  const mab = withEngine({ engineKind: 'jet_ab' }, speedCfg);
+  const ratio = (m, v, h) => maxForwardThrustAt(m, v, h) / maxForwardThrustAt(m, 0, 0);
+  // プロペラはこれまでどおり 1-0.75·(v/vMax)
+  check(Math.abs(ratio(mp, 170, 0) - 0.625) < 0.01,
+    'プロペラの速度低下はこれまでと同じ式', ratio(mp, 170, 0).toFixed(3));
+  check(ratio(mj, 300, 0) > ratio(mp, 300, 0) + 0.3,
+    'ジェットはプロペラより速度で落ちない',
+    `${ratio(mp, 300, 0).toFixed(2)} → ${ratio(mj, 300, 0).toFixed(2)}`);
+  check(Math.abs(ratio(mr, 300, 0) - 1) < 1e-6 && Math.abs(ratio(mr, 0, 11000) - 1) < 1e-6,
+    'ロケットは速度でも高度でも推力が落ちない',
+    `${ratio(mr, 300, 0).toFixed(3)} / ${ratio(mr, 0, 11000).toFixed(3)}`);
+  check(ratio(mj, 0, 11000) > ratio(mp, 0, 11000) + 0.03,
+    'ジェットは薄い空気でもプロペラより粘る',
+    `${ratio(mp, 0, 11000).toFixed(3)} → ${ratio(mj, 0, 11000).toFixed(3)}`);
+  // アフターバーナー。レバー9割から効きはじめ、全開で5割増し。
+  check(engineAfterburner(0.5) === 0 && Math.abs(engineAfterburner(0.95) - 0.5) < 1e-9
+    && engineAfterburner(1) === 1, 'ABはレバー9割から全開までで立ち上がる',
+    `0.5→${engineAfterburner(0.5)} 0.95→${engineAfterburner(0.95).toFixed(3)} 1→${engineAfterburner(1)}`);
+  const abE = mab.engines[0], jE = mj.engines[0];
+  const rho0 = airDensityAt(0);
+  const abFull = engineThrustScale(abE, 100, rho0, 1);
+  const abDry = engineThrustScale(abE, 100, rho0, 0.85);
+  check(Math.abs(abFull / abDry - 1.5) < 1e-6, 'AB全開で推力が5割増し',
+    (abFull / abDry).toFixed(3));
+  check(Math.abs(abDry - engineThrustScale(jE, 100, rho0, 0.85)) < 1e-9,
+    'ABを使っていないときは、ふつうのジェットと同じ');
+
+  // --- グループごとの最高速度 ---
+  // グループ1をマッハ5、グループ2（ロケット）をマッハ21にした機体。
+  const cfg = defaultAircraftConfig();
+  const eng = cfg.parts.find((p) => p.type === 'engine');
+  Object.assign(eng.props, {
+    engineKind: 'jet', engineGroup: 1, groupMaxSpeedValue: 5, groupMaxSpeedUnit: 'mach',
+  });
+  const rocketPart = JSON.parse(JSON.stringify(eng));
+  rocketPart.id = 'eng_rocket';
+  Object.assign(rocketPart.props, {
+    engineKind: 'rocket', engineGroup: 2, groupMaxSpeedValue: 21, groupMaxSpeedUnit: 'mach',
+  });
+  cfg.parts.push(rocketPart);
+  const two = buildAircraftModel(cfg);
+  check(two.engineGroups.length === 2 && two.hasEngineGroups, 'グループが2つに分かれる');
+  check(Math.abs(two.engineGroups[0].vMaxMps - 5 * 340) < 1
+    && Math.abs(two.engineGroups[1].vMaxMps - 21 * 340) < 1,
+    'グループごとの最高速度が読めている',
+    two.engineGroups.map((g) => `${g.id}:${(g.vMaxMps / 340).toFixed(0)}M`).join(' '));
+
+  const cAll = createFlightControls();
+  const cJetOnly = createFlightControls(); cJetOnly.engineGroupOff = { 2: true };
+  check(Math.abs(aircraftVMaxMps(two, cAll) - 21 * 340) < 1
+    && Math.abs(aircraftVMaxMps(two, cJetOnly) - 5 * 340) < 1,
+    'ロケットを止めると出せる最高速度が下がる',
+    `${(aircraftVMaxMps(two, cAll) / 340).toFixed(0)}M → ${(aircraftVMaxMps(two, cJetOnly) / 340).toFixed(0)}M`);
+
+  // 推力の頭打ち。ジェットのグループはマッハ5を1割ほど超えたところで0になり、
+  // ロケットのグループはマッハ21までしっかり出る。
+  const tAt = (c, v) => maxForwardThrustAt(two, v, 11000, c);
+  const jetCut = tAt(cJetOnly, 5 * 340 * 1.1);
+  check(jetCut < 1e-6 && tAt(cJetOnly, 5 * 340 * 0.9) > 100,
+    'マッハ5のグループはマッハ5で頭打ちになる',
+    `M4.5 ${(tAt(cJetOnly, 5 * 340 * 0.9) / 1000).toFixed(1)}kN → M5.5 ${(jetCut / 1000).toFixed(3)}kN`);
+  check(tAt(cAll, 20 * 340) > 100 && tAt(cAll, 23 * 340) < 1e-6,
+    'ロケットを点ければマッハ21まで推力が出る',
+    `M20 ${(tAt(cAll, 20 * 340) / 1000).toFixed(1)}kN → M23 ${(tAt(cAll, 23 * 340) / 1000).toFixed(3)}kN`);
+  note('グループ別の推力（高度11km）',
+    `全部: M4.5 ${(tAt(cAll, 5 * 340 * 0.9) / 1000).toFixed(0)}kN / M20 ${(tAt(cAll, 20 * 340) / 1000).toFixed(0)}kN`
+    + ` ｜ ロケット停止: M4.5 ${(tAt(cJetOnly, 5 * 340 * 0.9) / 1000).toFixed(0)}kN`
+    + ` / M20 ${(tAt(cJetOnly, 20 * 340) / 1000).toFixed(0)}kN`);
+
+  // 止めたグループは推力を出さない（物理の本体でも）
+  const st = createFlightState();
+  st.position.set(0, 11000, 0); st.velocity.set(0, 0, -400);
+  st.altitudeM = 11000;
+  const out = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
+  const cOn = createFlightControls(); cOn.throttle = 1; cOn.parkingBrake = false;
+  accumulateAeroForces(two, st, cOn, noWind, out);
+  const withRocket = st.thrustN;
+  const cOff = createFlightControls();
+  cOff.throttle = 1; cOff.parkingBrake = false; cOff.engineGroupOff = { 2: true };
+  accumulateAeroForces(two, st, cOff, noWind, out);
+  const withoutRocket = st.thrustN;
+  check(withRocket > withoutRocket * 1.5, '止めたグループのぶんだけ推力が減る',
+    `${(withRocket / 1000).toFixed(0)}kN → ${(withoutRocket / 1000).toFixed(0)}kN`);
+
+  // 既定の機体（グループを触っていない）は、グループが1つで挙動も同じ
+  check(model.engineGroups.length === 1 && !model.hasEngineGroups,
+    'グループを設定していない機体はグループ1つだけ');
+  check(!model.engines[0].groupVMaxExplicit,
+    '最高速度を入れていないグループでは推力を切らない（いままでの機体が変わらない）');
 }
 
 // --- 計算の速さ ---------------------------------------------------------------

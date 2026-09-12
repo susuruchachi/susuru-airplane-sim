@@ -380,6 +380,16 @@ function renderTypeSpecificFields(part) {
         <input type="text" inputmode="decimal" id="fThrust" value="${part.props.thrustKgf}">
       </div>
       <div class="field">
+        <label>種別</label>
+        <select id="fEngineKind">
+          <option value="prop" ${(part.props.engineKind || 'prop') === 'prop' ? 'selected' : ''}>プロペラ</option>
+          <option value="jet" ${part.props.engineKind === 'jet' ? 'selected' : ''}>ジェット</option>
+          <option value="jet_ab" ${part.props.engineKind === 'jet_ab' ? 'selected' : ''}>ジェット（アフターバーナー付き）</option>
+          <option value="rocket" ${part.props.engineKind === 'rocket' ? 'selected' : ''}>ロケット</option>
+        </select>
+      </div>
+      <div class="hint">プロペラは速度が上がるほど推力が落ち、空気が薄いと弱ります。ジェットは速度による落ちがゆるく、薄い空気にもプロペラより強い。アフターバーナー付きは出力レバーを9割より上げたときだけ推力が5割増しになり、炎を吹きます。ロケットは空気を使わないので、速度にも高度にもまったく左右されません。</div>
+      <div class="field">
         <label>回転軸（プロペラ/ファン）</label>
         <select id="fSpinAxis">
           <option value="x" ${part.props.spinAxis === 'x' ? 'selected' : ''}>X軸</option>
@@ -397,6 +407,25 @@ function renderTypeSpecificFields(part) {
       </div>
       <div class="hint">着陸滑走で推力を後ろ向きに使えるかどうか。ジェットは排気を前へ振り向け、可変ピッチのターボプロップは羽根を裏返して逆推力を出せますが、固定ピッチのプロペラ機（レシプロ機など）はできません。オンにすると、この機体は着陸で逆噴射を使わずブレーキとスポイラーだけで止まります。上向き（Y軸）のリフトエンジンは、そもそも逆噴射しません。</div>
       <div class="divider"></div>
+      <div class="subgroup-title">エンジングループ</div>
+      <div class="field">
+        <label>グループ</label>
+        <select id="fEngineGroup">
+          ${[1, 2, 3, 4].map((n) => `<option value="${n}" ${(part.props.engineGroup || 1) === n ? 'selected' : ''}>${n}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label>このグループの最高速度</label>
+        <div style="display:flex;gap:6px;">
+          <input type="text" inputmode="decimal" id="fGroupVmax" value="${part.props.groupMaxSpeedValue || 0}" style="flex:1;">
+          <select id="fGroupVmaxUnit" style="flex:0 0 80px;">
+            <option value="mach" ${(part.props.groupMaxSpeedUnit || 'mach') === 'mach' ? 'selected' : ''}>マッハ</option>
+            <option value="kt" ${part.props.groupMaxSpeedUnit === 'kt' ? 'selected' : ''}>kt</option>
+          </select>
+        </div>
+      </div>
+      <div class="hint">飛行中、数字キー<b>1〜4</b>でグループごとに止められます。最高速度は「そのグループのエンジンが推力を出せる上限の速度」で、0なら機体全体の最高速度をそのまま使います。たとえばロケットのグループだけマッハ21、ほかをマッハ5にしておくと、ロケットを止めているあいだはマッハ5で頭打ちになります。同じグループのエンジンに違う値を入れたときは、いちばん大きい値を使います。</div>
+      <div class="divider"></div>
       <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
       ${part.props.spinAxis === 'y' ? vtolBalancePanelHtml() : ''}
     `;
@@ -408,6 +437,18 @@ function renderTypeSpecificFields(part) {
     });
     document.getElementById('fNoReverse').addEventListener('change', (e) => {
       part.props.noReverse = e.target.checked;
+    });
+    document.getElementById('fEngineKind').addEventListener('change', (e) => {
+      part.props.engineKind = e.target.value;
+    });
+    document.getElementById('fEngineGroup').addEventListener('change', (e) => {
+      part.props.engineGroup = parseInt(e.target.value, 10) || 1;
+    });
+    document.getElementById('fGroupVmax').addEventListener('change', (e) => {
+      part.props.groupMaxSpeedValue = Math.max(parseFloat(e.target.value) || 0, 0);
+    });
+    document.getElementById('fGroupVmaxUnit').addEventListener('change', (e) => {
+      part.props.groupMaxSpeedUnit = e.target.value;
     });
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
     const vtolBtn = document.getElementById('btnVtolBalance');

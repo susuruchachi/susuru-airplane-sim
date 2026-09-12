@@ -8,6 +8,16 @@ function defaultPropsForType(type) {
         spinAxis: 'z',         // プロペラ/ファンの回転軸
         // 着陸滑走で推力を後ろ向きに使えないエンジン（固定ピッチのプロペラ機）
         noReverse: false,
+        // エンジンの種別。推力の出かた（速度・空気の薄さへの強さ）と、
+        // 排気や炎の見た目が変わる。既定はプロペラ——これまでの機体は
+        // すべてプロペラの式で飛んでいたので、既定を変えると全機の性能が動く。
+        engineKind: 'prop',    // prop | jet | jet_ab | rocket
+        // エンジンのグループ（1〜4）。飛行中にグループ単位で止められる。
+        engineGroup: 1,
+        // このグループで出せる最高速度。0なら機体の最高速度をそのまま使う。
+        // 例：ロケットのグループだけマッハ21、ほかのエンジンはマッハ5。
+        groupMaxSpeedValue: 0,
+        groupMaxSpeedUnit: 'mach',
       };
     case 'wing':
       return {

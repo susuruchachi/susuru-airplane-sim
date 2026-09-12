@@ -866,11 +866,16 @@ function apBankMaxFor(vMps, stallMps, radiusMax) {
 // （渡さなければ世界の大きさから決めた上限のまま——目的地未設定の高度維持モードなど）。
 // currentVMps（いまの対気速度）を渡すと、実際に使うバンク角の上限をその速度で出す
 // （渡さなければ巡航速度のぶん）。
-function apSpeedSchedule(model, distToGoM, currentVMps) {
+function apSpeedSchedule(model, distToGoM, currentVMps, controls) {
   const W = model.massKg * 9.80665;
   const S = Math.max(model.wingArea, 0.01);
   const stall = Math.sqrt((2 * W) / (1.225 * S * 1.5));
-  const vMax = Math.max(model.vMaxMps || 0, stall * 2);
+  // 止めているエンジングループぶんを差し引いた「いま出せる最高速度」。
+  // model.vMaxMps を直に読むと、ロケットを止めていても自動操縦がロケット込みの
+  // 速度を指示しつづけ、出るはずのない速度を追いかけることになる。
+  const vMax = Math.max(
+    (typeof aircraftVMaxMps === 'function' ? aircraftVMaxMps(model, controls) : model.vMaxMps) || 0,
+    stall * 2);
   const radiusMax = apCruiseTurnRadiusMax(distToGoM);
   // 「出したい速さ」で要るバンク角を先に出し、そこから曲がれる速さを決める。
   // 順序が逆（先にバンク角を決めて速さを頭打ちにする）だと、速い機体は
@@ -896,7 +901,7 @@ function apSpeedSchedule(model, distToGoM, currentVMps) {
     // **この機体が実際に出せる上昇率(m/s)**。無い（古い呼び出し）なら undefined で、
     // apVsLimits はこれまでどおり幾何の7°だけで決める。
     climbRate: (typeof aircraftBestClimb === 'function')
-      ? aircraftBestClimb(model).rateMps : undefined,
+      ? aircraftBestClimb(model, controls).rateMps : undefined,
     climb: apClamp(stall * 1.35, stall * 1.2, vMax * 0.6),
     // 巡航はできるだけ速く——ただし旋回できる速さを超えない範囲で。
     // ぴったり最高速度を目標にすると、推力と抵抗がほぼ釣り合ったところを
@@ -1829,7 +1834,7 @@ function stepAutopilot(model, state, controls, ap, dt, env) {
   const distToGoM = ap.plan
     ? Math.hypot(ap.plan.faf.x - state.position.x, ap.plan.faf.z - state.position.z)
     : undefined;
-  const spd = apSpeedSchedule(model, distToGoM, state.airspeed);
+  const spd = apSpeedSchedule(model, distToGoM, state.airspeed, controls);
   if (ap.full) apStepFull(model, state, controls, ap, spd, dt, env);
   else if (ap.hover) apStepHover(model, state, controls, ap, spd, dt, env);
   else if (ap.altHold) apStepAltHold(model, state, controls, ap, spd, dt);

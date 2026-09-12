@@ -91,6 +91,7 @@ function createFlightState() {
     stallRatio: 0,      // 主翼のうち失速している面積の割合 0〜1
     thrustN: 0,
     vtolThrustN: 0,
+    afterburner: 0,   // アフターバーナーの効き（0〜1）。炎の見た目に使う
     machLike: 0,
   };
 }
@@ -108,8 +109,66 @@ function createFlightControls() {
     reverse: 0,                  // 0〜1
     brake: 0,                    // 0〜1
     gearDown: true,
+    // 着陸灯。前下方を照らすスポットライト（09b-aircraft-visual.js）。
+    // 既定は点灯——夜に降りるとき、押すキーを知らないと真っ暗になってしまう。
+    landingLight: true,
     parkingBrake: true,
+    // 止めているエンジングループ（{2:true} なら グループ2 が停止）。
+    // 数字キー1〜4で切り替える。グループごとに出せる最高速度が違うので、
+    // 「ロケットを止めればマッハ5、点ければマッハ21」という使い方ができる。
+    engineGroupOff: {},
   };
+}
+
+// --- エンジンの推力 -----------------------------------------------------------
+
+// アフターバーナーの効き（0〜1）。出力レバーを ENGINE_AB_FROM より上げたぶんだけ。
+function engineAfterburner(lever) {
+  return THREE.MathUtils.clamp(
+    ((lever || 0) - ENGINE_AB_FROM) / (ENGINE_AB_FULL - ENGINE_AB_FROM), 0, 1);
+}
+
+// そのグループを止めているか
+function engineGroupOff(controls, group) {
+  const off = controls && controls.engineGroupOff;
+  return !!(off && off[group]);
+}
+
+// グループの最高速度を超えたとき、推力をどこまで引っぱって切るか（比）
+const ENGINE_VMAX_CUT = 1.08;
+
+// エンジン1基が、いまの速度・空気密度・レバー位置で静止推力の何倍を出すか。
+//
+// 種別ごとの係数は ENGINE_KINDS（09-aircraft.js）。
+// 「グループの最高速度」を**明示的に入れたグループだけ**、その速度で推力を切る。
+// ロケットは速度でも高度でも推力が落ちないので、切らないと上限が抗力だけで
+// 決まってしまい、Builderで入れた「マッハ21」がただの飾りになる。
+// 逆に、値を入れていない機体（いままでの全機）は切らない——プロペラの
+// 1-0.75·(v/vMax) という式のまま、1ノットも挙動を変えないため。
+function engineThrustScale(e, airspeed, rho, lever) {
+  const k = ENGINE_KINDS[e.kind] || ENGINE_KINDS.prop;
+  const vMax = Math.max(e.groupVMaxMps || 0, 1);
+  const ratio = THREE.MathUtils.clamp(airspeed / vMax, 0, 1.4);
+  let f = Math.max(1 - k.decay * ratio, 0.05);
+  if (e.groupVMaxExplicit) {
+    f *= THREE.MathUtils.clamp((ENGINE_VMAX_CUT - ratio) / (ENGINE_VMAX_CUT - 1), 0, 1);
+  }
+  if (k.rhoPow > 0) f *= Math.pow(rho / FLIGHT_RHO0, k.rhoPow);
+  return f * (1 + engineAfterburner(lever) * k.ab);
+}
+
+// いま動かしているエンジンで出せる最高速度(m/s)。
+// グループを止めると下がる——計器の表示も、自動操縦が指示する速度も、
+// 「いま出せる速度」で決めたいので、model.vMaxMps を直に読まずにこれを使う。
+function aircraftVMaxMps(model, controls) {
+  const groups = model.engineGroups || [];
+  let v = 0;
+  for (const g of groups) {
+    if (g.thrustN <= 0) continue;
+    if (controls && engineGroupOff(controls, g.id)) continue;
+    v = Math.max(v, g.vMaxMps);
+  }
+  return v > 0 ? v : model.vMaxMps;
 }
 
 // --- 力とモーメント -----------------------------------------------------------
@@ -277,37 +336,41 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
     out.force.addScaledVector(vAirBody, -dGear);
   }
 
-  // 推力。プロペラなので速度が上がるほど落ちる。
-  const speedRatio = THREE.MathUtils.clamp(airspeed / Math.max(model.vMaxMps, 1), 0, 1.4);
-  const propFactor = Math.max(1 - AERO_DEFAULTS.propDecay * speedRatio, 0.05);
-  // 空気が薄いと出力も落ちる
-  const envScale = propFactor * (rho / FLIGHT_RHO0);
+  // 推力。速度と空気の薄さでどれだけ落ちるかは**エンジンの種別ごと**に違うので、
+  // 倍率はエンジン1基ずつ出す（engineThrustScale）。
   // 垂直離陸用（回転軸が上向き）のエンジンは別のレバーで出す。
   // 前へ進むためのエンジンと同じレバーにすると、離陸のために出力を上げた瞬間に
   // 前へも押されてしまい、ホバリングも垂直着陸もできない。
-  const vtolScale = (controls.vtolThrottle || 0) * envScale;
-  const mainScale = controls.throttle * envScale;
+  const vtolLever = controls.vtolThrottle || 0;
+  const mainLever = controls.throttle;
   // 逆噴射。ジェットは排気を前へ振り向け、ターボプロップは羽根を裏返して後ろへ引く。
   // どちらも順推力そのままは出ないので reverseFraction ぶんに絞る。
   // **地上で、前へ走っているあいだだけ効かせる**——空中で使えると、自動操縦も手動も
   // 「減速したいから引く」を高度でやってしまい、実機なら空中分解する使い方が
   // 最適解になってしまう。止まりかけで切るのは REVERSE_FADE_MPS の説明を参照。
   // 接地判定は前のフレームのものだが、1フレーム（16ms）のずれは効果に出ない。
-  const revScale = state.onGround
-    ? THREE.MathUtils.clamp(controls.reverse || 0, 0, 1) * envScale
+  const revLever = state.onGround
+    ? THREE.MathUtils.clamp(controls.reverse || 0, 0, 1)
       * AERO_DEFAULTS.reverseFraction
       * THREE.MathUtils.clamp(-vAirBody.z / REVERSE_FADE_MPS, 0, 1)
     : 0;
-  let thrustTotal = 0, vtolTotal = 0;
+  let thrustTotal = 0, vtolTotal = 0, abTotal = 0;
   for (const e of model.engines) {
+    // 止めているグループは推力を出さない
+    if (engineGroupOff(controls, e.group)) continue;
+    const lever = e.lift ? vtolLever : mainLever;
+    const scale = engineThrustScale(e, airspeed, rho, lever);
     // 垂直離陸用エンジンは前後バランス（trimScale）ぶん絞ってある。
     // ここで掛け忘れると、モデル構築時に消したはずの機首振りが物理では復活する。
-    const t = e.lift ? e.thrustN * e.trimScale * vtolScale
-      : e.thrustN * (mainScale - (e.canReverse ? revScale : 0));
+    const t = e.lift ? e.thrustN * e.trimScale * lever * scale
+      : e.thrustN * (mainLever * scale - (e.canReverse ? revLever * scale : 0));
     if (e.lift) vtolTotal += t; else thrustTotal += t;
+    if (e.kind === 'jet_ab') abTotal = Math.max(abTotal, engineAfterburner(lever));
     out.force.addScaledVector(e.axis, t);
     out.torque.add(_fv.tmp.crossVectors(e.position, _fv.f.copy(e.axis).multiplyScalar(t)));
   }
+  // 炎の見た目に使う（0〜1）
+  state.afterburner = model.hasAfterburner ? THREE.MathUtils.clamp(abTotal, 0, 1) : 0;
 
   state.thrustN = thrustTotal;
   state.vtolThrustN = vtolTotal;
@@ -641,16 +704,15 @@ function trimBisect(f, lo, hi) {
 // 約300kmで、TB1 は巡航のまま突っ込むと1000km走っても進入速度まで落ちない。
 // 前へ進むエンジンが、その速度・高度で出せる推力の合計(N)。
 // 推力の項（accumulateAeroForces）と同じ式。
-function maxForwardThrustAt(model, speedMps, altitudeM) {
-  const ratio = THREE.MathUtils.clamp(speedMps / Math.max(model.vMaxMps, 1), 0, 1.4);
-  const propFactor = Math.max(1 - AERO_DEFAULTS.propDecay * ratio, 0.05);
-  const scale = propFactor * (airDensityAt(altitudeM) / FLIGHT_RHO0);
+function maxForwardThrustAt(model, speedMps, altitudeM, controls) {
+  const rho = airDensityAt(altitudeM);
   let t = 0;
   for (const e of model.engines) {
     if (e.lift) continue;
-    t += e.thrustN * Math.max(-e.axis.z, 0);
+    if (controls && engineGroupOff(controls, e.group)) continue;
+    t += e.thrustN * Math.max(-e.axis.z, 0) * engineThrustScale(e, speedMps, rho, 1);
   }
-  return t * scale;
+  return t;
 }
 
 // この機体が**実際に出せる**上昇率(m/s)と、そのときの速度。
@@ -667,8 +729,13 @@ function maxForwardThrustAt(model, speedMps, altitudeM) {
 // 定常上昇は sinγ = (推力 - 抗力)/重さ。水平飛行の釣り合い（solveLevelTrim）が
 // 返すスロットルは「その速度で抗力とつり合う量」なので、残り(1-スロットル)ぶんが
 // 余剰推力になる。速度をふって、いちばん登れるところを採る。
-function aircraftBestClimb(model) {
-  if (model._bestClimb) return model._bestClimb;
+// controls を渡すと、止めているエンジングループぶんを差し引いて測る
+// （結果は「どのグループを止めているか」ごとに覚えておく）。
+function aircraftBestClimb(model, controls) {
+  const key = (model.engineGroups || []).filter((g) => engineGroupOff(controls, g.id))
+    .map((g) => g.id).join(',');
+  if (!model._bestClimb) model._bestClimb = {};
+  if (model._bestClimb[key]) return model._bestClimb[key];
   const stall = Math.sqrt((2 * model.massKg * FLIGHT_GRAVITY)
     / (1.225 * Math.max(model.wingArea, 0.01) * 1.5));
   const weight = model.massKg * FLIGHT_GRAVITY;
@@ -677,14 +744,14 @@ function aircraftBestClimb(model) {
     const v = stall * k;
     const trim = solveLevelTrim(model, v, 0);
     if (!trim.ok) continue; // その速度では水平飛行そのものが釣り合わない
-    const excess = maxForwardThrustAt(model, v, 0) * (1 - trim.throttle);
+    const excess = maxForwardThrustAt(model, v, 0, controls) * (1 - trim.throttle);
     // sinγ は1を超えない（＝真上）。推力重量比が桁外れなフィクション機は
     // 余剰推力が重さの30倍あったりするので、ここを抑えないと
     // 「毎秒6000m登れる」という答えが出る。
     const rate = v * Math.min(Math.max(excess, 0) / weight, 1);
     if (rate > best.rateMps) { best.rateMps = rate; best.speedMps = v; }
   }
-  model._bestClimb = best;
+  model._bestClimb[key] = best;
   return best;
 }
 
@@ -918,6 +985,7 @@ if (typeof module !== 'undefined' && module.exports) {
     airDensityAt, liftCoefficient,
     solveLevelTrim, trimToCurrentFlight, vtolClimbSpeedLimit, aircraftDragLengthM,
     aircraftBestClimb, maxForwardThrustAt,
+    aircraftVMaxMps, engineThrustScale, engineAfterburner, engineGroupOff,
     FLIGHT_SUBSTEP, GEAR_SQUASH_M,
   };
 }

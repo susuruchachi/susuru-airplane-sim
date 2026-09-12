@@ -54,6 +54,60 @@ const AERO_DEFAULTS = {
   hingeArmChord: 0.25,
 };
 
+// --- エンジンの種別 -----------------------------------------------------------
+//
+// 推力の出かたを、種別ごとに2つの数字で表す。
+//   decay  : 速度が上がるとどれだけ推力が落ちるか。最高速度で (1-decay) 倍。
+//   rhoPow : 空気の薄さへの強さ。(ρ/ρ0)^rhoPow を掛ける。0なら高度に無関係。
+//   ab     : アフターバーナーの増し分（出力レバーを AB_FROM より上げたときだけ）。
+//
+// プロペラの 0.75 / 1.0 は**これまで全機に使ってきた値**そのままで、既定も prop。
+// 種別を触らないかぎり、いまある機体の性能は1ノットも変わらない。
+//
+// ジェットの decay 0.20 は「ターボファンの推力は巡航速度あたりまでで2割ほど落ちる」
+// という実機の傾向から。rhoPow 0.85 は、高度11kmで ρ/ρ0=0.30 のとき推力が
+// 定格の36%（実機のターボファンは30〜40%）になる。プロペラの式（1.0乗）だと30%で、
+// 実機より落ちすぎる。
+// ロケットは空気を吸わないので decay も rhoPow も 0——真空でも同じ推力を出す。
+const ENGINE_KINDS = {
+  prop:   { label: 'プロペラ', decay: 0.75, rhoPow: 1.00, ab: 0 },
+  jet:    { label: 'ジェット', decay: 0.20, rhoPow: 0.85, ab: 0 },
+  jet_ab: { label: 'ジェット（AB付き）', decay: 0.20, rhoPow: 0.85, ab: 0.5 },
+  rocket: { label: 'ロケット', decay: 0.00, rhoPow: 0.00, ab: 0 },
+};
+// アフターバーナーが点きはじめる出力レバーの位置と、全開までの幅
+const ENGINE_AB_FROM = 0.90;
+const ENGINE_AB_FULL = 1.00;
+
+// kt / マッハ を m/s に直す（Builderの入力欄と同じ換算）
+function speedToMps(value, unit) {
+  const v = Math.max(value || 0, 0);
+  return unit === 'mach' ? v * 340 : v * 0.514444;
+}
+
+// エンジンをグループにまとめる。グループごとに「出せる最高速度」を持つ。
+// 同じグループのエンジンに別々の値を入れられてしまうので、いちばん大きい値を採る。
+function buildEngineGroups(engines, vMaxMps) {
+  const map = new Map();
+  for (const e of engines) {
+    let g = map.get(e.group);
+    if (!g) { g = { id: e.group, engines: [], vMaxMps: 0, explicit: false }; map.set(e.group, g); }
+    g.engines.push(e);
+    if (e.groupVMaxMps > 0) { g.vMaxMps = Math.max(g.vMaxMps, e.groupVMaxMps); g.explicit = true; }
+  }
+  const groups = [...map.values()].sort((a, b) => a.id - b.id);
+  for (const g of groups) {
+    if (!g.explicit) g.vMaxMps = vMaxMps;
+    g.thrustN = g.engines.reduce((a, e) => a + (e.lift ? 0 : e.thrustN), 0);
+    g.label = `グループ${g.id}`;
+    for (const e of g.engines) {                             // エンジン側にも配っておく
+      e.groupVMaxMps = g.vMaxMps;
+      e.groupVMaxExplicit = g.explicit;
+    }
+  }
+  return groups;
+}
+
 // 舵面が「その翼のどれだけを占めるか」。
 //
 // この飛行モデルは舵を「親の翼まるごとを少しひねる」ものとして扱う。エレベーターと
@@ -295,7 +349,7 @@ function buildAircraftModel(config) {
   // 最高速度（推力の速度低下に使う）
   const maxUnit = (config && config.modelMaxSpeedUnit) || 'kt';
   const maxVal = (config && config.modelMaxSpeedValue) || 200;
-  const vMaxMps = maxUnit === 'mach' ? maxVal * 340 : maxVal * 0.514444;
+  const vMaxMps = speedToMps(maxVal, maxUnit);
 
   // 0) 機体まるごとの向き・大きさ。パーツもメッシュもこの下にぶら下がっているので、
   //    どのパーツ座標を読むときも最初にこれを掛ける。
@@ -461,10 +515,17 @@ function buildAircraftModel(config) {
       // 裏返して後ろへ引ける。**ふつうのプロペラ機（固定ピッチ）はできない**ので、
       // Builderの「逆噴射なし」で切れるようにしてある（内蔵の練習機や三式戦闘機）。
       canReverse: !(p.props && p.props.noReverse) && spin !== 'y',
+      // 種別（推力の出かたと、排気・炎の見た目）。既定はプロペラ。
+      kind: ENGINE_KINDS[(p.props && p.props.engineKind)] ? p.props.engineKind : 'prop',
+      // グループ（1〜4）と、そのグループで出せる最高速度（0＝機体の最高速度）
+      group: THREE.MathUtils.clamp(Math.round((p.props && p.props.engineGroup) || 1), 1, 4),
+      groupVMaxMps: speedToMps((p.props && p.props.groupMaxSpeedValue) || 0,
+        (p.props && p.props.groupMaxSpeedUnit) || 'mach'),
     };
   }).filter((e) => e.thrustN > 0);
   applyVtolTrim(engines);
   const engineTiltIgnored = dropHarmfulEngineTilt(engines);
+  const engineGroups = buildEngineGroups(engines, vMaxMps);
 
   // 4b) コックピットの目の位置。Builderで置いていなければ undefined で、
   //     飛行側は機体の大きさから決めた既定の位置を使う。
@@ -520,7 +581,7 @@ function buildAircraftModel(config) {
 
   return {
     massKg, cg, cgModel, qFix, modelMat, vMaxMps,
-    surfaces, engines, contacts, inertia, extent,
+    surfaces, engines, engineGroups, contacts, inertia, extent,
     wingArea, wingSpan,
     // 胴体の抗力。境界箱から出すと**翼幅を胴体の幅として数えてしまい**、
     // 前面投影が6m²を超えて推力の何倍もの抗力になる（実際にそうなって飛ばなかった）。
@@ -544,6 +605,10 @@ function buildAircraftModel(config) {
       * AERO_DEFAULTS.reverseFraction,
     // 壊れた取付角を捨てたか（性能診断に出す）
     engineTiltIgnored,
+    // グループが2つ以上あるか（計器とキー操作を出すかどうかの判断に使う）
+    hasEngineGroups: engineGroups.length > 1,
+    // アフターバーナーを持つエンジンがあるか
+    hasAfterburner: engines.some((e) => e.kind === 'jet_ab'),
     // 車輪の高さ（接地点が重心からどれだけ下か）
     gearHeight: contacts.length ? -Math.min(...contacts.map((c) => c.position.y)) : 1,
     // コックピット視点（重心からの位置と、視線の向き）。置いていなければ undefined
@@ -749,6 +814,18 @@ function analyzeAircraftPerformance(model) {
     fwdThrust += e.thrustN * Math.max(-e.axis.z, 0);
     liftThrust += e.thrustN * e.trimScale * Math.max(e.axis.y, 0);
   }
+  // 滑走の加速に使う「速度ぶんの落ち」は、エンジンの種別ごとに違う
+  // （プロペラは速度で落ち、ロケットは落ちない）。速度の重みは推力で付ける。
+  const thrustScaleAt = (v) => {
+    let num = 0, den = 0;
+    for (const e of model.engines) {
+      const w = e.thrustN * Math.max(-e.axis.z, 0);
+      if (w <= 0) continue;
+      num += w * engineThrustScale(e, v, rho, 1);
+      den += w;
+    }
+    return den > 0 ? num / den : 1;
+  };
 
   // 滑走距離。浮上速度の7割あたりでの加速度から見積もる。
   const v = liftoffMps * 0.7;
@@ -759,7 +836,7 @@ function analyzeAircraftPerformance(model) {
   const cd = AERO_DEFAULTS.cd0Wing + (cl * cl) / (Math.PI * ar * AERO_DEFAULTS.oswald)
     + (model.fuselageFrontArea * AERO_DEFAULTS.fuselageCd) / S;
   const drag = q * S * cd;
-  const propFactor = Math.max(1 - AERO_DEFAULTS.propDecay * (v / Math.max(model.vMaxMps, 1)), 0.05);
+  const propFactor = thrustScaleAt(v);
   const roll = 0.025 * Math.max(W - q * S * cl, 0);
   const accel = (fwdThrust * propFactor - drag - roll) / model.massKg;
   const takeoffM = accel > 0.05 ? (liftoffMps * liftoffMps) / (2 * accel) : null;

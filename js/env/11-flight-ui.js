@@ -100,6 +100,12 @@ function handleFlightKeyPress(code) {
       return true;
     }
     case 'KeyJ': if (typeof toggleHover === 'function') toggleHover(); return true;
+    case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4':
+      return toggleEngineGroup(parseInt(code.slice(5), 10));
+    case 'KeyL':
+      f.controls.landingLight = !f.controls.landingLight;
+      announceFlight(f.controls.landingLight ? '着陸灯 点灯' : '着陸灯 消灯');
+      return true;
     case 'KeyP': f.controls.parkingBrake = !f.controls.parkingBrake; announceFlight(f.controls.parkingBrake ? '駐機ブレーキ' : '駐機ブレーキ解除'); return true;
     case 'KeyT': autoTrimFlight(); return true;
     case 'KeyO': if (typeof toggleAltitudeHold === 'function') toggleAltitudeHold(); return true;
@@ -112,6 +118,28 @@ function handleFlightKeyPress(code) {
     case 'Tab': cycleFlightCamera(); return true;
     default: return false;
   }
+}
+
+// エンジングループの入り切り（数字キー1〜4）。
+// グループごとに出せる最高速度が違うので、「ロケットを止めればマッハ5、
+// 点ければマッハ21」という飛ばし方ができる。
+function toggleEngineGroup(id) {
+  const f = EnvState.flight;
+  const model = f.aircraft && f.aircraft.model;
+  if (!model) return false;
+  const g = (model.engineGroups || []).find((x) => x.id === id);
+  if (!g) { announceFlight(`グループ${id}のエンジンはありません`); return true; }
+  const off = f.controls.engineGroupOff || (f.controls.engineGroupOff = {});
+  const nowOff = !off[id];
+  // 全部止めると、ただ落ちるだけの機体になる。最後の1グループは止めさせない。
+  if (nowOff) {
+    const alive = (model.engineGroups || []).filter((x) => !off[x.id] && x.id !== id);
+    if (!alive.length) { announceFlight('最後のエンジンは止められません'); return true; }
+  }
+  off[id] = nowOff;
+  const kt = Math.round(aircraftVMaxMps(model, f.controls) / 0.514444);
+  announceFlight(`${g.label} ${nowOff ? '停止' : '始動'}（最高速度 ${kt}kt）`);
+  return true;
 }
 
 const _keyDown = (list) => list.some((k) => _flightKeys[k]);
@@ -316,18 +344,22 @@ function initFlightHUD() {
       <div class="hud-tile sm"><span class="k">フラップ</span><b id="hudFlap">0</b><span class="u">%</span></div>
       <div class="hud-tile sm" id="hudSpoilerTile" hidden><span class="k">スポイラー</span><b id="hudSpoiler">0</b><span class="u">%</span></div>
       <div class="hud-tile sm" id="hudRevTile" hidden><span class="k">逆噴射</span><b id="hudRev">0</b><span class="u">%</span></div>
+      <div class="hud-tile sm" id="hudEngTile" hidden><span class="k">エンジン</span><b id="hudEng">—</b></div>
+      <div class="hud-tile sm" id="hudAbTile" hidden><span class="k">AB</span><b id="hudAb">0</b><span class="u">%</span></div>
       <div class="hud-tile sm"><span class="k">脚</span><b id="hudGear">下</b></div>
       <div class="hud-tile sm"><span class="k">迎角</span><b id="hudAoa">0</b><span class="u">°</span></div>
       <div class="hud-tile sm"><span class="k">G</span><b id="hudG">1.0</b></div>
       <div class="hud-tile sm"><span class="k">対地</span><b id="hudAgl">--</b><span class="u">ft</span></div>
       <div class="hud-tile sm" id="hudApTile" hidden><span class="k">自動</span><b id="hudAp">—</b></div>
     </div>
+    <div id="hudAttitude"><canvas id="hudAttitudeCanvas" width="300" height="300"></canvas></div>
     <div id="hudWarn"></div>
     <div id="hudMsg"></div>
     <div id="hudHelp">
       W/S・↑↓ ピッチ ／ A/D・←→ ロール ／ Q/E ラダー ／ Shift・Ctrl 出力 ／ X/Z 垂直エンジン ／
       T トリムを取る ／ Y/H トリム微調整 ／ B・Space ブレーキ ／ G 脚 ／ V・C フラップ ／
-      K スポイラー ／ N 逆噴射（地上のみ） ／ J ホバリング ／
+      K スポイラー ／ N 逆噴射（地上のみ） ／ J ホバリング ／ L 着陸灯 ／
+      1〜4 エンジングループ入切 ／
       O 高度維持 ／ I 全自動（離陸〜着陸） ／
       P 駐機 ／ Tab 視点 ／ R 滑走路へ戻る ／ F 飛行終了
     </div>`;
@@ -341,6 +373,108 @@ function announceFlight(text) {
   el.textContent = text;
   el.style.opacity = '1';
   _announceAt = performance.now();
+}
+
+// --- 水平器（人工水平儀） -------------------------------------------------------
+//
+// ピッチとロールは数字でも出しているが、**姿勢は絵で見るほうが速い**——とくに
+// 雲の中や夜、視点を機体固定にしているときは、外を見ても水平がどこか分からない。
+// 実機と同じで、地と空の境目・ピッチの目盛り・上のロール指標の3つだけ描く。
+// 計器は「機体が動く」のではなく「世界が動く」向きに描く（実機と同じ）。
+const HUD_ATT_PITCH_PER_PX = 1 / 2.6;  // 1°あたり何px動かすか（の逆数）
+const HUD_ATT_SKY = '#2f6ea8';
+const HUD_ATT_GROUND = '#6b4a2a';
+
+function drawAttitudeIndicator(canvas, pitchDeg, rollDeg) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const cx = w / 2, cy = h / 2;
+  const r = Math.min(w, h) / 2;
+  // 1°あたりの画素。計器の半径に対して決めるので、大きさを変えても見え方が変わらない。
+  const pxPerDeg = r / 55;
+  ctx.clearRect(0, 0, w, h);
+  ctx.save();
+  // 丸い窓の中だけに描く
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.clip();
+
+  ctx.translate(cx, cy);
+  ctx.rotate(-rollDeg * Math.PI / 180);   // 機体が右へ傾けば、地平線は左へ傾く
+  ctx.translate(0, pitchDeg * pxPerDeg);  // 機首を上げれば、地平線は下がる
+
+  // 空と地面。回して動かすぶん、はみ出さないよう十分大きく塗る
+  const big = r * 4;
+  ctx.fillStyle = HUD_ATT_SKY;
+  ctx.fillRect(-big, -big, big * 2, big);
+  ctx.fillStyle = HUD_ATT_GROUND;
+  ctx.fillRect(-big, 0, big * 2, big);
+  // 地平線
+  ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+  ctx.lineWidth = Math.max(1.5, r * 0.012);
+  ctx.beginPath();
+  ctx.moveTo(-big, 0); ctx.lineTo(big, 0); ctx.stroke();
+
+  // ピッチの目盛り。10°ごとに長い線と数字、5°ごとに短い線。
+  ctx.font = `${Math.round(r * 0.14)}px 'SF Mono',Menlo,Consolas,monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = Math.max(1, r * 0.008);
+  for (let d = -90; d <= 90; d += 5) {
+    if (d === 0) continue;
+    const y = -d * pxPerDeg;
+    if (Math.abs(y) > r * 1.05) continue;
+    const long = d % 10 === 0;
+    const half = long ? r * 0.30 : r * 0.15;
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    ctx.beginPath();
+    ctx.moveTo(-half, y); ctx.lineTo(half, y); ctx.stroke();
+    if (long) {
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillText(String(Math.abs(d)), -half - r * 0.14, y);
+      ctx.fillText(String(Math.abs(d)), half + r * 0.14, y);
+    }
+  }
+  ctx.restore();
+
+  // ロールの目盛り（動かない側）。上の弧に、傾きの基準を刻む。
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+  ctx.lineWidth = Math.max(1, r * 0.01);
+  for (const a of [-60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60]) {
+    const rad = (-90 + a) * Math.PI / 180;
+    const len = (a === 0 || Math.abs(a) === 30 || Math.abs(a) === 60) ? r * 0.13 : r * 0.07;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(rad) * (r - 1), Math.sin(rad) * (r - 1));
+    ctx.lineTo(Math.cos(rad) * (r - 1 - len), Math.sin(rad) * (r - 1 - len));
+    ctx.stroke();
+  }
+  // いまの傾きを指す三角
+  ctx.rotate(-rollDeg * Math.PI / 180);
+  ctx.fillStyle = '#ffd24a';
+  ctx.beginPath();
+  ctx.moveTo(0, -r + r * 0.05);
+  ctx.lineTo(-r * 0.07, -r + r * 0.19);
+  ctx.lineTo(r * 0.07, -r + r * 0.19);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  // 機体の印（動かない）。実機と同じ「翼と胴体」の形。
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.strokeStyle = '#ffd24a';
+  ctx.lineWidth = Math.max(2, r * 0.022);
+  ctx.beginPath();
+  ctx.moveTo(-r * 0.45, 0); ctx.lineTo(-r * 0.16, 0);
+  ctx.moveTo(-r * 0.16, 0); ctx.lineTo(-r * 0.16, r * 0.10);
+  ctx.moveTo(r * 0.45, 0); ctx.lineTo(r * 0.16, 0);
+  ctx.moveTo(r * 0.16, 0); ctx.lineTo(r * 0.16, r * 0.10);
+  ctx.stroke();
+  ctx.fillStyle = '#ffd24a';
+  ctx.beginPath(); ctx.arc(0, 0, Math.max(1.5, r * 0.022), 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
 }
 
 function updateFlightHUD() {
@@ -378,7 +512,19 @@ function updateFlightHUD() {
   const revTile = document.getElementById('hudRevTile');
   if (revTile) revTile.hidden = !(model && model.reverseThrustN > 0);
   if (model && model.reverseThrustN > 0) set('hudRev', Math.round((c.reverse || 0) * 100));
+  // エンジングループ。2つ以上ある機体だけ、どれが回っているかを出す（1･2･-･4 のように）
+  const engTile = document.getElementById('hudEngTile');
+  if (engTile) engTile.hidden = !(model && model.hasEngineGroups);
+  if (model && model.hasEngineGroups) {
+    const off = c.engineGroupOff || {};
+    set('hudEng', model.engineGroups.map((g) => (off[g.id] ? '−' : String(g.id))).join('･'));
+  }
+  const abTile = document.getElementById('hudAbTile');
+  if (abTile) abTile.hidden = !(model && model.hasAfterburner);
+  if (model && model.hasAfterburner) set('hudAb', Math.round((s.afterburner || 0) * 100));
   set('hudGear', c.gearDown ? '下' : '上');
+  const att = document.getElementById('hudAttitudeCanvas');
+  if (att) drawAttitudeIndicator(att, s.pitchDeg, s.rollDeg);
   set('hudAoa', s.alphaDeg.toFixed(1));
   set('hudG', s.loadFactor.toFixed(1));
   set('hudAgl', s.altitudeAglM > 3000 ? '—' : Math.round(s.altitudeAglM * 3.28084).toLocaleString());

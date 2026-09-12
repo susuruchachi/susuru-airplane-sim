@@ -279,8 +279,9 @@ function buildControlTower(x, z) {
 }
 
 // 灯火のにじみ（ブルーム）。芯の何倍の大きさで、どれだけ薄く重ねるか。
-const AIRPORT_GLOW_SCALE = 4.5;
-const AIRPORT_GLOW_OPACITY = 0.22;
+// （4.5 / 0.22 だと滑走路全体がぼんやり白く浮いて見えたので弱めた）
+const AIRPORT_GLOW_SCALE = 2.8;
+const AIRPORT_GLOW_OPACITY = 0.10;
 
 // 滑走路灯・進入灯・末端灯・誘導路灯を1つのPointsにまとめる（頂点カラーで色を分ける）
 function buildAirportLights(L, W, taxi) {

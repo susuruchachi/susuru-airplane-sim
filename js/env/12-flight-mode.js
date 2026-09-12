@@ -68,11 +68,19 @@ async function buildSelectedAircraft() {
   if (f.aircraft) {
     EnvState.scene.remove(f.aircraft.group);
     disposeFlightObject(f.aircraft.group);
+    // 飛行機雲はワールドに置き去りにする点の集まりなので、機体とは別にシーンへ
+    // 置いてある（09b-aircraft-visual.js）。片付けも別に要る。
+    if (f.aircraft.fx) {
+      EnvState.scene.remove(f.aircraft.fx);
+      disposeFlightObject(f.aircraft.fx);
+    }
   }
   f.aircraft = await createAircraft(config, cgWithOffset(config, currentCgOffset()));
   f.aircraft.config = config;
   EnvState.scene.add(f.aircraft.group);
+  if (f.aircraft.fx) EnvState.scene.add(f.aircraft.fx);
   f.aircraft.group.visible = f.active;
+  if (f.aircraft.fx) f.aircraft.fx.visible = f.active;
   if (typeof syncCgUI === 'function') syncCgUI(); // 目盛の実寸は機体の大きさで変わる
   updateFlightPanelReadout();
   // 自動操縦のパネルも描き直す。垂直離着陸のチェックボックスは「上向きエンジンを
@@ -107,7 +115,7 @@ async function toggleFlightMode() {
   if (f.active) {
     f.active = false;
     if (typeof stopAutopilot === 'function') stopAutopilot(null);
-    if (f.aircraft) f.aircraft.group.visible = false;
+    if (f.aircraft) { f.aircraft.group.visible = false; if (f.aircraft.fx) f.aircraft.fx.visible = false; }
     EnvState.orbitControls.enabled = true;
     // 「機体固定」の視点は真下からも覗けるように上下の制限を外してある。
     // 環境プレビューへ戻るときは、地面の下を覗き込みにくい元の制限へ戻す。
@@ -123,6 +131,7 @@ async function toggleFlightMode() {
   if (!f.aircraft) await buildSelectedAircraft();
   f.active = true;
   f.aircraft.group.visible = true;
+  if (f.aircraft.fx) f.aircraft.fx.visible = true;
   document.body.classList.add('flying');
   setFlightCamera(f.cameraMode === 'free' ? 'chase' : f.cameraMode);
   resetFlightToRunway();
