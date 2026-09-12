@@ -541,7 +541,12 @@ const PLUME_LOOK = {
   prop:   null,
   jet:    { shimmer: 7.0 },
   jet_ab: { shimmer: 7.0 },
-  rocket: { shimmer: 0, flame: { len: 9.8, core: 0xfff6e0, halo: 0xffa33c, alpha: 0.5 },
+  // ロケットの炎だけ**濃く**する（アフターバーナーは今のままでよいとのこと）。
+  // 加算合成なので、濃さは alpha がそのまま足す光の量になる。芯 0.5→1.0、
+  // ふちの比 0.55→0.85、さらに根元から先への薄れかたを緩く（1.6乗→0.7乗）して、
+  // 全長にわたる平均の濃さを上げる。
+  rocket: { shimmer: 0, flame: { len: 9.8, core: 0xfff6e0, halo: 0xffa33c,
+            alpha: 1.0, haloMix: 0.85, fade: 0.7 },
             glow: 0xffb055, smoke: true },
 };
 // アフターバーナーの炎（AB付きジェットが9割より上で出す）
@@ -564,9 +569,11 @@ const PLUME_GLOW_OPACITY = 0.40;
 // 真後ろから覗くと視線が炎の全長を貫いて色が足し算され、画面が白く飛ぶ
 // （TB2・ノズル10mで画面の27%が真っ白になっていた）。実際の炎も、
 // ノズルの口がいちばん明るく、先へ行くほど薄れて消える。
-let _plumeFadeTexture = null;
-function plumeFadeTexture() {
-  if (_plumeFadeTexture) return _plumeFadeTexture;
+const _plumeFadeTextures = new Map();
+function plumeFadeTexture(exp) {
+  const e = exp > 0 ? exp : 1.6;
+  const key = e.toFixed(2);
+  if (_plumeFadeTextures.has(key)) return _plumeFadeTextures.get(key);
   const H = 64;
   const canvas = document.createElement('canvas');
   canvas.width = 1; canvas.height = H;
@@ -575,23 +582,23 @@ function plumeFadeTexture() {
   for (let j = 0; j < H; j++) {
     // ConeGeometry の v は底（＝ノズルの口）が0、先端が1
     const v = j / (H - 1);
-    const a = Math.pow(1 - v, 1.6);
+    const a = Math.pow(1 - v, e);
     img.data[j * 4] = img.data[j * 4 + 1] = img.data[j * 4 + 2] = 255;
     img.data[j * 4 + 3] = Math.round(a * 255);
   }
   ctx.putImageData(img, 0, 0);
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
-  _plumeFadeTexture = tex;
+  _plumeFadeTextures.set(key, tex);
   return tex;
 }
 
 // 根元が原点、+Y の向きに伸びる円錐。先を細く尖らせておく。
-function plumeCone(color, opacity, blending) {
+function plumeCone(color, opacity, fadeExp, blending) {
   const geo = new THREE.ConeGeometry(1, 1, 14, 1, true);
   geo.translate(0, 0.5, 0);   // 底面を原点に
   const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-    color, map: plumeFadeTexture(),
+    color, map: plumeFadeTexture(fadeExp),
     transparent: true, opacity, depthWrite: false,
     blending: blending || THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
   }));
@@ -667,8 +674,11 @@ const _plumeUp = new THREE.Vector3(0, 1, 0);
 function enginePlumeRadius(e, unit) {
   const w = (e.plumeWidthM || 0);
   if (w > 0) return w / 2;
+  // 自動のときも**パーツ自身の拡縮を掛ける**。Builderのギズモにはそれが掛かって
+  // いるので、掛けないと自動のままでも画面の筒と炎の太さが食い違う。
+  const scale = e.plumeScale > 0 ? e.plumeScale : 1;
   return THREE.MathUtils.clamp(PLUME_NOZZLE_K * Math.sqrt(Math.max(e.thrustN, 1)),
-    unit * PLUME_R_MIN_SPAN, unit * PLUME_R_MAX_SPAN);
+    unit * PLUME_R_MIN_SPAN, unit * PLUME_R_MAX_SPAN) * scale;
 }
 
 // 機体のいちばん長い辺(m)。ノズルの大きさを抑える基準に使う。
@@ -726,8 +736,10 @@ function buildEnginePlumes(model, parent, meshUnit) {
 
     if (look.shimmer > 0) entry.shimmerAdd = place(plumeShimmer(), 1.1);
     if (look.flame) {
-      entry.halo = place(plumeCone(look.flame.halo, look.flame.alpha * 0.55), 1.15);
-      entry.core = place(plumeCone(look.flame.core, look.flame.alpha), 1.0);
+      const haloMix = look.flame.haloMix > 0 ? look.flame.haloMix : 0.55;
+      entry.halo = place(plumeCone(look.flame.halo, look.flame.alpha * haloMix,
+        look.flame.fade), 1.15);
+      entry.core = place(plumeCone(look.flame.core, look.flame.alpha, look.flame.fade), 1.0);
     }
     if (e.kind === 'jet_ab') {
       entry.abHalo = place(plumeCone(PLUME_AB.halo, PLUME_AB.alpha * 0.5), 1.15);
@@ -781,7 +793,8 @@ function updateEnginePlumes(ac, controls, state, dt, elapsed) {
     // ふだんの炎（ロケット）
     if (p.core) {
       const len = p.radius * p.look.flame.len * p.lenScale * lever * flicker;
-      setCone(p.halo, len, p.look.flame.alpha * 0.55 * lever);
+      const haloMix = p.look.flame.haloMix > 0 ? p.look.flame.haloMix : 0.55;
+      setCone(p.halo, len, p.look.flame.alpha * haloMix * lever);
       setCone(p.core, len, p.look.flame.alpha * lever);
     }
     // アフターバーナーの炎

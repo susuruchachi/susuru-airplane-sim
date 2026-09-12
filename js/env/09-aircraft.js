@@ -148,6 +148,17 @@ const CONTROL_SPAN_FRACTION = {
 
 function acVec(o) { return new THREE.Vector3(o.x || 0, o.y || 0, o.z || 0); }
 
+// パーツ自身にかかっている拡縮（Builderの `applyPartToGizmo` が入れるもの）の代表値。
+// ギズモの見た目の大きさはこれが掛かっているので、見た目に合わせたい寸法
+// （エンジンのノズル径など）には必ず掛ける。
+function partScale(p) {
+  const s = (p && p.scale) || {};
+  const v = (Math.abs(s.x === undefined ? 1 : s.x)
+    + Math.abs(s.y === undefined ? 1 : s.y)
+    + Math.abs(s.z === undefined ? 1 : s.z)) / 3;
+  return v > 1e-6 ? v : 1;
+}
+
 // 機体まるごとにかかっている向きと大きさ（Builderの `State.model.root` の変換）。
 //
 // Builderでは**GLBのメッシュもパーツも同じ root の子**なので、機体全体を回すと
@@ -389,8 +400,25 @@ function buildAircraftModel(config) {
     // 実際そうなっていて、エレベーターを一杯に引いても迎角が2°までしか上がらず、
     // 失速させることも、ゆっくり飛ぶこともできない機体になっていた。
     const center = toBody(geo.center);
-    const chordVec = dirBody(geo.chordVec);
-    const spanVec = dirBody(geo.spanVec);
+    let chordVec = dirBody(geo.chordVec);
+    let spanVec = dirBody(geo.spanVec);
+    // **「付け根→翼端」と「前縁→後縁」が入れ替わって入っていたら直す**。
+    //
+    // 4隅を手で入れると、rootLeading/rootTrailing に「左端／右端」を入れて
+    // しまうことがある。そうなると翼弦が左右に走る翼として読まれ、
+    // 空力中心が横へずれ、舵の効きも別物になる——実測でTB2の水平尾翼は
+    // 翼弦25.6m・翼幅7.5m・空力中心 x=-6.4m と読まれていた（本当は
+    // 翼幅25.6m・翼弦7.5m・x=0）。**昇降舵のモーメントは実測でぴったり0**だった。
+    // 翼幅は機体の横方向（垂直尾翼なら上下方向）を向くはずなので、
+    // そうなっていなければ2つを入れ替える。
+    const spanAxis = w.role === 'vtail' ? 'y' : 'x';
+    if (Math.abs(spanVec[spanAxis]) < Math.abs(chordVec[spanAxis])) {
+      const t = chordVec; chordVec = spanVec; spanVec = t;
+      // 翼弦は「前縁→後縁」＝後ろ向き(+Z)でなければならない。入れ替えた側は
+      // 向きが保証されないので、前を向いていたら裏返す（さもないと翼が前後逆になり、
+      // 取付角の符号まで反転する）。
+      if (chordVec.z < 0) chordVec.negate();
+    }
     const chord = chordVec.length();
     const span = spanVec.length();
     if (geo.area < 1e-6 || chord < 1e-6 || span < 1e-6) continue;
@@ -472,6 +500,22 @@ function buildAircraftModel(config) {
     }
   }
 
+  // **1枚の翼に積み上がった舵の効きに上限を置く**。
+  //
+  // 舵面をいくつ重ねても、その翼が流れを曲げられる量には限りがある。実際の
+  // 舵は30°ほどで剥がれ、それ以上切っても揚力は増えない。上限が無いと、
+  // 同じ翼に何枚も舵面を貼った機体で効きが青天井になり——実測でTB2の
+  // 水平尾翼は昇降舵7枚（各±80°）ぶんが積み上がって**308°**になっていた。
+  // そこまで行くと迎角が失速角のはるか外へ飛び、揚力の差がゼロになって
+  // **昇降舵がまったく効かない**（実測でモーメントぴったり0）。
+  capControlAuthority(surfaces);
+  // **昇降舵と方向舵は左右で連動している**。実機の昇降舵は左右が1本の桁で
+  // つながっていて、引けば必ず両方が同じだけ動く。片側にだけ舵面を置いた
+  // 機体でも、その「連動」を再現しないと引いた瞬間にロールする——実測でTB1は
+  // 上側の水平尾翼の昇降舵2枚が**どちらも右パネルに紐づいていて**、
+  // 右-22°／左0°。押すとロール18.4°/s、ヨー-4.0°/sが出ていた。
+  balancePairedControls(surfaces);
+
   // 舵面が1枚も無い機体でも飛べるように、役割から最低限の効きを与える
   ensureDefaultControls(surfaces);
 
@@ -533,8 +577,14 @@ function buildAircraftModel(config) {
       group: THREE.MathUtils.clamp(Math.round((p.props && p.props.engineGroup) || 1), 1, 4),
       groupVMaxMps: speedToMps((p.props && p.props.groupMaxSpeedValue) || 0,
         (p.props && p.props.groupMaxSpeedUnit) || 'mach'),
-      // 排気や炎の見た目（0なら推力から自動）
-      plumeWidthM: Math.max((p.props && p.props.plumeWidth) || 0, 0),
+      // 排気や炎の見た目（0なら推力から自動）。
+      // **パーツ自身の拡縮を必ず掛ける**。Builderのギズモは model.root の子で、
+      // applyPartToGizmo が part.scale をそのまま入れるので、画面に見えている筒の
+      // 太さは「入れた直径 × パーツの拡縮」になっている。ここで拡縮を無視すると、
+      // 拡縮を小さくして機体モデルのエンジンに合わせた人ほど炎だけが桁違いに太くなる
+      // ——実測でTB2は、見えている筒1.0m（入力10m×拡縮0.1）に対して炎が10mだった。
+      plumeWidthM: Math.max((p.props && p.props.plumeWidth) || 0, 0) * partScale(p),
+      plumeScale: partScale(p),
       plumeLengthScale: Math.max((p.props && p.props.plumeLength) || 1, 0),
     };
   }).filter((e) => e.thrustN > 0);
@@ -673,6 +723,37 @@ function applyGroupAspect(surfaces) {
     }
     const aspect = Math.max((span * span) / Math.max(area, 1e-6), 0.6);
     for (const s of group) { s.aspect = aspect; s.groupSpan = span; s.groupArea = area; }
+  }
+}
+
+// 1枚の翼が舵で曲げられる迎角の上限（実舵角30°ぶん）。
+// 実際の舵はこのあたりで流れが剥がれ、それ以上切っても揚力は増えない。
+const CONTROL_DEFLECT_CAP_DEG = 30;
+
+function capControlAuthority(surfaces) {
+  const cap = THREE.MathUtils.degToRad(CONTROL_DEFLECT_CAP_DEG) * AERO_DEFAULTS.surfaceEffect;
+  const clip = (v) => THREE.MathUtils.clamp(v, -cap, cap);
+  for (const s of surfaces) {
+    s.pitch = clip(s.pitch);
+    s.roll = clip(s.roll);
+    s.yaw = clip(s.yaw);
+  }
+}
+
+// 左右で連動する舵（昇降舵・方向舵）の効きを、同じ役割の翼どうしでならす。
+//
+// ならすのは面積で重みをつけた平均なので、**機体ぜんぶのピッチの効きは変えずに**、
+// 左右のかたよりだけが消える（左右対称に並んだ尾翼なら、ロールのモーメントは
+// Σ x·揚力 = 0 になる）。エルロンは左右で逆に動くのが仕事なので触らない。
+function balancePairedControls(surfaces) {
+  for (const role of ['htail', 'vtail', 'canard']) {
+    const group = surfaces.filter((s) => s.role === role);
+    if (group.length < 2) continue;
+    const area = group.reduce((a, s) => a + s.area, 0);
+    if (area < 1e-6) continue;
+    const key = role === 'vtail' ? 'yaw' : 'pitch';
+    const mean = group.reduce((a, s) => a + s[key] * s.area, 0) / area;
+    for (const s of group) s[key] = mean;
   }
 }
 
