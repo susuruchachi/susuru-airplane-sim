@@ -87,9 +87,21 @@ function speedToMps(value, unit) {
 
 // エンジンをグループにまとめる。グループごとに「出せる最高速度」を持つ。
 // 同じグループのエンジンに別々の値を入れられてしまうので、いちばん大きい値を採る。
+//
+// **垂直離陸用のリフトエンジンはグループに入れない**。グループは
+// 「前へ進むエンジンを束ねて入り切りし、束ごとに出せる最高速度を決める」ための
+// 仕組みで、浮くための力とは筋が違う——数字キーで切れてしまうと、
+// ホバリング中にエンジンを止めて落ちる操作ができてしまう。
+// グループ0（どのキーにも割り当てていない）に置いて、常に回っている扱いにする。
 function buildEngineGroups(engines, vMaxMps) {
   const map = new Map();
   for (const e of engines) {
+    if (e.lift) {
+      e.group = 0;
+      e.groupVMaxMps = vMaxMps;
+      e.groupVMaxExplicit = false;
+      continue;
+    }
     let g = map.get(e.group);
     if (!g) { g = { id: e.group, engines: [], vMaxMps: 0, explicit: false }; map.set(e.group, g); }
     g.engines.push(e);
@@ -98,7 +110,7 @@ function buildEngineGroups(engines, vMaxMps) {
   const groups = [...map.values()].sort((a, b) => a.id - b.id);
   for (const g of groups) {
     if (!g.explicit) g.vMaxMps = vMaxMps;
-    g.thrustN = g.engines.reduce((a, e) => a + (e.lift ? 0 : e.thrustN), 0);
+    g.thrustN = g.engines.reduce((a, e) => a + e.thrustN, 0);
     g.label = `グループ${g.id}`;
     for (const e of g.engines) {                             // エンジン側にも配っておく
       e.groupVMaxMps = g.vMaxMps;

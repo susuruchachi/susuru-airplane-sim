@@ -13,9 +13,47 @@ const EP_AERO = {
   cd0Wing: 0.010,
   oswald: 0.80,
   fuselageCd: 1.00,
-  propDecay: 0.75, // 最高速度での静止推力に対する低下率（analyzeAircraftPerformanceのpropFactorと同じ）
 };
 const EP_CLMAX = 1.5;               // 09-aircraft.js の AC_CLMAX と同じ
+// 09-aircraft.js の ENGINE_KINDS と同じ値（種別ごとの推力の出かた）。
+const EP_ENGINE_KINDS = {
+  prop:   { decay: 0.75, rhoPow: 1.00, ab: 0 },
+  jet:    { decay: 0.20, rhoPow: 0.85, ab: 0 },
+  jet_ab: { decay: 0.20, rhoPow: 0.85, ab: 0.5 },
+  rocket: { decay: 0.00, rhoPow: 0.00, ab: 0 },
+};
+const EP_RHO0 = 1.225;
+// 10-flight.js の airDensityAt と同じ（20kmで頭打ちになるところまで同じにする——
+// 頭打ちを無視して見積もると、飛行モデルが出す抗力より軽く見積もってしまう）。
+function epAirDensityAt(altitudeM) {
+  const h = Math.max(Math.min(altitudeM, 20000), -500);
+  return EP_RHO0 * Math.pow(Math.max(1 - 2.2557e-5 * h, 0.05), 4.2559);
+}
+// **その速度なら、実際どのくらいの高さを飛ぶのか**。
+// 推力を見積もるとき海面の空気で計算すると、速い機体ほど桁違いに外れる——
+// 実機は速くなるほど高いところを飛ぶので、受ける動圧はどれも同じくらいに収まる
+// （747 11km/250m/s で11kPa、Concorde 18km/600m/s で22kPa、SR-71 24km/980m/s で22kPa、
+// X-15 30km/1500m/s で20kPa）。そこで「動圧がこの値になる高さ」を巡航高度とみなす。
+// これより遅い機体（およそ330kt以下）は海面のまま＝いままでと同じ扱いになる。
+const EP_CRUISE_Q_PA = 18000;
+function epCruiseAltitudeFor(vMps) {
+  const v = Math.max(vMps, 1);
+  const rhoWant = (2 * EP_CRUISE_Q_PA) / (v * v);
+  if (rhoWant >= EP_RHO0) return 0;                     // 遅い機体は海面で評価する
+  // 気圧高度の式を解く: rho = rho0 * (1 - 2.2557e-5 h)^4.2559
+  const h = (1 - Math.pow(rhoWant / EP_RHO0, 1 / 4.2559)) / 2.2557e-5;
+  return Math.max(Math.min(h, 20000), 0);
+}
+// エンジン1基が、その速度・高度・レバー全開で静止推力の何倍を出すか
+// （10-flight.js の engineThrustScale と同じ式。グループの最高速度ちょうどで
+// 評価するので speedRatio は常に1）。
+function epThrustScale(part, altitudeM) {
+  const kind = EP_ENGINE_KINDS[(part.props && part.props.engineKind)] || EP_ENGINE_KINDS.prop;
+  const f = Math.max(1 - kind.decay, 0.05);
+  const rhoFactor = kind.rhoPow > 0
+    ? Math.pow(epAirDensityAt(altitudeM) / EP_RHO0, kind.rhoPow) : 1;
+  return f * rhoFactor * (1 + kind.ab);
+}
 // 釣り合いぎりぎりだと最高速度に漸近するだけで実際には届かない。しかも、ここでの
 // 抗力はBuilderが持っている情報（主翼の面積・アスペクト比）だけから見積もった簡略値で、
 // 尾翼が水平飛行のトリムで作る誘導抗力など、実際の飛行モデル（10-flight.jsの
@@ -33,6 +71,38 @@ function epMaxSpeedMps() {
 // 前へ進むエンジン（垂直離陸用ではない）一覧
 function epForwardEngines() {
   return State.parts.filter(p => p.type === 'engine' && p.props && p.props.spinAxis !== 'y');
+}
+
+// 前へ進むエンジンをグループ（1〜4）にまとめる。
+// js/env/09-aircraft.js の buildEngineGroups と同じまとめ方——グループの最高速度は
+// パーツごとに持っているので、同じグループに違う値が入っていたら大きいほうを採る。
+// リフトエンジン（回転軸Y）はグループに入らない。
+function epForwardGroups() {
+  const map = new Map();
+  for (const p of epForwardEngines()) {
+    const id = Math.min(Math.max(Math.round((p.props.engineGroup) || 1), 1), 4);
+    let g = map.get(id);
+    if (!g) { g = { id, parts: [], vMaxMps: 0, explicit: false }; map.set(id, g); }
+    g.parts.push(p);
+    const v = epSpeedToMps(p.props.groupMaxSpeedValue || 0, p.props.groupMaxSpeedUnit || 'mach');
+    if (v > 0) { g.vMaxMps = Math.max(g.vMaxMps, v); g.explicit = true; }
+  }
+  const groups = [...map.values()].sort((a, b) => a.id - b.id);
+  for (const g of groups) {
+    if (!g.explicit) g.vMaxMps = epMaxSpeedMps();
+    g.totalKgf = g.parts.reduce((s, p) => s + Math.max(p.props.thrustKgf || 0, 0), 0);
+  }
+  return groups;
+}
+
+function epSpeedToMps(value, unit) {
+  const v = Math.max(value || 0, 0);
+  return unit === 'mach' ? v * 340 : v * 0.514444;
+}
+
+function epFormatSpeed(mps) {
+  const kt = Math.round(mps * 1.94384);
+  return mps >= 340 ? `マッハ${(mps / 340).toFixed(1)}（${kt.toLocaleString()} kt）` : `${kt.toLocaleString()} kt`;
 }
 
 // エンジンの推力の向き（機体座標、正規化済み）。09-aircraft.js のエンジン構築と同じ式:
@@ -85,10 +155,14 @@ function epWingAeroStats() {
   return groupStats(main.length ? main : wings);
 }
 
-// いまの機体で、設定した最高速度を出すのに必要な前向き推力を計算する。
-//   currentN … いま前向きエンジンが実際に出している（機首方向へ投影した）推力の合計
-//   neededN  … 最高速度で釣り合う（＋余裕ぶん）ために必要な合計
-function epSpeedThrustReport() {
+// いまの機体で、ある速度を出すのに必要な前向き推力を計算する。
+//   engines … 前向きエンジン（parts を絞りたければ subset で渡す）
+//   currentN … いまそのエンジンが実際に出している（機首方向へ投影した）推力の合計
+//   neededN  … その速度で釣り合う（＋余裕ぶん）ために必要な合計
+//
+// **速度に見合った高さで評価する**（epCruiseAltitudeFor）。海面の空気で
+// 計算すると速い機体ほど桁で外れる——実機は速いほど高いところを飛ぶ。
+function epSpeedThrustReport(vMaxMps, subset) {
   // エンジンの向き判定なので「見た目の前」（modelTransform込み）基準で求める
   // （pbNoseDirectionのworldSpace引数を参照。前後逆さに作られたモデルを
   // modelTransformで直している機体で、そのままだと前向きエンジンが
@@ -99,16 +173,18 @@ function epSpeedThrustReport() {
   if (!wing) return null;
 
   const fixQ = pbFixQuaternion(noseDir);
-  const engines = epForwardEngines().map(p => ({
+  const parts = subset || epForwardEngines();
+  const engines = parts.map(p => ({
     part: p,
     fwd: Math.max(-epEngineAxis(p, fixQ).z, 0),
   }));
   const currentN = engines.reduce((s, e) => s + (e.part.props.thrustKgf || 0) * 9.80665 * e.fwd, 0);
 
-  const vMax = epMaxSpeedMps();
+  const vMax = vMaxMps !== undefined ? vMaxMps : epMaxSpeedMps();
+  const altM = epCruiseAltitudeFor(vMax);
+  const rho = epAirDensityAt(altM);
   const W = Math.max(State.model.weightKg, 1) * 9.80665;
   const S = wing.area;
-  const rho = 1.225;
   const q = 0.5 * rho * vMax * vMax;
   const cl = Math.min(W / Math.max(q * S, 1e-6), EP_CLMAX);
   const fuselageFrontArea = Math.max(0.022 * S, 0.15);
@@ -120,21 +196,23 @@ function epSpeedThrustReport() {
   const tailArea = (wingsAeroCenterByRole('htail') || { area: 0 }).area
     + (wingsAeroCenterByRole('vtail') || { area: 0 }).area;
   const drag = q * S * cd + q * tailArea * EP_AERO.cd0Wing;
-  // ちょうどvMaxで評価しているので speedRatio は常に1（analyzeAircraftPerformanceのpropFactorと同じ式）
-  const propFactor = Math.max(1 - EP_AERO.propDecay, 0.05);
-  const neededN = (drag / propFactor) * EP_SPEED_THRUST_MARGIN;
+  // その速度・高度で、このエンジンたちが静止推力の何倍を出せるか（種別ごとに違う）。
+  // 推力の大きいエンジンの効きを重く見る。
+  let wNum = 0, wDen = 0;
+  for (const e of engines) {
+    const w = Math.max(e.part.props.thrustKgf || 0, 0) * e.fwd;
+    wNum += (w > 0 ? w : 1e-6) * epThrustScale(e.part, altM);
+    wDen += (w > 0 ? w : 1e-6);
+  }
+  const scale = wDen > 0 ? Math.max(wNum / wDen, 0.01) : 0.25;
+  const neededN = (drag / scale) * EP_SPEED_THRUST_MARGIN;
 
-  return { engines, currentN, neededN, vMax, drag };
+  return { engines, currentN, neededN, vMax, altM, drag, scale };
 }
 
-// 「最高速度に必要な出力へ自動設定」
-// 各エンジンのいまの比率（全部ゼロなら均等割り）を保ったまま、機首方向への
-// 投影の合計が neededN に一致するよう、全体の大きさだけを解く。
-function applyEngineSpeedTarget() {
-  const rep = epSpeedThrustReport();
-  if (!rep) { showToast('主翼が必要です', true); return false; }
-  if (!rep.engines.length) { showToast('前へ進むエンジン（回転軸Y以外）がありません', true); return false; }
-
+// 推力を、いまの比率（全部ゼロなら均等割り）を保ったまま
+// 「機首方向への投影の合計が neededN になる」よう解いて書き戻す。
+function epApplyThrustTo(rep) {
   const totalCurrentKgf = rep.engines.reduce((s, e) => s + Math.max(e.part.props.thrustKgf || 0, 0), 0);
   const ratios = rep.engines.map(e => totalCurrentKgf > 1e-6
     ? Math.max(e.part.props.thrustKgf || 0, 0) / totalCurrentKgf
@@ -143,25 +221,56 @@ function applyEngineSpeedTarget() {
   const normRatios = totalCurrentKgf > 1e-6 ? ratios : ratios.map(r => r / denomCount);
 
   const weighted = rep.engines.reduce((s, e, i) => s + e.fwd * normRatios[i], 0);
-  if (weighted <= 1e-6) {
-    showToast('エンジンが前向き（回転軸Z）を向いていません。回転軸か取付角を確かめてください', true);
-    return false;
-  }
+  if (weighted <= 1e-6) return null;
   const scaleTotalN = rep.neededN / weighted;
-
   for (let i = 0; i < rep.engines.length; i++) {
     const thrustN = normRatios[i] * scaleTotalN;
     rep.engines[i].part.props.thrustKgf = Math.max(Math.round(thrustN / 9.80665), 0);
+  }
+  return { beforeKgf: totalCurrentKgf,
+    afterKgf: rep.engines.reduce((s, e) => s + (e.part.props.thrustKgf || 0), 0) };
+}
+
+// 「このグループの最高速度に必要な出力へ自動設定」
+//
+// **グループごとに、そのグループ"だけ"でその速度を出せるように**解く。
+// Builderの説明どおり「ロケットだけ使えばマッハ21、ほかのエンジンだけならマッハ5」
+// という機体を作れるようにするため——束ねて1回で解くと、遅いほうのグループは
+// 速いほうに相乗りしてしまい、単独では設定した速度に届かない。
+function applyEngineSpeedTargetForGroup(groupId, quiet) {
+  const groups = epForwardGroups();
+  const g = groups.find(x => x.id === groupId);
+  if (!g) { showToast(`グループ${groupId}の前向きエンジンがありません`, true); return false; }
+  const rep = epSpeedThrustReport(g.vMaxMps, g.parts);
+  if (!rep) { showToast('主翼が必要です', true); return false; }
+  const done = epApplyThrustTo(rep);
+  if (!done) {
+    showToast('エンジンが前向き（回転軸Z）を向いていません。回転軸か取付角を確かめてください', true);
+    return false;
   }
 
   renderPartList();
   renderInspector();
   renderModelSettingsPanel();
-  const kt = Math.round(rep.vMax * 1.94384);
-  showToast(`前向き推力を合計 ${Math.round(totalCurrentKgf).toLocaleString()} kgf → `
-    + `${Math.round(rep.neededN / 9.80665).toLocaleString()} kgf に設定しました`
-    + `（目標: ${kt} kt で巡航できる余裕ぶんを含む）`);
+  if (quiet) return true;
+  showToast(`グループ${groupId}（${g.parts.length}基）の推力を `
+    + `${Math.round(done.beforeKgf).toLocaleString()} → ${Math.round(done.afterKgf).toLocaleString()} kgf にしました`
+    + `（このグループだけで ${epFormatSpeed(rep.vMax)}／高度${Math.round(rep.altM / 100) / 10}km で釣り合う量）`);
   return true;
+}
+
+// 「最高速度に必要な出力へ自動設定」——前向きエンジンのグループを全部まとめて解く。
+function applyEngineSpeedTarget() {
+  const groups = epForwardGroups();
+  if (!groups.length) { showToast('前へ進むエンジン（回転軸Y以外）がありません', true); return false; }
+  const many = groups.length > 1;
+  const done = [];
+  for (const g of groups) if (applyEngineSpeedTargetForGroup(g.id, many)) done.push(g);
+  if (many && done.length) {
+    showToast(`${done.length}つのグループを、それぞれの最高速度ぶんの出力に設定しました`
+      + `（${done.map((g) => `グループ${g.id}: ${epFormatSpeed(g.vMaxMps)}`).join(' / ')}）`);
+  }
+  return done.length > 0;
 }
 
 // 「垂直離陸に必要な出力へ自動設定」
@@ -221,6 +330,8 @@ function engineFleetPanelHtml() {
   const vtolTotal = vtol.reduce((s, p) => s + Math.max(p.props.thrustKgf || 0, 0), 0);
   const W = Math.max(State.model.weightKg, 1);
 
+  const groups = epForwardGroups();
+
   return `
     <div class="subgroup-title">エンジン出力</div>
     <div class="hint" style="line-height:1.7;">
@@ -228,10 +339,24 @@ function engineFleetPanelHtml() {
       ${vtol.length ? `垂直エンジン ${vtol.length} 基・合計 ${vtolTotal.toLocaleString()} kgf（推力重量比 ${(vtolTotal / W).toFixed(2)}）` : ''}
     </div>
     ${forward.length ? `
-    <button class="btn-danger-outline" id="btnEngineSpeedTarget" style="color:var(--accent);border-color:var(--accent-dim);margin-top:6px;">
-      最高速度に必要な出力へ自動設定
+    ${groups.map((g) => `
+    <button class="btn-danger-outline" data-eng-group="${g.id}" style="color:var(--accent);border-color:var(--accent-dim);margin-top:6px;">
+      グループ${g.id}を ${epFormatSpeed(g.vMaxMps)} 相応の出力へ
     </button>
-    <div class="hint" style="margin-top:4px;">上で設定した最高速度まで出せるよう、いまのエンジン配分（比率）を保ったまま合計出力を解き直します。</div>
+    <div class="hint" style="margin-top:4px;">
+      ${g.parts.length}基・合計 ${g.totalKgf.toLocaleString()} kgf
+      ${g.explicit ? '' : '（このグループは最高速度を設定していないので、機体全体の最高速度を使います）'}
+      ／ 巡航高度の見込み ${Math.round(epCruiseAltitudeFor(g.vMaxMps) / 100) / 10} km
+    </div>
+    `).join('')}
+    ${groups.length > 1 ? `
+    <button class="btn-danger-outline" id="btnEngineSpeedTarget" style="color:var(--accent);border-color:var(--accent-dim);margin-top:6px;">
+      すべてのグループをまとめて自動設定
+    </button>
+    <div class="hint" style="margin-top:4px;">それぞれのグループが<b>そのグループだけで</b>設定の速度を出せるように解きます（ロケットだけでマッハ21、ほかのエンジンだけならマッハ5、という作り分けができます）。</div>
+    ` : `
+    <div class="hint" style="margin-top:4px;">いまのエンジン配分（比率）を保ったまま、合計出力だけを解き直します。速度に見合った高さ（速いほど高い）の空気で見積もります。</div>
+    `}
     <div class="field" style="margin-top:8px;">
       <label>通常エンジンの出力を一括で倍率調整</label>
       <div style="display:flex;gap:6px;">
@@ -259,6 +384,10 @@ function engineFleetPanelHtml() {
 function bindEngineFleetPanel() {
   const btnSpeed = document.getElementById('btnEngineSpeedTarget');
   if (btnSpeed) btnSpeed.addEventListener('click', () => applyEngineSpeedTarget());
+  for (const btn of document.querySelectorAll('[data-eng-group]')) {
+    const id = parseInt(btn.getAttribute('data-eng-group'), 10);
+    btn.addEventListener('click', () => applyEngineSpeedTargetForGroup(id));
+  }
   const btnVtol = document.getElementById('btnVtolSpeedTarget');
   if (btnVtol) btnVtol.addEventListener('click', () => applyVtolSpeedTarget());
 

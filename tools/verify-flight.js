@@ -3543,6 +3543,49 @@ function autopilotFlight(opts) {
   check(withRocket > withoutRocket * 1.5, '止めたグループのぶんだけ推力が減る',
     `${(withRocket / 1000).toFixed(0)}kN → ${(withoutRocket / 1000).toFixed(0)}kN`);
 
+  // --- 垂直離陸用のリフトエンジンはグループに入らない ---
+  // 浮くための力を数字キーで切れてしまうと、ホバリング中に落ちる操作ができてしまう。
+  {
+    const vc = defaultAircraftConfig();
+    const fwd = vc.parts.find((p) => p.type === 'engine');
+    Object.assign(fwd.props, { engineGroup: 1, engineKind: 'jet' });
+    const lift = JSON.parse(JSON.stringify(fwd));
+    lift.id = 'eng_lift';
+    lift.position = { x: 0, y: 0, z: 0 };
+    // Builderの欄では選べないが、古い保存や手書きのJSONでは入りうるので、
+    // グループ2を指定しておいて「無視される」ことを確かめる
+    Object.assign(lift.props, { spinAxis: 'y', engineGroup: 2, thrustKgf: 4000 });
+    vc.parts.push(lift);
+    const vm2 = buildAircraftModel(vc);
+    const liftE = vm2.engines.filter((e) => e.lift);
+    check(liftE.length === 1 && liftE[0].group === 0,
+      'リフトエンジンはグループ0（どのキーにも割り当てない）に入る',
+      `group=${liftE.map((e) => e.group).join(',')}`);
+    check(vm2.engineGroups.every((g) => g.engines.every((e) => !e.lift)),
+      'エンジングループにリフトエンジンが混ざらない',
+      vm2.engineGroups.map((g) => `${g.id}:${g.engines.length}基`).join(' '));
+
+    // 全グループを止めても垂直推力は残る
+    const st2 = createFlightState();
+    st2.position.set(0, 1000, 0); st2.altitudeM = 1000; st2.velocity.set(0, 0, -60);
+    const out2 = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
+    const cAllOn = createFlightControls();
+    cAllOn.throttle = 1; cAllOn.vtolThrottle = 1; cAllOn.parkingBrake = false;
+    accumulateAeroForces(vm2, st2, cAllOn, noWind, out2);
+    const onFwd = st2.thrustN, onVtol = st2.vtolThrustN;
+    const cAllOff = createFlightControls();
+    cAllOff.throttle = 1; cAllOff.vtolThrottle = 1; cAllOff.parkingBrake = false;
+    cAllOff.engineGroupOff = { 1: true, 2: true, 3: true, 4: true };
+    accumulateAeroForces(vm2, st2, cAllOff, noWind, out2);
+    check(st2.thrustN < onFwd * 0.01 && Math.abs(st2.vtolThrustN - onVtol) < 1,
+      '全グループを止めても、垂直離陸の推力はそのまま残る',
+      `前向き ${(onFwd / 1000).toFixed(1)}→${(st2.thrustN / 1000).toFixed(1)}kN / `
+      + `垂直 ${(onVtol / 1000).toFixed(1)}→${(st2.vtolThrustN / 1000).toFixed(1)}kN`);
+    note('リフトエンジンとグループ',
+      `前向き ${(onFwd / 1000).toFixed(1)}→${(st2.thrustN / 1000).toFixed(1)}kN / `
+      + `垂直 ${(onVtol / 1000).toFixed(1)}→${(st2.vtolThrustN / 1000).toFixed(1)}kN（全グループ停止）`);
+  }
+
   // 既定の機体（グループを触っていない）は、グループが1つで挙動も同じ
   check(model.engineGroups.length === 1 && !model.hasEngineGroups,
     'グループを設定していない機体はグループ1つだけ');

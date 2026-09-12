@@ -407,6 +407,10 @@ function renderTypeSpecificFields(part) {
       </div>
       <div class="hint">着陸滑走で推力を後ろ向きに使えるかどうか。ジェットは排気を前へ振り向け、可変ピッチのターボプロップは羽根を裏返して逆推力を出せますが、固定ピッチのプロペラ機（レシプロ機など）はできません。オンにすると、この機体は着陸で逆噴射を使わずブレーキとスポイラーだけで止まります。上向き（Y軸）のリフトエンジンは、そもそも逆噴射しません。</div>
       <div class="divider"></div>
+      ${part.props.spinAxis === 'y' ? `
+      <div class="subgroup-title">エンジングループ</div>
+      <div class="hint">上向き（Y軸）のリフトエンジンはグループに入りません。浮くための力なので、飛行中に数字キーで止められないようにしてあります。</div>
+      ` : `
       <div class="subgroup-title">エンジングループ</div>
       <div class="field">
         <label>グループ</label>
@@ -424,7 +428,8 @@ function renderTypeSpecificFields(part) {
           </select>
         </div>
       </div>
-      <div class="hint">飛行中、数字キー<b>1〜4</b>でグループごとに止められます。最高速度は「そのグループのエンジンが推力を出せる上限の速度」で、0なら機体全体の最高速度をそのまま使います。たとえばロケットのグループだけマッハ21、ほかをマッハ5にしておくと、ロケットを止めているあいだはマッハ5で頭打ちになります。同じグループのエンジンに違う値を入れたときは、いちばん大きい値を使います。</div>
+      <div class="hint">飛行中、数字キー<b>1〜4</b>でグループごとに止められます。最高速度は「そのグループのエンジンが推力を出せる上限の速度」で、0なら機体全体の最高速度をそのまま使います。たとえばロケットのグループだけマッハ21、ほかをマッハ5にしておくと、ロケットを止めているあいだはマッハ5で頭打ちになります。同じグループのエンジンに違う値を入れたときは、いちばん大きい値を使います。機体設定パネルの「エンジン出力」から、グループごとにその速度ぶんの推力を入れられます。</div>
+      `}
       <div class="divider"></div>
       <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
       ${part.props.spinAxis === 'y' ? vtolBalancePanelHtml() : ''}
@@ -434,6 +439,10 @@ function renderTypeSpecificFields(part) {
     });
     document.getElementById('fSpinAxis').addEventListener('change', (e) => {
       part.props.spinAxis = e.target.value;
+      // 回転軸を変えると、出す欄が変わる（リフトエンジンにはグループの欄が無く、
+      // 代わりに前後バランスの欄が出る）。選び直さないと切り替わらなかった。
+      renderInspector();
+      renderModelSettingsPanel();
     });
     document.getElementById('fNoReverse').addEventListener('change', (e) => {
       part.props.noReverse = e.target.checked;
@@ -441,13 +450,17 @@ function renderTypeSpecificFields(part) {
     document.getElementById('fEngineKind').addEventListener('change', (e) => {
       part.props.engineKind = e.target.value;
     });
-    document.getElementById('fEngineGroup').addEventListener('change', (e) => {
+    // グループの欄はリフトエンジン（回転軸Y）では出さないので、無いことがある
+    const elGroup = document.getElementById('fEngineGroup');
+    if (elGroup) elGroup.addEventListener('change', (e) => {
       part.props.engineGroup = parseInt(e.target.value, 10) || 1;
     });
-    document.getElementById('fGroupVmax').addEventListener('change', (e) => {
+    const elVmax = document.getElementById('fGroupVmax');
+    if (elVmax) elVmax.addEventListener('change', (e) => {
       part.props.groupMaxSpeedValue = Math.max(parseFloat(e.target.value) || 0, 0);
     });
-    document.getElementById('fGroupVmaxUnit').addEventListener('change', (e) => {
+    const elVmaxUnit = document.getElementById('fGroupVmaxUnit');
+    if (elVmaxUnit) elVmaxUnit.addEventListener('change', (e) => {
       part.props.groupMaxSpeedUnit = e.target.value;
     });
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
