@@ -100,6 +100,7 @@ function handleFlightKeyPress(code) {
       return true;
     }
     case 'KeyJ': if (typeof toggleHover === 'function') toggleHover(); return true;
+    case 'KeyU': return toggleAttitudeIndicator();
     case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4':
       return toggleEngineGroup(parseInt(code.slice(5), 10));
     case 'KeyL':
@@ -118,6 +119,37 @@ function handleFlightKeyPress(code) {
     case 'Tab': cycleFlightCamera(); return true;
     default: return false;
   }
+}
+
+// 水平器の表示／非表示。狭い画面や横画面では、真ん中に丸い計器があると
+// いちばん見たいところ（機首の先）がふさがれるので、消せるようにしてある。
+// 選択は localStorage に覚える。
+const HUD_ATTITUDE_KEY = 'flightSimHudAttitudeOff';
+
+// 音速をまたいだ回数のうち、計器がすでに知らせたぶん
+let _hudSeenMachCross = 0;
+
+function setAttitudeIndicator(on) {
+  document.body.classList.toggle('hud-attitude-off', !on);
+  try { localStorage.setItem(HUD_ATTITUDE_KEY, on ? '0' : '1'); } catch (err) { /* 覚えられなくても続行 */ }
+}
+
+function attitudeIndicatorOn() {
+  return !document.body.classList.contains('hud-attitude-off');
+}
+
+function toggleAttitudeIndicator() {
+  const on = !attitudeIndicatorOn();
+  setAttitudeIndicator(on);
+  announceFlight(on ? '水平器 表示' : '水平器 非表示');
+  return true;
+}
+
+// 起動時に、前回の選択を戻す
+function restoreAttitudeIndicator() {
+  let off = false;
+  try { off = localStorage.getItem(HUD_ATTITUDE_KEY) === '1'; } catch (err) { /* 読めなくても続行 */ }
+  setAttitudeIndicator(!off);
 }
 
 // エンジングループの入り切り（数字キー1〜4）。
@@ -346,6 +378,7 @@ function initFlightHUD() {
       <div class="hud-tile sm" id="hudRevTile" hidden><span class="k">逆噴射</span><b id="hudRev">0</b><span class="u">%</span></div>
       <div class="hud-tile sm" id="hudEngTile" hidden><span class="k">エンジン</span><b id="hudEng">—</b></div>
       <div class="hud-tile sm" id="hudAbTile" hidden><span class="k">AB</span><b id="hudAb">0</b><span class="u">%</span></div>
+      <div class="hud-tile sm" id="hudMachTile" hidden><span class="k">マッハ</span><b id="hudMach">0.00</b></div>
       <div class="hud-tile sm"><span class="k">脚</span><b id="hudGear">下</b></div>
       <div class="hud-tile sm"><span class="k">迎角</span><b id="hudAoa">0</b><span class="u">°</span></div>
       <div class="hud-tile sm"><span class="k">G</span><b id="hudG">1.0</b></div>
@@ -359,7 +392,7 @@ function initFlightHUD() {
       W/S・↑↓ ピッチ ／ A/D・←→ ロール ／ Q/E ラダー ／ Shift・Ctrl 出力 ／ X/Z 垂直エンジン ／
       T トリムを取る ／ Y/H トリム微調整 ／ B・Space ブレーキ ／ G 脚 ／ V・C フラップ ／
       K スポイラー ／ N 逆噴射（地上のみ） ／ J ホバリング ／ L 着陸灯 ／
-      1〜4 エンジングループ入切 ／
+      1〜4 エンジングループ入切 ／ U 水平器 ／
       O 高度維持 ／ I 全自動（離陸〜着陸） ／
       P 駐機 ／ Tab 視点 ／ R 滑走路へ戻る ／ F 飛行終了
     </div>`;
@@ -519,12 +552,25 @@ function updateFlightHUD() {
     const off = c.engineGroupOff || {};
     set('hudEng', model.engineGroups.map((g) => (off[g.id] ? '−' : String(g.id))).join('･'));
   }
+  // マッハ数。ゆっくり飛んでいるときは出さない（遅い機体の計器を増やさない）。
+  // 音速は高度で変わるので、同じ対気速度でも高いところほどマッハ数は大きい。
+  const machTile = document.getElementById('hudMachTile');
+  const mach = s.mach || 0;
+  if (machTile) machTile.hidden = mach < 0.5;
+  if (mach >= 0.5) set('hudMach', mach.toFixed(2));
+  // 音速をまたいだら知らせる（音は鳴らせないので文字で）。
+  // 物理は1フレームに何度も進むので、旗ではなく「またいだ回数」で気付く。
+  const cross = s.machCrossCount || 0;
+  if (cross !== _hudSeenMachCross) {
+    _hudSeenMachCross = cross;
+    announceFlight(mach >= 1 ? '音速突破（ソニックブーム）' : '音速以下へ');
+  }
   const abTile = document.getElementById('hudAbTile');
   if (abTile) abTile.hidden = !(model && model.hasAfterburner);
   if (model && model.hasAfterburner) set('hudAb', Math.round((s.afterburner || 0) * 100));
   set('hudGear', c.gearDown ? '下' : '上');
   const att = document.getElementById('hudAttitudeCanvas');
-  if (att) drawAttitudeIndicator(att, s.pitchDeg, s.rollDeg);
+  if (att && attitudeIndicatorOn()) drawAttitudeIndicator(att, s.pitchDeg, s.rollDeg);
   set('hudAoa', s.alphaDeg.toFixed(1));
   set('hudG', s.loadFactor.toFixed(1));
   set('hudAgl', s.altitudeAglM > 3000 ? '—' : Math.round(s.altitudeAglM * 3.28084).toLocaleString());

@@ -44,12 +44,18 @@ function epCruiseAltitudeFor(vMps) {
   const h = (1 - Math.pow(rhoWant / EP_RHO0, 1 / 4.2559)) / 2.2557e-5;
   return Math.max(Math.min(h, 20000), 0);
 }
+// 10-flight.js の ENGINE_RATIO_MAX と同じ
+const EP_RATIO_MAX = 3.0;
 // エンジン1基が、その速度・高度・レバー全開で静止推力の何倍を出すか
-// （10-flight.js の engineThrustScale と同じ式。グループの最高速度ちょうどで
-// 評価するので speedRatio は常に1）。
-function epThrustScale(part, altitudeM) {
+// （10-flight.js の engineThrustScale と同じ式）。
+// vMps を groupVMaxMps と同じにすれば「そのグループの最高速度ちょうど」、
+// 速い速度を渡せば「速いグループに付き合っているときの出力」になる。
+// 頭打ちは機体ぜんぶで1つ（＝いちばん速いグループの最高速度）なので、
+// ここで評価する速度では常に効いていない扱いでよい。
+function epThrustScale(part, altitudeM, vMps, groupVMaxMps) {
   const kind = EP_ENGINE_KINDS[(part.props && part.props.engineKind)] || EP_ENGINE_KINDS.prop;
-  const f = Math.max(1 - kind.decay, 0.05);
+  const ratio = Math.min(Math.max(vMps / Math.max(groupVMaxMps || 0, 1), 0), EP_RATIO_MAX);
+  const f = Math.max(1 - kind.decay * ratio, 0.05);
   const rhoFactor = kind.rhoPow > 0
     ? Math.pow(epAirDensityAt(altitudeM) / EP_RHO0, kind.rhoPow) : 1;
   return f * rhoFactor * (1 + kind.ab);
@@ -162,7 +168,7 @@ function epWingAeroStats() {
 //
 // **速度に見合った高さで評価する**（epCruiseAltitudeFor）。海面の空気で
 // 計算すると速い機体ほど桁で外れる——実機は速いほど高いところを飛ぶ。
-function epSpeedThrustReport(vMaxMps, subset) {
+function epSpeedThrustReport(vMaxMps, subset, groupVMaxMps, helperGroups) {
   // エンジンの向き判定なので「見た目の前」（modelTransform込み）基準で求める
   // （pbNoseDirectionのworldSpace引数を参照。前後逆さに作られたモデルを
   // modelTransformで直している機体で、そのままだと前向きエンジンが
@@ -196,18 +202,39 @@ function epSpeedThrustReport(vMaxMps, subset) {
   const tailArea = (wingsAeroCenterByRole('htail') || { area: 0 }).area
     + (wingsAeroCenterByRole('vtail') || { area: 0 }).area;
   const drag = q * S * cd + q * tailArea * EP_AERO.cd0Wing;
+  // その速度で実際に要る推力（余裕ぶんを含む）
+  const targetN = drag * EP_SPEED_THRUST_MARGIN;
+
+  // **遅いグループもいっしょに押している**ぶんを差し引く（helperGroups）。
+  // 速いグループを、そのグループ1つだけで速度を出せるように積むと、
+  // 「最高速度は、いちばん強いエンジンだけで出している」ことになってしまう。
+  // 遅いエンジンも（自分の最高速度を超えたぶん力を落としながら）一緒に押すので、
+  // その持ち分を引いた残りだけを積めばいい。
+  let helpN = 0;
+  for (const hg of (helperGroups || [])) {
+    for (const p of hg.parts) {
+      const fwd = Math.max(-epEngineAxis(p, fixQ).z, 0);
+      helpN += Math.max(p.props.thrustKgf || 0, 0) * 9.80665 * fwd
+        * epThrustScale(p, altM, vMax, hg.vMaxMps);
+    }
+  }
+  // 遅いグループだけで足りていても、このグループを0にはしない（止めたときに
+  // 何も残らないグループができてしまう）。最低でも1割は自分で持つ。
+  const remainN = Math.max(targetN - helpN, targetN * 0.1);
+
   // その速度・高度で、このエンジンたちが静止推力の何倍を出せるか（種別ごとに違う）。
   // 推力の大きいエンジンの効きを重く見る。
+  const ownVMax = groupVMaxMps !== undefined ? groupVMaxMps : vMax;
   let wNum = 0, wDen = 0;
   for (const e of engines) {
     const w = Math.max(e.part.props.thrustKgf || 0, 0) * e.fwd;
-    wNum += (w > 0 ? w : 1e-6) * epThrustScale(e.part, altM);
+    wNum += (w > 0 ? w : 1e-6) * epThrustScale(e.part, altM, vMax, ownVMax);
     wDen += (w > 0 ? w : 1e-6);
   }
   const scale = wDen > 0 ? Math.max(wNum / wDen, 0.01) : 0.25;
-  const neededN = (drag / scale) * EP_SPEED_THRUST_MARGIN;
+  const neededN = remainN / scale;
 
-  return { engines, currentN, neededN, vMax, altM, drag, scale };
+  return { engines, currentN, neededN, vMax, altM, drag, scale, targetN, helpN };
 }
 
 // 推力を、いまの比率（全部ゼロなら均等割り）を保ったまま
@@ -233,15 +260,18 @@ function epApplyThrustTo(rep) {
 
 // 「このグループの最高速度に必要な出力へ自動設定」
 //
-// **グループごとに、そのグループ"だけ"でその速度を出せるように**解く。
-// Builderの説明どおり「ロケットだけ使えばマッハ21、ほかのエンジンだけならマッハ5」
-// という機体を作れるようにするため——束ねて1回で解くと、遅いほうのグループは
-// 速いほうに相乗りしてしまい、単独では設定した速度に届かない。
+// **いちばん遅いグループは、そのグループだけでその速度を出せるように**積む。
+// それより速いグループは、**遅いグループも一緒に押しているぶんを引いた残り**だけ
+// 積む——速いグループ1つだけで出せるように積むと、「最高速度は、いちばん強い
+// エンジンだけが出している」ことになってしまい、ほかのエンジンが飾りになる。
+// 遅いエンジンも（自分の最高速度を超えたぶん力を落としながら）最後まで一緒に押す。
 function applyEngineSpeedTargetForGroup(groupId, quiet) {
   const groups = epForwardGroups();
   const g = groups.find(x => x.id === groupId);
   if (!g) { showToast(`グループ${groupId}の前向きエンジンがありません`, true); return false; }
-  const rep = epSpeedThrustReport(g.vMaxMps, g.parts);
+  // 自分より遅いグループが手伝ってくれる
+  const helpers = groups.filter(x => x.id !== g.id && x.vMaxMps < g.vMaxMps);
+  const rep = epSpeedThrustReport(g.vMaxMps, g.parts, g.vMaxMps, helpers);
   if (!rep) { showToast('主翼が必要です', true); return false; }
   const done = epApplyThrustTo(rep);
   if (!done) {
@@ -253,21 +283,25 @@ function applyEngineSpeedTargetForGroup(groupId, quiet) {
   renderInspector();
   renderModelSettingsPanel();
   if (quiet) return true;
+  const helpPct = rep.targetN > 0 ? Math.round(100 * Math.min(rep.helpN / rep.targetN, 1)) : 0;
   showToast(`グループ${groupId}（${g.parts.length}基）の推力を `
     + `${Math.round(done.beforeKgf).toLocaleString()} → ${Math.round(done.afterKgf).toLocaleString()} kgf にしました`
-    + `（このグループだけで ${epFormatSpeed(rep.vMax)}／高度${Math.round(rep.altM / 100) / 10}km で釣り合う量）`);
+    + `（${epFormatSpeed(rep.vMax)}／高度${Math.round(rep.altM / 100) / 10}km`
+    + (helpers.length ? `。遅いグループが${helpPct}%を受け持つぶんを差し引いた残り）` : '）'));
   return true;
 }
 
 // 「最高速度に必要な出力へ自動設定」——前向きエンジンのグループを全部まとめて解く。
+// **遅いほうから順に**解く。速いグループは遅いグループの持ち分を引いた残りだけ
+// 積むので、遅いほうが決まっていないと引き算ができない。
 function applyEngineSpeedTarget() {
-  const groups = epForwardGroups();
+  const groups = epForwardGroups().slice().sort((a, b) => a.vMaxMps - b.vMaxMps);
   if (!groups.length) { showToast('前へ進むエンジン（回転軸Y以外）がありません', true); return false; }
   const many = groups.length > 1;
   const done = [];
   for (const g of groups) if (applyEngineSpeedTargetForGroup(g.id, many)) done.push(g);
   if (many && done.length) {
-    showToast(`${done.length}つのグループを、それぞれの最高速度ぶんの出力に設定しました`
+    showToast(`${done.length}つのグループを、遅いほうから順に設定しました`
       + `（${done.map((g) => `グループ${g.id}: ${epFormatSpeed(g.vMaxMps)}`).join(' / ')}）`);
   }
   return done.length > 0;

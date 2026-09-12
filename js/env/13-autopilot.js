@@ -1047,6 +1047,71 @@ function createAutopilotState() {
 // 時間で切り替えない——機体によって加速も上昇率も違うため。
 //
 // 引数の env は環境から渡すぶん：{ groundHeightAt, windDirectionDeg, announce }
+// --- エンジングループの入り切り（自動操縦）-----------------------------------
+//
+// グループごとに出せる最高速度が違う機体（ロケットを点ければマッハ21、
+// ジェットだけならマッハ5、のような機体）では、**いつ速いグループを使うか**が
+// 操縦の一部になる。手で数字キーを押すのと同じことを自動操縦にもやらせる。
+//
+// 方針は単純に「巡航では要るぶんだけ点け、降りはじめたら落とす」。
+//   ・上昇と巡航 … 目的地が遠いほど速いグループまで使う。近ければ遅いグループだけ
+//   ・降下から着陸まで … いちばん遅いグループだけ（速いエンジンで進入したくない）
+//   ・離陸 … 遅いグループだけ（滑走路の上でロケットを焚く理由がない）
+//
+// **ばたつかせないこと**が大事。グループを1つ入り切りするだけで出せる最高速度が
+// 何倍も変わるので、境目で往復すると速度指示ごと往復して機体が揺れる。
+// 入れる距離と切る距離を離し（ヒステリシス）、切り替えたあとは
+// AP_ENGINE_HOLD_S のあいだ触らない。
+// 速いグループを点ける条件は「そのグループの最高速度で飛んでも、まだ
+// これだけの時間がかかる距離が残っている」こと。加速して、巡航して、
+// 落としきるまでを考えると、4分ぶんは要る。
+// 例：マッハ21（7,140m/s）のグループなら 1,714km より遠いときだけ点く。
+// マッハ5（1,700m/s）なら 408km。80kmの短い便では、どちらも点かない。
+const AP_ENGINE_HOLD_S = 20;         // 切り替えたあと、次まで最低これだけ空ける（秒）
+const AP_ENGINE_ON_S = 240;          // 点ける境目（そのグループの最高速度で何秒ぶん残っているか）
+const AP_ENGINE_OFF_S = 150;         // 切る境目。点ける境目と離しておかないと、境目で往復する
+
+// 降りる段では、いちばん遅いグループだけを回す
+const AP_SLOW_PHASES = ['descent', 'approach', 'flare', 'rollout',
+  'vtol_approach', 'vtol_descent', 'vtol_touchdown', 'takeoff', 'vtol_takeoff'];
+
+function apManageEngineGroups(model, state, controls, ap, dt, env) {
+  const groups = model.engineGroups || [];
+  if (groups.length < 2) return;
+  if (!controls.engineGroupOff) controls.engineGroupOff = {};
+  ap.engineHold = Math.max((ap.engineHold || 0) - dt, 0);
+  if (ap.engineHold > 0) return;
+
+  // 遅い順に並べる。いちばん遅いグループは常に回す（止めると降りられない）。
+  const sorted = groups.slice().sort((a, b) => a.vMaxMps - b.vMaxMps);
+  const slowest = sorted[0];
+  const slowPhase = AP_SLOW_PHASES.indexOf(ap.phase) >= 0;
+  const distM = ap.distanceM === undefined ? Infinity : ap.distanceM;
+
+  const want = {};
+  for (const g of sorted) {
+    if (g === slowest) { want[g.id] = true; continue; }
+    if (slowPhase) { want[g.id] = false; continue; }
+    // そのグループを点ければ出せる速度で、目的地まで何秒かかるか。
+    // 何分もかかるほど遠いときだけ、速いエンジンを使う値打ちがある。
+    const secs = distM / Math.max(g.vMaxMps, 1);
+    const on = !controls.engineGroupOff[g.id];
+    // 入れる／切るの境目をずらす（同じ値だと境目で往復する）
+    want[g.id] = secs > (on ? AP_ENGINE_OFF_S : AP_ENGINE_ON_S);
+  }
+
+  for (const g of sorted) {
+    const on = !controls.engineGroupOff[g.id];
+    if (on === want[g.id]) continue;
+    controls.engineGroupOff[g.id] = !want[g.id];
+    ap.engineHold = AP_ENGINE_HOLD_S;
+    if (env && env.announce) {
+      env.announce(`自動操縦：${g.label} ${want[g.id] ? '始動' : '停止'}`);
+    }
+    break;    // 1回に1グループだけ動かす（一度に何本も入り切りしない）
+  }
+}
+
 function apStepFull(model, state, controls, ap, spd, dt, env) {
   const plan = ap.plan;
   const say = (phase, text) => {
@@ -1064,6 +1129,10 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   // 上昇にそのまま付いてくる。
   controls.spoiler = 0;
   controls.reverse = 0;
+
+  // エンジングループの入り切り。速い段では速いグループも点け、降りる段では
+  // 遅いグループだけに戻す（apManageEngineGroups）。
+  apManageEngineGroups(model, state, controls, ap, dt, env);
 
   // 目的地までの距離（進入計画があれば最終進入開始点まで）
   const tx = plan ? plan.faf.x : state.position.x;

@@ -49,6 +49,7 @@ const {
   apAileronForBank, apSpoilerCommand, apReverseCommand,
   aircraftBestClimb, apUpdateTerrainFloor,
   maxForwardThrustAt, aircraftVMaxMps, engineThrustScale, engineAfterburner,
+  apManageEngineGroups, speedOfSoundAt, machNumberAt,
 } = ctx;
 
 // 13-autopilot.js / 10-flight.js の同名の定数と同じ値。vmコンテキストの外からは
@@ -3543,6 +3544,29 @@ function autopilotFlight(opts) {
   check(withRocket > withoutRocket * 1.5, '止めたグループのぶんだけ推力が減る',
     `${(withRocket / 1000).toFixed(0)}kN → ${(withoutRocket / 1000).toFixed(0)}kN`);
 
+  // --- 速いグループを点けているあいだは、遅いグループも一緒に押す ---
+  // 頭打ちはグループごとではなく機体ぜんぶで1つ（＝いま回しているうち
+  // いちばん速いグループの最高速度）。でないと、ロケットを点けたとたんに
+  // ジェットが完全に止まり、「最高速度はいちばん強いエンジンだけが出している」
+  // ことになってしまう。
+  {
+    const vFast = 21 * 340 * 0.95;                 // マッハ20（ジェットの4倍）
+    const both = maxForwardThrustAt(two, vFast, 11000, cAll);
+    const cNoJet = createFlightControls(); cNoJet.engineGroupOff = { 1: true };
+    const rocketOnly = maxForwardThrustAt(two, vFast, 11000, cNoJet);
+    const jetShare = both - rocketOnly;
+    check(jetShare > 0, 'マッハ20でも、マッハ5のジェットが推力を出している',
+      `合計 ${(both / 1000).toFixed(1)}kN のうち ジェット ${(jetShare / 1000).toFixed(1)}kN`
+      + `（${(100 * jetShare / both).toFixed(0)}%）`);
+    // ただし、そのジェットだけにすると（頭打ちがマッハ5に下がるので）0になる
+    const jetAlone = maxForwardThrustAt(two, vFast, 11000, cJetOnly);
+    check(jetAlone < 1e-6, 'ジェットだけにすると、マッハ20では推力が出ない',
+      `${(jetAlone / 1000).toFixed(3)}kN`);
+    note('速いグループと一緒のときの分担（マッハ20・高度11km）',
+      `合計 ${(both / 1000).toFixed(0)}kN ＝ ロケット ${(rocketOnly / 1000).toFixed(0)}kN`
+      + ` ＋ ジェット ${(jetShare / 1000).toFixed(0)}kN`);
+  }
+
   // --- 垂直離陸用のリフトエンジンはグループに入らない ---
   // 浮くための力を数字キーで切れてしまうと、ホバリング中に落ちる操作ができてしまう。
   {
@@ -3586,11 +3610,96 @@ function autopilotFlight(opts) {
       + `垂直 ${(onVtol / 1000).toFixed(1)}→${(st2.vtolThrustN / 1000).toFixed(1)}kN（全グループ停止）`);
   }
 
+  // --- 自動操縦がグループを入り切りする ---
+  // 遠いときは速いグループを点け、近づいたら落とす。境目で往復しないこと。
+  {
+    const ap = createAutopilotState();
+    ap.full = true;
+    const st3 = createFlightState();
+    st3.position.set(0, 11000, 0); st3.altitudeM = 11000; st3.velocity.set(0, 0, -300);
+    const c3 = createFlightControls();
+    const gid = two.engineGroups[1].id;         // 速いほう（ロケット・マッハ21）
+    const vFastG = two.engineGroups[1].vMaxMps;
+    const run = (phase, distM, seconds) => {
+      ap.phase = phase; ap.distanceM = distM; ap.engineHold = 0;
+      let flips = 0, prev = !c3.engineGroupOff[gid];
+      for (let t = 0; t < seconds; t += 0.5) {
+        apManageEngineGroups(two, st3, c3, ap, 0.5, null);
+        const now = !c3.engineGroupOff[gid];
+        if (now !== prev) { flips++; prev = now; }
+      }
+      return { on: !c3.engineGroupOff[gid], flips };
+    };
+    // マッハ21で4分ぶんより遠い（＝1,714km超）なら点ける
+    const far = run('cruise', vFastG * 300, 120);
+    check(far.on, '遠い巡航では速いグループを点ける',
+      `${Math.round(vFastG * 300 / 1000)}km で ${far.on ? '始動' : '停止'}`);
+    // 近づけば落とす
+    const near = run('cruise', vFastG * 100, 120);
+    check(!near.on, '近づいたら速いグループを落とす',
+      `${Math.round(vFastG * 100 / 1000)}km で ${near.on ? '始動' : '停止'}`);
+    // 降りる段では、遠くても速いグループは使わない
+    const desc = run('approach', vFastG * 400, 120);
+    check(!desc.on, '進入では速いグループを使わない');
+    // 境目に置いても往復しない（ヒステリシス）
+    run('cruise', vFastG * 300, 60);            // いちど点けてから
+    const edge = run('cruise', vFastG * 200, 600);   // 入と切のあいだに置く
+    check(edge.flips === 0, '入と切の境目のあいだでは、入り切りを繰り返さない',
+      `${edge.flips}回`);
+    // いちばん遅いグループは、どの段でも止めない
+    ap.phase = 'approach'; ap.distanceM = 1000; ap.engineHold = 0;
+    for (let t = 0; t < 60; t += 0.5) apManageEngineGroups(two, st3, c3, ap, 0.5, null);
+    check(!c3.engineGroupOff[two.engineGroups[0].id],
+      'いちばん遅いグループは、進入中でも止めない');
+    note('自動操縦のグループ切替（マッハ21のロケット）',
+      `${Math.round(vFastG * 300 / 1000)}km:始動 / ${Math.round(vFastG * 100 / 1000)}km:停止 / 進入:停止`);
+  }
+
   // 既定の機体（グループを触っていない）は、グループが1つで挙動も同じ
   check(model.engineGroups.length === 1 && !model.hasEngineGroups,
     'グループを設定していない機体はグループ1つだけ');
   check(!model.engines[0].groupVMaxExplicit,
     '最高速度を入れていないグループでは推力を切らない（いままでの機体が変わらない）');
+}
+
+// --- (14) 音速とソニックブーム -------------------------------------------------
+{
+  // 標準大気の音速。海面340.3m/s、11kmで295.1m/s（そこから上は同じ）。
+  const rows = [0, 5000, 11000, 15000].map((h) =>
+    `${h / 1000}km:${speedOfSoundAt(h).toFixed(1)}`);
+  note('音速(m/s)', rows.join(' '));
+  check(Math.abs(speedOfSoundAt(0) - 340.3) < 0.5, '海面の音速が340.3m/s',
+    speedOfSoundAt(0).toFixed(1));
+  check(Math.abs(speedOfSoundAt(11000) - 295.1) < 0.5, '11kmの音速が295.1m/s',
+    speedOfSoundAt(11000).toFixed(1));
+  check(Math.abs(speedOfSoundAt(15000) - speedOfSoundAt(11000)) < 1e-6,
+    '成層圏では音速が一定（気温が変わらないので）');
+  // 同じ対気速度でも、高いところほどマッハ数は大きい
+  const v = 300;
+  check(machNumberAt(v, 11000) > machNumberAt(v, 0) + 0.1,
+    '同じ速度でも高いところほどマッハ数が大きい',
+    `海面 M${machNumberAt(v, 0).toFixed(2)} → 11km M${machNumberAt(v, 11000).toFixed(2)}`);
+
+  // 物理を回して、音速をまたいだ回数が増えることを確かめる
+  const st = createFlightState();
+  const c = createFlightControls();
+  st.position.set(0, 11000, 0); st.altitudeM = 11000;
+  st.velocity.set(0, 0, -250);           // マッハ0.85
+  c.parkingBrake = false; c.throttle = 0;
+  const out = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
+  accumulateAeroForces(model, st, c, noWind, out);
+  const before = st.machCrossCount;
+  check(st.mach > 0.8 && st.mach < 0.9, '11kmで250m/sはマッハ0.85あたり', st.mach.toFixed(2));
+  st.velocity.set(0, 0, -320);           // マッハ1.08へ
+  accumulateAeroForces(model, st, c, noWind, out);
+  check(st.machCrossCount === before + 1, '音速をまたいだら回数が1つ増える',
+    `${before} → ${st.machCrossCount}（M${st.mach.toFixed(2)}）`);
+  accumulateAeroForces(model, st, c, noWind, out);
+  check(st.machCrossCount === before + 1, 'またがなければ回数は増えない');
+  st.velocity.set(0, 0, -250);           // 音速以下へ戻す
+  accumulateAeroForces(model, st, c, noWind, out);
+  check(st.machCrossCount === before + 2, '音速を割っても回数が増える（下向きにもまたぐ）',
+    `${st.machCrossCount}`);
 }
 
 // --- 計算の速さ ---------------------------------------------------------------

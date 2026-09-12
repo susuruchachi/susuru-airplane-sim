@@ -40,6 +40,20 @@ const REVERSE_FADE_MPS = 2;
 // --- 大気 -------------------------------------------------------------------
 
 // 国際標準大気（対流圏）。高いほど薄くなり、揚力も推力も落ちる。
+// 音速(m/s)。気温だけで決まる（a = √(γRT)）。標準大気は 11km までは
+// 1km あたり 6.5℃ 下がり、そこから上（成層圏の下のほう）は -56.5℃ で一定。
+// 海面で 340.3m/s、11km で 295.1m/s——高いところほど音速そのものが下がるので、
+// 同じ対気速度でもマッハ数は大きくなる。
+function speedOfSoundAt(altitudeM) {
+  const h = Math.max(Math.min(altitudeM, 20000), -500);
+  const tempC = h < 11000 ? 15 - 0.0065 * h : -56.5;
+  return 20.046 * Math.sqrt(tempC + 273.15);
+}
+
+function machNumberAt(speedMps, altitudeM) {
+  return speedMps / speedOfSoundAt(altitudeM);
+}
+
 function airDensityAt(altitudeM) {
   const h = Math.max(Math.min(altitudeM, 20000), -500);
   return FLIGHT_RHO0 * Math.pow(Math.max(1 - 2.2557e-5 * h, 0.05), 4.2559);
@@ -92,6 +106,11 @@ function createFlightState() {
     thrustN: 0,
     vtolThrustN: 0,
     afterburner: 0,   // アフターバーナーの効き（0〜1）。炎の見た目に使う
+    mach: 0,          // マッハ数（高度で音速が変わるので毎フレーム出す）
+    // 音速をまたいだ回数。**1フレームに何回も物理を進める**（FLIGHT_SUBSTEP）ので、
+    // 「またいだ瞬間だけ1になる旗」では、見た目や計器が読む前に消えてしまう。
+    // 数えておいて、読む側が「前に見た数と違うか」で気付く形にする。
+    machCrossCount: 0,
     machLike: 0,
   };
 }
@@ -134,24 +153,38 @@ function engineGroupOff(controls, group) {
   return !!(off && off[group]);
 }
 
-// グループの最高速度を超えたとき、推力をどこまで引っぱって切るか（比）
+// 最高速度を超えたとき、推力をどこまで引っぱって切るか（比）
 const ENGINE_VMAX_CUT = 1.08;
+// 推力の速度低下を測る比の上限。**自分のグループの最高速度の何倍まで見るか**。
+// 1.4 では、速いグループと一緒に回っているときの遅いグループが
+// 「最高速度の1.4倍のときの推力」のまま頭打ちになり、マッハ21で飛んでいても
+// マッハ5用のジェットが7割の推力を出しつづけることになる。3倍まで見れば、
+// 遅いエンジンほど素直に力を落としてくれる。
+// プロペラ（decay 0.75）は比1.27で下限0.05に当たるので、ここを広げても
+// **いままでの機体の挙動は1ノットも変わらない**。
+const ENGINE_RATIO_MAX = 3.0;
 
 // エンジン1基が、いまの速度・空気密度・レバー位置で静止推力の何倍を出すか。
 //
 // 種別ごとの係数は ENGINE_KINDS（09-aircraft.js）。
-// 「グループの最高速度」を**明示的に入れたグループだけ**、その速度で推力を切る。
-// ロケットは速度でも高度でも推力が落ちないので、切らないと上限が抗力だけで
-// 決まってしまい、Builderで入れた「マッハ21」がただの飾りになる。
-// 逆に、値を入れていない機体（いままでの全機）は切らない——プロペラの
-// 1-0.75·(v/vMax) という式のまま、1ノットも挙動を変えないため。
-function engineThrustScale(e, airspeed, rho, lever) {
+// 速度による低下は**そのエンジンのグループの最高速度**で測る
+// （マッハ5用に作ったジェットは、マッハ5に近づくほど力を失う）。
+//
+// いっぽう**頭打ち（推力を0まで絞るところ）は機体ぜんぶで1つ**で、
+// vMaxCutMps に「いま回しているグループのうち、いちばん速いグループの最高速度」を
+// 渡す（aircraftVMaxCutMps）。グループごとに切ると、マッハ21のロケットを点けた
+// とたんにマッハ5のジェットが完全に止まり、**いちばん速いエンジンだけで
+// 最高速度を出している**ことになってしまう。実機でも、速いところまで一緒に
+// 押していくのが自然。0 を渡せば頭打ちなし（グループの最高速度を入れていない
+// 機体＝いままでの全機は、こちらを通る）。
+function engineThrustScale(e, airspeed, rho, lever, vMaxCutMps) {
   const k = ENGINE_KINDS[e.kind] || ENGINE_KINDS.prop;
   const vMax = Math.max(e.groupVMaxMps || 0, 1);
-  const ratio = THREE.MathUtils.clamp(airspeed / vMax, 0, 1.4);
+  const ratio = THREE.MathUtils.clamp(airspeed / vMax, 0, ENGINE_RATIO_MAX);
   let f = Math.max(1 - k.decay * ratio, 0.05);
-  if (e.groupVMaxExplicit) {
-    f *= THREE.MathUtils.clamp((ENGINE_VMAX_CUT - ratio) / (ENGINE_VMAX_CUT - 1), 0, 1);
+  if (vMaxCutMps > 0) {
+    const cutRatio = airspeed / vMaxCutMps;
+    f *= THREE.MathUtils.clamp((ENGINE_VMAX_CUT - cutRatio) / (ENGINE_VMAX_CUT - 1), 0, 1);
   }
   if (k.rhoPow > 0) f *= Math.pow(rho / FLIGHT_RHO0, k.rhoPow);
   return f * (1 + engineAfterburner(lever) * k.ab);
@@ -169,6 +202,19 @@ function aircraftVMaxMps(model, controls) {
     v = Math.max(v, g.vMaxMps);
   }
   return v > 0 ? v : model.vMaxMps;
+}
+
+// 推力を0まで絞りはじめる速度。**グループの最高速度を自分で入れた機体だけ**
+// 頭打ちを持つ（入れていない機体＝いままでの全機は 0＝頭打ちなし）。
+function aircraftVMaxCutMps(model, controls) {
+  const groups = model.engineGroups || [];
+  let v = 0;
+  for (const g of groups) {
+    if (!g.explicit || g.thrustN <= 0) continue;
+    if (controls && engineGroupOff(controls, g.id)) continue;
+    v = Math.max(v, g.vMaxMps);
+  }
+  return v;
 }
 
 // --- 力とモーメント -----------------------------------------------------------
@@ -354,12 +400,14 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
       * AERO_DEFAULTS.reverseFraction
       * THREE.MathUtils.clamp(-vAirBody.z / REVERSE_FADE_MPS, 0, 1)
     : 0;
+  // 頭打ちは機体ぜんぶで1つ（engineThrustScale の説明を参照）
+  const vMaxCut = aircraftVMaxCutMps(model, controls);
   let thrustTotal = 0, vtolTotal = 0, abTotal = 0;
   for (const e of model.engines) {
     // 止めているグループは推力を出さない
     if (engineGroupOff(controls, e.group)) continue;
     const lever = e.lift ? vtolLever : mainLever;
-    const scale = engineThrustScale(e, airspeed, rho, lever);
+    const scale = engineThrustScale(e, airspeed, rho, lever, vMaxCut);
     // 垂直離陸用エンジンは前後バランス（trimScale）ぶん絞ってある。
     // ここで掛け忘れると、モデル構築時に消したはずの機首振りが物理では復活する。
     const t = e.lift ? e.thrustN * e.trimScale * lever * scale
@@ -381,6 +429,11 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
   // 水平飛行用に向いた水平尾翼が真上からの風を受けて暴れるだけの状態に
   // 取り残される（姿勢が大きく傾いていないのにノズルだけ先に消える）。
   state.forwardAirspeed = Math.max(-vAirBody.z, 0);
+  // マッハ数。音速は高度（気温）で変わるので、そのつど出す。
+  const machPrev = state.mach || 0;
+  state.mach = machNumberAt(airspeed, state.altitudeM);
+  // 音速をまたいだ（上でも下でも）。衝撃波の合図に使う。
+  if ((machPrev < 1) !== (state.mach < 1)) state.machCrossCount = (state.machCrossCount || 0) + 1;
   // 迎角と横滑り角も、止まっているうちは意味を持たない
   const flying = airspeed > 8;
   state.alphaDeg = flying ? THREE.MathUtils.radToDeg(Math.atan2(-vAirBody.y, -vAirBody.z)) : 0;
@@ -706,11 +759,12 @@ function trimBisect(f, lo, hi) {
 // 推力の項（accumulateAeroForces）と同じ式。
 function maxForwardThrustAt(model, speedMps, altitudeM, controls) {
   const rho = airDensityAt(altitudeM);
+  const vMaxCut = aircraftVMaxCutMps(model, controls);
   let t = 0;
   for (const e of model.engines) {
     if (e.lift) continue;
     if (controls && engineGroupOff(controls, e.group)) continue;
-    t += e.thrustN * Math.max(-e.axis.z, 0) * engineThrustScale(e, speedMps, rho, 1);
+    t += e.thrustN * Math.max(-e.axis.z, 0) * engineThrustScale(e, speedMps, rho, 1, vMaxCut);
   }
   return t;
 }
@@ -982,10 +1036,10 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     createFlightState, createFlightControls, advanceFlight, flightStep,
     refreshFlightReadouts, placeAircraftOnGround, settleAircraftOnGround,
-    airDensityAt, liftCoefficient,
+    airDensityAt, liftCoefficient, speedOfSoundAt, machNumberAt,
     solveLevelTrim, trimToCurrentFlight, vtolClimbSpeedLimit, aircraftDragLengthM,
     aircraftBestClimb, maxForwardThrustAt,
-    aircraftVMaxMps, engineThrustScale, engineAfterburner, engineGroupOff,
+    aircraftVMaxMps, aircraftVMaxCutMps, engineThrustScale, engineAfterburner, engineGroupOff,
     FLIGHT_SUBSTEP, GEAR_SQUASH_M,
   };
 }

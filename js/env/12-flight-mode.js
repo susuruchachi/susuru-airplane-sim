@@ -34,6 +34,7 @@ async function initFlight() {
   if (camSel) camSel.value = EnvState.flight.cameraMode;
   updateFlightPanelReadout();
   setupFlightControls();
+  if (typeof restoreAttitudeIndicator === 'function') restoreAttitudeIndicator();
   initFlightHUD();
   initFlightTouch();
 

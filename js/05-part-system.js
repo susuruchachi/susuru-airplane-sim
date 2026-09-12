@@ -18,6 +18,9 @@ function defaultPropsForType(type) {
         // 例：ロケットのグループだけマッハ21、ほかのエンジンはマッハ5。
         groupMaxSpeedValue: 0,
         groupMaxSpeedUnit: 'mach',
+        // 排気や炎の見た目。0なら推力から自動で決める（09b-aircraft-visual.js）。
+        plumeWidth: 0,        // ノズルの直径(m)
+        plumeLength: 1,       // 長さの倍率
       };
     case 'wing':
       return {

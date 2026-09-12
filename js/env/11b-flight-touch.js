@@ -76,9 +76,11 @@ function initFlightTouch() {
       <button type="button" class="ft-btn" id="ftHover" data-tap="hover" hidden>ホバリング</button>
       <button type="button" class="ft-btn" id="ftSpoiler" data-tap="spoiler" hidden>スポイラー</button>
       <button type="button" class="ft-btn" id="ftReverse" data-hold="reverse" hidden>逆噴射</button>
+      ${[1, 2, 3, 4].map((n) => `<button type="button" class="ft-btn ft-eng" id="ftEng${n}" data-tap="eng${n}" hidden>E${n}</button>`).join('')}
       <button type="button" class="ft-btn" data-tap="trim">トリム</button>
       <button type="button" class="ft-btn" data-tap="park">駐機</button>
       <button type="button" class="ft-btn" data-tap="camera">視点</button>
+      <button type="button" class="ft-btn" id="ftAttitude" data-tap="attitude">水平器</button>
       <button type="button" class="ft-btn" data-tap="reset">滑走路へ</button>
     </div>`;
   host.appendChild(el);
@@ -252,6 +254,9 @@ function bindFlightTouchTap(btn) {
   const codes = {
     gear: 'KeyG', flapDown: 'KeyV', flapUp: 'KeyC', trim: 'KeyT',
     spoiler: 'KeyK', hover: 'KeyJ', park: 'KeyP', camera: 'Tab', reset: 'KeyR',
+    // エンジングループの入り切り（キーボードの数字キーと同じ入口）
+    eng1: 'Digit1', eng2: 'Digit2', eng3: 'Digit3', eng4: 'Digit4',
+    attitude: 'KeyU',
   };
   btn.addEventListener('click', (e) => {
     e.preventDefault();
@@ -300,6 +305,25 @@ function updateFlightTouchReadout() {
   }
   const revBtn = t.el.querySelector('#ftReverse');
   if (revBtn) revBtn.hidden = !(model && model.reverseThrustN > 0);
+  const attBtn = t.el.querySelector('#ftAttitude');
+  if (attBtn && typeof attitudeIndicatorOn === 'function') {
+    attBtn.classList.toggle('on', attitudeIndicatorOn());
+  }
+  // エンジングループのボタン。グループが2つ以上ある機体だけ、そのぶんだけ出す。
+  // 止めているグループは消灯表示（.off）にする。
+  const groups = (model && model.hasEngineGroups) ? model.engineGroups : [];
+  const offMap = f.controls.engineGroupOff || {};
+  for (let n = 1; n <= 4; n++) {
+    const btn = t.el.querySelector(`#ftEng${n}`);
+    if (!btn) continue;
+    const g = groups.find((x) => x.id === n);
+    btn.hidden = !g;
+    if (!g) continue;
+    const running = !offMap[n];
+    btn.classList.toggle('on', running);
+    btn.classList.toggle('off', !running);
+    btn.textContent = `E${n}`;
+  }
 
   const paint = (id, v) => {
     const lever = t.el.querySelector(id);

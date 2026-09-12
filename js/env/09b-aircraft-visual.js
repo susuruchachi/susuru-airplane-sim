@@ -248,15 +248,20 @@ async function createAircraft(config, cgOverride) {
 
   // 排気と炎（エンジンの種別ごと）。機体座標のまま置けるので group の子。
   const plumes = buildEnginePlumes(model, group);
+  // 衝撃波（音速まわりの白い雲と、抜けていく輪）。機体と一緒に動く。
+  const boom = buildSonicBoom(model, group);
 
   // 飛行機雲。**ワールドに置き去りにする**ものなので機体の子にはできない。
   // 機体と一緒に片付けられるよう、入れ物だけここで作って呼び出し側が
   // シーンに足す（12-flight-mode.js）。
   const contrail = buildContrail(model);
+  // ロケットの煙。飛行機雲と同じ入れ物（シーン直下）へ入れる。
+  const smoke = buildRocketSmoke(model);
+  if (smoke) contrail.group.add(smoke.points);
 
   return {
     model, group, orient, modelRoot, modelXform, visual, lights, landingPool,
-    plumes, contrail, fx: contrail.group,
+    plumes, boom, contrail, smoke, fx: contrail.group,
     source,
     name: config.name || (source === 'builder' ? '機体' : '内蔵の練習機'),
     propeller: visual.userData ? visual.userData.propeller : null,
@@ -499,78 +504,176 @@ function updateLandingLightPool(ac, controls, state) {
 //
 // エンジンの種別（09-aircraft.js の ENGINE_KINDS）ごとに、出るものが違う。
 //   プロペラ … 何も出ない（回る羽根だけ）
-//   ジェット … うっすらした排気。出力を上げると少し伸びる
-//   AB付き   … 出力9割から上でオレンジの炎。全開でいちばん長い
-//   ロケット … 出力に比例した白い炎。いつでも出る
+//   ジェット … **炎は出さない**。ノズルの後ろの空気が熱で揺らいで見えるだけ
+//              （実機のジェットも、昼間に後ろから見えるのは陽炎であって炎ではない）
+//   AB付き   … ふだんは陽炎だけ。出力9割から上でオレンジの炎とにじみ
+//   ロケット … 出力に比例した白い炎・にじみ・濃い煙
 //
 // 炎は「根元が太く、後ろへ細くなる円錐」を2枚（芯＋にじみ）重ねて作る。
 // 加算合成なので、昼は空に溶け、夜ははっきり光る。
+//
+// 太さの既定は**推力から決める**。翼幅の何割、という決め方だと、翼の大きな機体で
+// ノズルが胴体より太くなった（実測で翼幅73mのBoeing 747だと半径7.3m）。
+// 実機のノズルは推力の平方根におよそ比例する——CFM56（110kN）でファン半径0.85m、
+// GE90（510kN）で1.8m。r ≒ 0.00256·√(推力N) がその2点を通る。
+// 機体の大きさに対して極端にならないよう、翼幅の0.8%〜5%に収める。
+// Builderの「炎の太さ」「炎の長さ」で上書きできる。
+const PLUME_NOZZLE_K = 0.00256;
+const PLUME_R_MIN_SPAN = 0.008;
+const PLUME_R_MAX_SPAN = 0.05;
+
 const PLUME_LOOK = {
-  // len/rad はエンジン半径に対する倍率、color は芯の色
   prop:   null,
-  jet:    { len: 3.0, rad: 0.9, core: 0xbfd4ff, halo: 0x6f86a8, alpha: 0.16, idle: 0.25 },
-  jet_ab: { len: 3.0, rad: 0.9, core: 0xbfd4ff, halo: 0x6f86a8, alpha: 0.16, idle: 0.25 },
-  rocket: { len: 10.0, rad: 1.25, core: 0xfff6e0, halo: 0xffa33c, alpha: 0.50, idle: 0 },
+  jet:    { shimmer: 7.0 },
+  jet_ab: { shimmer: 7.0 },
+  rocket: { shimmer: 0, flame: { len: 16, core: 0xfff6e0, halo: 0xffa33c, alpha: 0.5 },
+            glow: 0xffb055, smoke: true },
 };
 // アフターバーナーの炎（AB付きジェットが9割より上で出す）
-const PLUME_AB = { len: 9.0, rad: 1.15, core: 0xfff0d0, halo: 0xff7a2a, alpha: 0.60 };
+const PLUME_AB = { len: 12, core: 0xfff0d0, halo: 0xff7a2a, alpha: 0.6, glow: 0xff8a3a };
 // 炎のゆらぎ（長さの振れ幅と、1秒あたりの速さ）
 const PLUME_FLICKER = 0.14;
 const PLUME_FLICKER_HZ = 17;
+// 炎のにじみ（航行灯と同じ考え方——画面ぜんぶの後処理ではなく、光らせたいものに
+// だけ薄い光の玉を重ねる。04b-airport.js の AIRPORT_GLOW_SCALE の説明を参照）。
+const PLUME_GLOW_SIZE = 5.5;      // ノズル半径に対する玉の大きさ
+const PLUME_GLOW_OPACITY = 0.55;
 
 // 根元が原点、+Y の向きに伸びる円錐。先を細く尖らせておく。
-function plumeCone(color, opacity) {
+function plumeCone(color, opacity, blending) {
   const geo = new THREE.ConeGeometry(1, 1, 14, 1, true);
   geo.translate(0, 0.5, 0);   // 底面を原点に
   const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
     color, transparent: true, opacity, depthWrite: false,
-    blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
+    blending: blending || THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
   }));
   mesh.renderOrder = 3;
   mesh.visible = false;
   return mesh;
 }
 
+// 陽炎（熱で空気が揺らいで見えるところ）の模様。
+// 横に走る細かい縞を縦へ流すと、上へ立ちのぼる熱に見える。
+let _shimmerTexture = null;
+function heatShimmerTexture() {
+  if (_shimmerTexture) return _shimmerTexture;
+  const W = 32, H = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(W, H);
+  for (let j = 0; j < H; j++) {
+    const v = j / H;
+    // 周期の違う波を重ねて、規則正しく見えないようにする
+    const n = Math.sin(v * Math.PI * 2 * 9) * 0.5
+      + Math.sin(v * Math.PI * 2 * 23 + 1.3) * 0.3
+      + Math.sin(v * Math.PI * 2 * 41 + 2.7) * 0.2;
+    for (let i = 0; i < W; i++) {
+      const u = i / (W - 1) * 2 - 1;
+      const edge = Math.max(1 - u * u, 0);      // 縁ほど薄く
+      const a = Math.max(n, 0) * edge;
+      const o = (j * W + i) * 4;
+      img.data[o] = img.data[o + 1] = img.data[o + 2] = 255;
+      img.data[o + 3] = Math.round(a * 255);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  _shimmerTexture = tex;
+  return tex;
+}
+
+// 陽炎は**明るくなる帯と暗くなる帯の両方**が要る。片方だけだと、ただ白く
+// かぶった円錐にしか見えない（光が曲がって見える、という感じにならない）。
+// 加算合成の1枚と乗算合成の1枚を、少しずれた速さで流して重ねる。
+// これは本当の屈折ではなく、屈折らしく見せるための模様（画面を読み直す
+// 後処理を入れずに済ませるため）。
+function plumeShimmer(multiply) {
+  const geo = new THREE.ConeGeometry(1, 1, 14, 1, true);
+  geo.translate(0, 0.5, 0);
+  const tex = heatShimmerTexture().clone();
+  tex.needsUpdate = true;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(1, 3);
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    map: tex, color: multiply ? 0x7a8590 : 0xffffff,
+    transparent: true, opacity: 0, depthWrite: false,
+    blending: multiply ? THREE.MultiplyBlending : THREE.AdditiveBlending,
+    side: THREE.DoubleSide, fog: false,
+  }));
+  mesh.renderOrder = 3;
+  mesh.visible = false;
+  mesh.userData.tex = tex;
+  return mesh;
+}
+
 const _plumeDir = new THREE.Vector3();
 const _plumeUp = new THREE.Vector3(0, 1, 0);
+
+// このエンジンのノズル半径(m)。Builderで入れていれば、その値を使う。
+function enginePlumeRadius(e, unit) {
+  const w = (e.plumeWidthM || 0);
+  if (w > 0) return w / 2;
+  return THREE.MathUtils.clamp(PLUME_NOZZLE_K * Math.sqrt(Math.max(e.thrustN, 1)),
+    unit * PLUME_R_MIN_SPAN, unit * PLUME_R_MAX_SPAN);
+}
 
 function buildEnginePlumes(model, parent) {
   const out = [];
   const engines = model.engines || [];
   if (!engines.length) return out;
   const unit = Math.max(model.wingSpan, 2);
-  const biggest = Math.max(...engines.map((e) => e.thrustN), 1);
   for (const e of engines) {
     const look = PLUME_LOOK[e.kind];
     if (!look) continue;                       // プロペラは何も出さない
-    // ノズルの太さ。推力がいちばん大きいエンジンで翼幅の1割、小さいものは控えめに。
-    const r = Math.max(unit * 0.10 * Math.sqrt(e.thrustN / biggest), unit * 0.02);
+    const r = enginePlumeRadius(e, unit);
+    const lenScale = e.plumeLengthScale > 0 ? e.plumeLengthScale : 1;
     // 排気は推力と逆向きに出る
     const dir = _plumeDir.copy(e.axis).negate().normalize();
     const quat = new THREE.Quaternion().setFromUnitVectors(_plumeUp, dir);
-    const entry = { engine: e, look, radius: r, cones: [] };
-    const mk = (color, alpha, radScale) => {
-      const c = plumeCone(color, alpha);
-      c.position.copy(e.position).addScaledVector(dir, r * 0.3);
-      c.quaternion.copy(quat);
-      c.userData.radScale = radScale;
-      parent.add(c);
-      entry.cones.push(c);
-      return c;
+    const entry = { engine: e, look, radius: r, lenScale, cones: [] };
+    const place = (mesh, radScale) => {
+      mesh.position.copy(e.position).addScaledVector(dir, r * 0.3);
+      mesh.quaternion.copy(quat);
+      mesh.userData.radScale = radScale;
+      parent.add(mesh);
+      entry.cones.push(mesh);
+      return mesh;
     };
-    entry.halo = mk(look.halo, look.alpha * 0.55, 1.55);
-    entry.core = mk(look.core, look.alpha, 1.0);
+
+    if (look.shimmer > 0) {
+      entry.shimmerAdd = place(plumeShimmer(false), 1.1);
+      entry.shimmerMul = place(plumeShimmer(true), 1.15);
+    }
+    if (look.flame) {
+      entry.halo = place(plumeCone(look.flame.halo, look.flame.alpha * 0.55), 1.55);
+      entry.core = place(plumeCone(look.flame.core, look.flame.alpha), 1.0);
+    }
     if (e.kind === 'jet_ab') {
-      entry.abHalo = mk(PLUME_AB.halo, PLUME_AB.alpha * 0.5, 1.5);
-      entry.abCore = mk(PLUME_AB.core, PLUME_AB.alpha, 0.85);
-      entry.cones.push(entry.abHalo, entry.abCore);
+      entry.abHalo = place(plumeCone(PLUME_AB.halo, PLUME_AB.alpha * 0.5), 1.5);
+      entry.abCore = place(plumeCone(PLUME_AB.core, PLUME_AB.alpha), 0.85);
+    }
+    // 炎のにじみ。ノズルの口に光の玉を1つ置く。
+    const glowColor = (e.kind === 'jet_ab') ? PLUME_AB.glow : look.glow;
+    if (glowColor) {
+      const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+        color: glowColor, map: navLightGlowTexture(), transparent: true,
+        opacity: 0, depthWrite: false, fog: false, blending: THREE.AdditiveBlending,
+      }));
+      glow.position.copy(e.position).addScaledVector(dir, r * 0.5);
+      glow.renderOrder = 3;
+      glow.visible = false;
+      parent.add(glow);
+      entry.glow = glow;
+      entry.glowSize = r * PLUME_GLOW_SIZE;
     }
     out.push(entry);
   }
   return out;
 }
 
-function updateEnginePlumes(ac, controls, state, elapsed) {
+function updateEnginePlumes(ac, controls, state, dt, elapsed) {
   const plumes = ac.plumes;
   if (!plumes || !plumes.length) return;
   const flicker = 1 + PLUME_FLICKER * Math.sin(elapsed * PLUME_FLICKER_HZ * Math.PI * 2);
@@ -580,21 +683,128 @@ function updateEnginePlumes(ac, controls, state, elapsed) {
     const lever = off ? 0 : (e.lift ? (controls.vtolThrottle || 0) : controls.throttle);
     const ab = (e.kind === 'jet_ab' && typeof engineAfterburner === 'function')
       ? engineAfterburner(lever) : 0;
-    // ふだんの排気。ジェットはアイドルでも少し出る。
-    const base = p.look.idle + (1 - p.look.idle) * lever;
-    const on = lever > 0.005 || (p.look.idle > 0 && !off);
-    const len = p.radius * p.look.len * base * flicker;
-    for (const c of [p.halo, p.core]) {
-      c.visible = on && len > 1e-3;
+    const setCone = (c, len, alpha) => {
+      c.visible = len > 1e-3 && alpha > 0.004;
+      c.material.opacity = alpha;
       c.scale.set(p.radius * c.userData.radScale, len, p.radius * c.userData.radScale);
+    };
+
+    // 陽炎。アイドルでも少し出て、出力を上げるほど長く濃くなる。
+    if (p.shimmerAdd) {
+      const heat = off ? 0 : (0.18 + 0.82 * lever);
+      const len = p.radius * p.look.shimmer * p.lenScale * heat;
+      // 模様を後ろへ流す（速さを少し変えると、2枚が干渉して揺らいで見える）
+      p.shimmerAdd.userData.tex.offset.y = (elapsed * -1.7) % 1;
+      p.shimmerMul.userData.tex.offset.y = (elapsed * -2.3) % 1;
+      setCone(p.shimmerAdd, len, heat * 0.22);
+      setCone(p.shimmerMul, len * 1.05, heat * 0.55);
     }
+    // ふだんの炎（ロケット）
+    if (p.core) {
+      const len = p.radius * p.look.flame.len * p.lenScale * lever * flicker;
+      setCone(p.halo, len, p.look.flame.alpha * 0.55 * lever);
+      setCone(p.core, len, p.look.flame.alpha * lever);
+    }
+    // アフターバーナーの炎
     if (p.abCore) {
-      const abLen = p.radius * PLUME_AB.len * ab * flicker;
-      for (const c of [p.abHalo, p.abCore]) {
-        c.visible = ab > 0.01;
-        c.scale.set(p.radius * c.userData.radScale, abLen, p.radius * c.userData.radScale);
-      }
+      const abLen = p.radius * PLUME_AB.len * p.lenScale * ab * flicker;
+      setCone(p.abHalo, abLen, PLUME_AB.alpha * 0.5 * ab);
+      setCone(p.abCore, abLen, PLUME_AB.alpha * ab);
     }
+    // にじみ。炎の強さに合わせる。
+    if (p.glow) {
+      const g = e.kind === 'jet_ab' ? ab : lever;
+      p.glow.visible = g > 0.01;
+      p.glow.material.opacity = g * PLUME_GLOW_OPACITY;
+      p.glow.scale.setScalar(p.glowSize * (0.7 + 0.3 * g) * flicker);
+    }
+  }
+}
+
+// --- 衝撃波（ソニックブーム）-------------------------------------------------
+//
+// 音速のあたりでは、機体のまわりの空気が膨張して温度が下がり、湿っていれば
+// 水滴になって白い雲が張りつく（ベイパーコーン／プラントル・グロワートの雲）。
+// 実機の写真でおなじみの、機体を包む円錐がこれ。マッハ1ちょうどで最も濃く、
+// 0.9より遅い／1.2より速いところでは消える。**湿っている日ほど濃い**。
+//
+// 音速をまたいだ瞬間には、後ろへ抜けていく輪も1つ出す（マッハコーンが
+// 通り過ぎるところ）。音そのものは鳴らせないので、計器に文字でも出す
+// （11-flight-ui.js）。
+const BOOM_MACH_FROM = 0.88;      // ここから雲が出はじめ
+const BOOM_MACH_PEAK = 1.00;      // いちばん濃いところ
+const BOOM_MACH_TO = 1.20;        // ここまでで消える
+const BOOM_WET_MIN = 0.15;        // これ以下の乾いた空では出ない
+const BOOM_CONE_OPACITY = 0.45;
+const BOOM_CONE_RADIUS_SPAN = 0.42;   // 翼幅に対する円錐の半径
+const BOOM_CONE_LEN_SPAN = 0.85;      // 翼幅に対する長さ
+// 音速をまたいだときに後ろへ抜ける輪
+const BOOM_RING_LIFE_S = 1.1;
+const BOOM_RING_GROW_SPAN = 3.2;      // 翼幅の何倍まで広がるか
+const BOOM_RING_BACK_SPAN = 2.5;      // 後ろへどれだけ流れるか
+
+function buildSonicBoom(model, parent) {
+  const unit = Math.max(model.wingSpan, 2);
+  // 円錐。機首側が細く、後ろへ広がる。
+  const geo = new THREE.ConeGeometry(1, 1, 24, 1, true);
+  geo.translate(0, 0.5, 0);
+  const cone = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    color: 0xeaf2ff, transparent: true, opacity: 0,
+    depthWrite: false, side: THREE.DoubleSide, fog: false,
+  }));
+  // +Y を機首（-Z）へ向ける。底面（広いほう）が後ろに残る。
+  cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, -1));
+  cone.scale.set(unit * BOOM_CONE_RADIUS_SPAN, unit * BOOM_CONE_LEN_SPAN, unit * BOOM_CONE_RADIUS_SPAN);
+  cone.renderOrder = 2;
+  cone.visible = false;
+  parent.add(cone);
+
+  // 抜けていく輪。機体のうしろで平たい輪が広がる。
+  const ringGeo = new THREE.RingGeometry(0.72, 1, 40);
+  const ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0, depthWrite: false,
+    side: THREE.DoubleSide, blending: THREE.AdditiveBlending, fog: false,
+  }));
+  ring.renderOrder = 2;
+  ring.visible = false;
+  parent.add(ring);
+
+  return { cone, ring, unit, ringAge: Infinity, seenCross: 0 };
+}
+
+function updateSonicBoom(ac, controls, state, dt) {
+  const b = ac.boom;
+  if (!b) return;
+  const wet = (typeof EnvState !== 'undefined' && EnvState.weather && EnvState.weather.current)
+    ? EnvState.weather.current.wetness : 0.3;
+  const wetF = THREE.MathUtils.clamp((wet - BOOM_WET_MIN) / (1 - BOOM_WET_MIN), 0, 1);
+  const mach = state.mach || 0;
+
+  // 遷音速の帯。マッハ1で1になり、両側へ向けて0まで落ちる三角。
+  let band = 0;
+  if (mach > BOOM_MACH_FROM && mach < BOOM_MACH_TO) {
+    band = mach <= BOOM_MACH_PEAK
+      ? (mach - BOOM_MACH_FROM) / (BOOM_MACH_PEAK - BOOM_MACH_FROM)
+      : (BOOM_MACH_TO - mach) / (BOOM_MACH_TO - BOOM_MACH_PEAK);
+  }
+  const strength = band * (0.25 + 0.75 * wetF);
+  b.cone.visible = strength > 0.01;
+  b.cone.material.opacity = strength * BOOM_CONE_OPACITY;
+
+  // 音速をまたいだら輪を出す（またいだ回数が増えていたら、新しく1回）
+  const cross = state.machCrossCount || 0;
+  if (cross !== b.seenCross) { b.seenCross = cross; b.ringAge = 0; }
+  if (b.ringAge < BOOM_RING_LIFE_S) {
+    b.ringAge += dt;
+    const t = THREE.MathUtils.clamp(b.ringAge / BOOM_RING_LIFE_S, 0, 1);
+    const r = b.unit * (0.4 + BOOM_RING_GROW_SPAN * t);
+    b.ring.visible = true;
+    b.ring.scale.setScalar(r);
+    // 機体のうしろ（+Z）へ流れていく。輪の面は進む向きに直交させる。
+    b.ring.position.set(0, 0, b.unit * (0.3 + BOOM_RING_BACK_SPAN * t));
+    b.ring.material.opacity = (1 - t) * (1 - t) * 0.5 * (0.3 + 0.7 * wetF);
+  } else if (b.ring.visible) {
+    b.ring.visible = false;
   }
 }
 
@@ -613,11 +823,18 @@ const CONTRAIL_ALT_FULL_M = 9500;    // ここで濃さが頭打ち
 const CONTRAIL_WET_MIN = 0.10;       // これ以下の乾いた空では出ない
 const CONTRAIL_LIFE_S = 16;          // 消えるまで（最長）
 const CONTRAIL_PER_EMIT = 300;       // 1か所あたりの点の数
-const CONTRAIL_SIZE_SPAN = 2.2;      // 点の大きさ（翼幅に対する倍率）
+// 点の大きさ。**出たては小さく、時間とともに広がる**（実機の飛行機雲と同じ）。
+// 最初から翼幅の2倍で出すと、追尾視点のカメラ（機体のすぐ後ろ）が
+// 出たての点の中に入ってしまい、画面がまっ白になる——実際にそうなった。
+const CONTRAIL_SIZE_FROM_SPAN = 0.22;   // 出たての大きさ（翼幅に対する倍率）
+const CONTRAIL_SIZE_TO_SPAN = 2.6;      // 消えるころの大きさ
 const CONTRAIL_MAX_ALPHA = 0.55;
 // 点は**時間ではなく距離**で置く。時間で置くと、速い機体では点と点が離れて
 // 破線になり（実際そうなった）、遅い機体では同じ場所に積み重なって無駄になる。
 // 間隔は点の直径に対する割合で決める——重なっていないと筋に見えない。
+// 間隔は「少し育ったころの大きさ」に対する割合で決める（出たての小ささを
+// 基準にすると点が多すぎてバッファが一瞬で一周する）。
+const CONTRAIL_STEP_REF_SPAN = 0.9;     // 間隔の基準になる大きさ（翼幅に対する倍率）
 const CONTRAIL_STEP_MIN_FRAC = 0.25;
 const CONTRAIL_STEP_MAX_FRAC = 0.32;
 // 翼端の渦。湿っていて、これ以上の荷重を掛けたときだけ出る。
@@ -661,18 +878,18 @@ function buildContrail(model) {
   const total = emitters.length * CONTRAIL_PER_EMIT;
   const geo = new THREE.BufferGeometry();
   const pos = new Float32Array(total * 3);
-  const col = new Float32Array(total * 3);
   const age = new Float32Array(total).fill(Infinity);
   const strength = new Float32Array(total);   // 置いたときの濃さ（0〜1）
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array(total), 1));
+  geo.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(total), 1));
   // 点はワールド中を飛び回るので、視界外判定は自前では持たない
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), Infinity);
-  const points = new THREE.Points(geo, new THREE.PointsMaterial({
-    size: Math.max(model.wingSpan, 2) * CONTRAIL_SIZE_SPAN,
-    map: contrailTexture(), transparent: true, depthWrite: false,
-    blending: THREE.AdditiveBlending, vertexColors: true, sizeAttenuation: true,
-    fog: false,
+  // 煙と同じシェーダ（点ごとに大きさと濃さを持てる）。色だけ白にする。
+  const points = new THREE.Points(geo, new THREE.ShaderMaterial({
+    uniforms: { uMap: { value: contrailTexture() }, uColor: { value: new THREE.Color(0xffffff) } },
+    vertexShader: SMOKE_VERT, fragmentShader: SMOKE_FRAG,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
   }));
   points.frustumCulled = false;
   points.renderOrder = 1;
@@ -680,8 +897,152 @@ function buildContrail(model) {
   const group = new THREE.Group();
   group.name = 'aircraft-contrail';
   group.add(points);
-  return { group, points, emitters, age, strength,
+  return { group, points, emitters, age, strength, unit: Math.max(model.wingSpan, 2),
     cursor: new Int32Array(emitters.length), dist: 0, life: CONTRAIL_LIFE_S };
+}
+
+// --- ロケットの煙 -------------------------------------------------------------
+//
+// ロケットは推進剤を燃やしきれず、濃い煙を後ろへ残す（固体ロケットなら真っ白、
+// 液体でも煤で灰色になる）。飛行機雲と同じで**ワールドに置き去りにする**ので、
+// 同じ入れ物（ac.fx）に入れる。
+//
+// 飛行機雲と違い、煙は**時間とともに膨らみながら薄くなる**。点ごとに大きさと
+// 濃さを変えたいが、THREE.PointsMaterial は点ごとの大きさも透明度も持てない
+// （r128 の vertexColors は vec3 で、アルファが入らない）。小さな ShaderMaterial を
+// 自前で書く。対数深度バッファを使っているシーンなので、その処理を入れ忘れると
+// 煙だけ地形の手前後ろが入れ替わる——three.js の同名チャンクを include して合わせる。
+const SMOKE_PER_ROCKET = 220;
+const SMOKE_LIFE_S = 6;
+const SMOKE_STEP_FRAC = 0.30;      // 置く間隔（出たての大きさに対する割合）
+const SMOKE_STEP_MIN_S = 0.03;
+const SMOKE_SIZE_FROM = 2.2;       // ノズル半径に対する、出たての大きさ
+const SMOKE_SIZE_TO = 14;          // 消えるころの大きさ
+const SMOKE_ALPHA = 0.5;
+const SMOKE_COLOR = 0x4a4a4e;
+
+const SMOKE_VERT = `
+#include <common>
+#include <logdepthbuf_pars_vertex>
+attribute float aAlpha;
+attribute float aSize;
+varying float vAlpha;
+void main() {
+  vAlpha = aAlpha;
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_PointSize = aSize * (300.0 / max(-mv.z, 1.0));
+  gl_Position = projectionMatrix * mv;
+  #include <logdepthbuf_vertex>
+}`;
+const SMOKE_FRAG = `
+#include <common>
+#include <logdepthbuf_pars_fragment>
+uniform sampler2D uMap;
+uniform vec3 uColor;
+varying float vAlpha;
+void main() {
+  #include <logdepthbuf_fragment>
+  vec4 t = texture2D(uMap, gl_PointCoord);
+  float a = t.a * vAlpha;
+  if (a < 0.004) discard;
+  gl_FragColor = vec4(uColor, a);
+}`;
+
+let _smokeTexture = null;
+function smokeTexture() {
+  if (_smokeTexture) return _smokeTexture;
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  g.addColorStop(0, 'rgba(255,255,255,0.95)');
+  g.addColorStop(0.45, 'rgba(255,255,255,0.62)');
+  g.addColorStop(0.8, 'rgba(255,255,255,0.16)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  _smokeTexture = new THREE.CanvasTexture(canvas);
+  return _smokeTexture;
+}
+
+function buildRocketSmoke(model) {
+  const unit = Math.max(model.wingSpan, 2);
+  const emitters = (model.engines || [])
+    .filter((e) => e.kind === 'rocket')
+    .map((e) => ({ engine: e, local: e.position.clone(), radius: enginePlumeRadius(e, unit) }));
+  if (!emitters.length) return null;
+  const total = emitters.length * SMOKE_PER_ROCKET;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(total * 3), 3));
+  geo.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array(total), 1));
+  geo.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(total), 1));
+  geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), Infinity);
+  const points = new THREE.Points(geo, new THREE.ShaderMaterial({
+    uniforms: { uMap: { value: smokeTexture() }, uColor: { value: new THREE.Color(SMOKE_COLOR) } },
+    vertexShader: SMOKE_VERT, fragmentShader: SMOKE_FRAG,
+    transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  }));
+  points.frustumCulled = false;
+  points.renderOrder = 1;
+  points.visible = false;
+  return { points, emitters, age: new Float32Array(total).fill(Infinity),
+    cursor: new Int32Array(emitters.length), dist: 0, timer: 0 };
+}
+
+const _smWorld = new THREE.Vector3();
+
+function updateRocketSmoke(ac, controls, state, dt) {
+  const sm = ac.smoke;
+  if (!sm) return;
+  const geo = sm.points.geometry;
+  const pos = geo.attributes.position.array;
+  const alpha = geo.attributes.aAlpha.array;
+  const size = geo.attributes.aSize.array;
+
+  // 置く間隔。速いほど短い時間で置かないと、煙が点々に切れる。
+  // 止まっていても（ホバリング中など）時間で置けるよう、下限を置く。
+  const r0 = sm.emitters[0].radius;
+  const stepM = r0 * SMOKE_SIZE_FROM * SMOKE_STEP_FRAC;
+  const every = Math.max(stepM / Math.max(state.airspeed, 1), SMOKE_STEP_MIN_S);
+  sm.timer += dt;
+  const spawn = sm.timer >= every;
+  if (spawn) sm.timer = 0;
+  let live = 0;
+
+  if (spawn) {
+    for (let i = 0; i < sm.emitters.length; i++) {
+      const em = sm.emitters[i];
+      const off = typeof engineGroupOff === 'function' && engineGroupOff(controls, em.engine.group);
+      const power = off ? 0 : controls.throttle;
+      if (power <= 0.02) continue;
+      const slot = i * SMOKE_PER_ROCKET + sm.cursor[i];
+      sm.cursor[i] = (sm.cursor[i] + 1) % SMOKE_PER_ROCKET;
+      _smWorld.copy(em.local).applyQuaternion(ac.group.quaternion).add(ac.group.position);
+      pos[slot * 3] = _smWorld.x; pos[slot * 3 + 1] = _smWorld.y; pos[slot * 3 + 2] = _smWorld.z;
+      sm.age[slot] = 0;
+      alpha[slot] = SMOKE_ALPHA * power;
+      size[slot] = em.radius * SMOKE_SIZE_FROM;
+    }
+  }
+
+  for (let s = 0; s < sm.age.length; s++) {
+    const a = sm.age[s];
+    if (!(a < SMOKE_LIFE_S)) { if (alpha[s] !== 0) alpha[s] = 0; continue; }
+    const na = a + dt;
+    sm.age[s] = na;
+    if (na >= SMOKE_LIFE_S) { alpha[s] = 0; continue; }
+    const t = na / SMOKE_LIFE_S;
+    // 出たては濃く小さく、時間とともに膨らみながら薄れる
+    alpha[s] *= Math.pow(1 - dt / SMOKE_LIFE_S, 1.4);
+    const em = sm.emitters[Math.floor(s / SMOKE_PER_ROCKET)] || sm.emitters[0];
+    size[s] = em.radius * (SMOKE_SIZE_FROM + (SMOKE_SIZE_TO - SMOKE_SIZE_FROM) * t);
+    live++;
+  }
+  geo.attributes.position.needsUpdate = true;
+  geo.attributes.aAlpha.needsUpdate = true;
+  geo.attributes.aSize.needsUpdate = true;
+  sm.points.visible = live > 0;
 }
 
 const _ctWorld = new THREE.Vector3();
@@ -691,7 +1052,8 @@ function updateContrail(ac, controls, state, dt) {
   if (!ct) return;
   const geo = ct.points.geometry;
   const pos = geo.attributes.position.array;
-  const col = geo.attributes.color.array;
+  const alphaArr = geo.attributes.aAlpha.array;
+  const sizeArr = geo.attributes.aSize.array;
 
   // 出るかどうか。高いところの排気雲と、湿った空での翼端渦。
   const wet = (EnvState.weather && EnvState.weather.current)
@@ -705,7 +1067,7 @@ function updateContrail(ac, controls, state, dt) {
       * THREE.MathUtils.clamp(((state.loadFactor || 1) - CONTRAIL_VORTEX_G) / 1.2, 0, 1));
 
   // 点を置く間隔（距離）。速いほど広げるが、点の直径より広げると破線になる。
-  const size = ct.points.material.size;
+  const size = ct.unit * CONTRAIL_STEP_REF_SPAN;
   const want = state.airspeed * CONTRAIL_LIFE_S / (CONTRAIL_PER_EMIT - 2);
   const step = THREE.MathUtils.clamp(want,
     size * CONTRAIL_STEP_MIN_FRAC, size * CONTRAIL_STEP_MAX_FRAC);
@@ -728,6 +1090,7 @@ function updateContrail(ac, controls, state, dt) {
     pos[slot * 3] = _ctWorld.x; pos[slot * 3 + 1] = _ctWorld.y; pos[slot * 3 + 2] = _ctWorld.z;
     ct.age[slot] = 0;
     ct.strength[slot] = strength;
+    sizeArr[slot] = ct.unit * CONTRAIL_SIZE_FROM_SPAN;
   }
 
   // 古いものを薄くして消す
@@ -736,24 +1099,24 @@ function updateContrail(ac, controls, state, dt) {
   for (let s = 0; s < ct.age.length; s++) {
     const a = ct.age[s];
     if (!(a < life)) {
-      if (col[s * 3] !== 0) col[s * 3] = col[s * 3 + 1] = col[s * 3 + 2] = 0;
+      if (alphaArr[s] !== 0) alphaArr[s] = 0;
       continue;
     }
     const na = a + dt;
     ct.age[s] = na;
-    if (na >= life) {
-      col[s * 3] = col[s * 3 + 1] = col[s * 3 + 2] = 0;
-      continue;
-    }
+    if (na >= life) { alphaArr[s] = 0; continue; }
     // 出たてはすぐ濃くなり、そのあとゆっくり薄れて消える
     const t = na / life;
     const fade = Math.min(t * 12, 1) * (1 - t) * (1 - t);
-    const v = ct.strength[s] * CONTRAIL_MAX_ALPHA * fade;
-    col[s * 3] = col[s * 3 + 1] = col[s * 3 + 2] = v;
+    alphaArr[s] = ct.strength[s] * CONTRAIL_MAX_ALPHA * fade;
+    // 広がりながら薄れる（実機の飛行機雲と同じ）
+    sizeArr[s] = ct.unit * (CONTRAIL_SIZE_FROM_SPAN
+      + (CONTRAIL_SIZE_TO_SPAN - CONTRAIL_SIZE_FROM_SPAN) * t);
     live++;
   }
   geo.attributes.position.needsUpdate = true;
-  geo.attributes.color.needsUpdate = true;
+  geo.attributes.aAlpha.needsUpdate = true;
+  geo.attributes.aSize.needsUpdate = true;
   ct.points.visible = live > 0;
 }
 
@@ -816,6 +1179,8 @@ function updateAircraftVisual(ac, controls, state, dt, elapsed) {
   }
 
   updateLandingLightPool(ac, controls, state);
-  updateEnginePlumes(ac, controls, state, elapsed);
+  updateEnginePlumes(ac, controls, state, dt, elapsed);
   updateContrail(ac, controls, state, dt);
+  updateRocketSmoke(ac, controls, state, dt);
+  updateSonicBoom(ac, controls, state, dt);
 }

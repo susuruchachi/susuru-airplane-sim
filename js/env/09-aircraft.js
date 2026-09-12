@@ -533,6 +533,9 @@ function buildAircraftModel(config) {
       group: THREE.MathUtils.clamp(Math.round((p.props && p.props.engineGroup) || 1), 1, 4),
       groupVMaxMps: speedToMps((p.props && p.props.groupMaxSpeedValue) || 0,
         (p.props && p.props.groupMaxSpeedUnit) || 'mach'),
+      // 排気や炎の見た目（0なら推力から自動）
+      plumeWidthM: Math.max((p.props && p.props.plumeWidth) || 0, 0),
+      plumeLengthScale: Math.max((p.props && p.props.plumeLength) || 1, 0),
     };
   }).filter((e) => e.thrustN > 0);
   applyVtolTrim(engines);
@@ -833,7 +836,8 @@ function analyzeAircraftPerformance(model) {
     for (const e of model.engines) {
       const w = e.thrustN * Math.max(-e.axis.z, 0);
       if (w <= 0) continue;
-      num += w * engineThrustScale(e, v, rho, 1);
+      // 離陸滑走の速度なので頭打ちは効かない（第5引数は0＝頭打ちなし）
+      num += w * engineThrustScale(e, v, rho, 1, 0);
       den += w;
     }
     return den > 0 ? num / den : 1;

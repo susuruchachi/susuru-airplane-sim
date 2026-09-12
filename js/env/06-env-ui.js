@@ -2,7 +2,38 @@
 
 let _envScrubbingTime = false;
 
+// --- メニューの開け閉め -------------------------------------------------------
+//
+// 飛ばしているあいだ、右のメニューは邪魔になることが多い（とくに狭い画面）。
+// 畳むと3Dの側が画面いっぱいに広がる。CSSの grid の列（狭い画面では行）を
+// 0にするだけなので、閉じているあいだ中身は一切描かれない。
+// 選択は localStorage に覚える。
+const ENV_PANEL_KEY = 'flightSimEnvPanelCollapsed';
+
+function setEnvPanelCollapsed(on) {
+  document.body.classList.toggle('panel-collapsed', !!on);
+  const btn = document.getElementById('envBtnPanel');
+  if (btn) btn.textContent = on ? 'メニューを開く' : 'メニューを閉じる';
+  try { localStorage.setItem(ENV_PANEL_KEY, on ? '1' : '0'); } catch (err) { /* 覚えられなくても続行 */ }
+  // 描画の大きさはCSSが決めたあとでないと読めないので、次のフレームで測り直す
+  requestAnimationFrame(() => {
+    if (typeof onEnvWindowResize === 'function') onEnvWindowResize();
+  });
+}
+
+function setupEnvPanelToggle() {
+  const btn = document.getElementById('envBtnPanel');
+  if (!btn) return;
+  let saved = false;
+  try { saved = localStorage.getItem(ENV_PANEL_KEY) === '1'; } catch (err) { /* 読めなくても続行 */ }
+  setEnvPanelCollapsed(saved);
+  btn.addEventListener('click', () => {
+    setEnvPanelCollapsed(!document.body.classList.contains('panel-collapsed'));
+  });
+}
+
 function setupEnvUI() {
+  setupEnvPanelToggle();
   const timeSlider = document.getElementById('envTimeSlider');
   const timeReadout = document.getElementById('envTimeReadout');
   const btnToggle = document.getElementById('envBtnToggleTime');
