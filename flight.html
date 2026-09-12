@@ -125,28 +125,28 @@ body.flying #versionTag { display:none; }
   color:#cfe3ff; text-shadow:0 1px 6px rgba(0,0,0,.9); transition:opacity .5s; opacity:0; }
 #hudHelp { position:absolute; bottom:8px; left:0; right:0; text-align:center;
   font-size:10.5px; color:rgba(180,205,230,0.55); padding:0 12px; }
-/* 水平器（人工水平儀）。姿勢がひと目で分かるよう画面の中央下に置く。
+/* 水平器（人工水平儀）は**どの画面でも左上の隅**に置く。
+   もとは中央下に置いていたが、そこは機首の先——いちばん見たいところ——に
+   ちょうど重なる。狭い画面だけ左上へ逃がしていたものの、画面の幅で
+   置き場所が変わると目が迷うので、広い画面も同じ左上にそろえた。
+   左上なら計器の上段の下で、操縦装置のレバー（左下・右下）とも重ならない。
    計器のタイルと同じ枠にして、並びから浮かないようにする。 */
-#hudAttitude { position:absolute; left:50%; transform:translateX(-50%); bottom:96px;
+#hudAttitude { position:absolute; left:12px; top:76px;
   width:150px; height:150px; border-radius:50%; overflow:hidden;
   border:1px solid rgba(120,170,220,0.30); background:rgba(8,14,22,0.5);
   backdrop-filter:blur(3px); }
 #hudAttitude canvas { display:block; width:100%; height:100%; }
-body.touch-controls #hudAttitude { bottom:210px; }
 /* 消しておける（Uキー、またはタッチの「水平器」ボタン）。
    狭い画面では計器そのものが視界をふさぐので、消せることが要る。 */
 body.hud-attitude-off #hudAttitude { display:none; }
-/* **狭い画面・低い画面では、画面の真ん中から左上の隅へ移す**。
-   横画面のスマホだと上下がとにかく足りないので、中央下に置くと
-   機首の先（いちばん見たいところ）にちょうど重なってしまう。
-   左上は計器の行の下で、操縦装置のレバー（左下・右下）とも重ならない。 */
+/* 狭い画面・低い画面では、置き場所は変えずに小さくするだけ。 */
 @media (max-width:820px){ #flightHud .hud-tile b{font-size:16px;} #hudHelp{display:none;}
-  #hudAttitude { width:96px; height:96px; left:10px; transform:none; bottom:auto; top:76px; } }
+  #hudAttitude { width:96px; height:96px; left:10px; top:76px; } }
 @media (max-height:560px){
-  #hudAttitude { width:84px; height:84px; left:10px; transform:none; bottom:auto; top:70px; } }
-@media (max-width:820px){ body.touch-controls #hudAttitude { bottom:auto; } }
+  #hudAttitude { width:84px; height:84px; left:10px; top:70px; } }
 /* 隅へ寄せた水平器の上に計器のタイルが折り返してくると重なるので、
-   タイルの並びを水平器のぶんだけ右へ寄せる。消しているときは元に戻す。 */
+   タイルの並びを水平器のぶんだけ右へ寄せる。消しているときは元に戻す。
+   広い画面では上段は水平器より上、下段はずっと下なので、寄せる必要はない。 */
 @media (max-width:820px){ #flightHud .hud-row { padding-left:114px; } }
 @media (max-height:560px){ #flightHud .hud-row { padding-left:102px; } }
 @media (max-width:820px){ body.hud-attitude-off #flightHud .hud-row { padding-left:12px; } }
