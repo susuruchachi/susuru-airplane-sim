@@ -636,7 +636,15 @@ function updateFlightHUD() {
   if (engTile) engTile.hidden = !(model && model.hasEngineGroups);
   if (model && model.hasEngineGroups) {
     const off = c.engineGroupOff || {};
-    set('hudEng', model.engineGroups.map((g) => (off[g.id] ? '−' : String(g.id))).join('･'));
+    // **いま実際に出ている出力**をグループごとに出す（段階起動が目で分かるように）。
+    // 番号だけだと、遅いグループから順に上がっていくのも、エンジンの立ち上がりが
+    // 遅いのも、画面からはまったく読み取れなかった。
+    const power = s.enginePower || {};
+    set('hudEng', model.engineGroups.map((g) => {
+      if (off[g.id]) return '−';
+      const p = power[g.id];
+      return p === undefined ? String(g.id) : String(Math.round(p * 100));
+    }).join('･'));
   }
   // マッハ数。ゆっくり飛んでいるときは出さない（遅い機体の計器を増やさない）。
   // 音速は高度で変わるので、同じ対気速度でも高いところほどマッハ数は大きい。

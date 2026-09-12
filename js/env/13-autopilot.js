@@ -717,11 +717,21 @@ function apTerrainEscapeVs(state, spd) {
 }
 
 // 高度のずれ → 目標の昇降率(m/s)。上限は上下で別（上げるのは推力次第、下げるのは自由）
+// **upMax／downMax は「さらに絞る」ものであって、置き換えるものではない**。
+//
+// 置き換えにしていたので、速度の余裕から出す上限（apClimbCap）が幾何の上限
+// （AP_CLIMB_DEG＝7°ぶん）より大きい機体では、7°の縛りがまるごと消えていた。
+// 実測でサンダーバード1号（マッハ6・失速143m/s）の apClimbCap は **2907m/s**、
+// 高度のずれ6.2km×AP_VS_KP がそのまま通って **昇降率の指示が626m/s**（＝上昇角17°）。
+// 機体はそれに乗って高度30kmまでズームクライムし、空気の無いところで
+// 弾道飛行に入って、そこから旋回も降下もできなくなっていた
+// （「離陸後の最初の旋回がうまくいかない」のはここから始まる）。
+// 幾何の上限では同じ速度でも 256m/s までしか許さない。
 function apVsForAltitude(state, targetAltM, upMax, downMax, spd) {
   const lim = apVsLimits(state, spd);
-  return apClamp((targetAltM - state.altitudeM) * AP_VS_KP,
-    -(downMax === undefined ? lim.down : downMax),
-    upMax === undefined ? lim.up : upMax);
+  const up = upMax === undefined ? lim.up : Math.min(lim.up, upMax);
+  const down = downMax === undefined ? lim.down : Math.min(lim.down, downMax);
+  return apClamp((targetAltM - state.altitudeM) * AP_VS_KP, -down, up);
 }
 
 // 傾いた経路（降下や進入）を追うときの昇降率。
@@ -1385,7 +1395,19 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // そのまま行って来いが育って裏返る（実測でConcordeが巡航に入った4秒後に
     // ピッチ-12.6°、20秒後に迎角142°で墜ちた）。この式なら指示は連続でつながる。
     const levelAhead = Math.max(60, Math.max(state.verticalSpeed, 0) / AP_VS_KP);
-    if (state.altitudeM > Math.max(ap.targetAltitudeM, floorM) - levelAhead) { say('cruise', '巡航'); return; }
+    // **巡航が地形で上昇へ送り返す帯の中で、巡航へ渡してはいけない**。
+    // 巡航は floorM > 高度 + AP_TERRAIN_CLIMB_BACK_M(60m) なら上昇へ戻すので、
+    // こちらが floorM - levelAhead で渡すと、
+    //   floorM - levelAhead < 高度 < floorM - 60m
+    // の帯では両方が同時に成り立ち、**毎フレーム上昇と巡航を往復する**。
+    // levelAhead は昇降率 ÷ AP_VS_KP なので、毎秒6mより速く上っていれば
+    // この帯は必ず生まれる（地形の床が目標高度より高いとき）。
+    // 実際、上昇の姿勢を試しに絞ったときにConcordeがこの帯に入り、
+    // 113秒から6000秒まで往復し続けて降下も進入も始まらなかった。
+    // 地形の床は、送り返される余裕のぶんだけ上で渡す。
+    const handOver = Math.max(ap.targetAltitudeM - levelAhead,
+      floorM + AP_TERRAIN_CLIMB_BACK_M);
+    if (state.altitudeM > handOver) { say('cruise', '巡航'); return; }
 
     // 上昇を切り上げる条件は「目標に届いた」だけでは足りない。**届かない目標を
     // 設定されることがある**——高度のスライダーは12000mまで動くが、練習機の

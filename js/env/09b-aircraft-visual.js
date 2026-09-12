@@ -771,7 +771,14 @@ function updateEnginePlumes(ac, controls, state, dt, elapsed) {
   for (const p of plumes) {
     const e = p.engine;
     const off = typeof engineGroupOff === 'function' && engineGroupOff(controls, e.group);
-    const lever = off ? 0 : (e.lift ? (controls.vtolThrottle || 0) : controls.throttle);
+    // **見た目も「実際に出ている出力」で動かす**（engineDeliveredLever）。
+    // 出力レバーをそのまま使っていたので、遅いグループから順に上がる段階も、
+    // エンジンごとの立ち上がりの遅さも、画面にはまったく出ていなかった
+    // ——レバーを上げた瞬間に全グループの炎が一斉に同じ濃さで点いていた。
+    const lever = off ? 0
+      : (typeof engineDeliveredLever === 'function'
+        ? engineDeliveredLever(ac.model, state, controls, e)
+        : (e.lift ? (controls.vtolThrottle || 0) : controls.throttle));
     const ab = (e.kind === 'jet_ab' && typeof engineAfterburner === 'function')
       ? engineAfterburner(lever) : 0;
     const setCone = (c, len, alpha) => {
