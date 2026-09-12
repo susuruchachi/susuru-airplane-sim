@@ -147,6 +147,77 @@ function engineAfterburner(lever) {
     ((lever || 0) - ENGINE_AB_FROM) / (ENGINE_AB_FULL - ENGINE_AB_FROM), 0, 1);
 }
 
+// --- 出力レバー → グループごとの出力 -------------------------------------------
+//
+// **遅いグループから順に上げていく**。出力レバーは「機体ぜんぶでどれだけ出すか」
+// で、レバーを上げると まず いちばん遅いグループが全開になり、次に速いグループ、
+// さらに速いグループ……と順に点いていく（サンダーバード1号なら、ジェット→
+// アフターバーナー→ロケットの順）。いきなりロケットだけ吹く、という使い方に
+// ならないので、速度域の飛ばし方がそのままレバーの位置になる。
+function engineGroupLadder(model, controls) {
+  const gs = (model.engineGroups || []).filter((g) => !engineGroupOff(controls, g.id));
+  return gs.slice().sort((a, b) => (a.vMaxMps - b.vMaxMps) || (a.id - b.id));
+}
+
+// はしごの i 番目（0＝いちばん遅い）が受け取るレバー。
+function ladderLever(n, i, lever) {
+  if (n <= 0 || i < 0) return 0;
+  return THREE.MathUtils.clamp(lever * n - i, 0, 1);
+}
+
+// エンジンは**レバーどおりにすぐ出力が変わらない**。ジェットは吸い込む空気の量を
+// 変えるのに数秒かかり（実機の turbofan はアイドル→全開に5〜8秒）、プロペラと
+// ロケットはもっと速い。ここが無いと、レバーを叩いた瞬間に何百kNもの推力が
+// 立ち上がって機体が跳ねる。単位は「0→1に上げるのにかかる秒数」。
+const ENGINE_SPOOL_UP_S = { prop: 1.6, jet: 5.5, jet_ab: 4.0, rocket: 1.2 };
+const ENGINE_SPOOL_DOWN_S = { prop: 1.2, jet: 4.0, jet_ab: 3.0, rocket: 0.8 };
+
+function engineGroupKind(g) {
+  // そのグループでいちばん推力の大きいエンジンの種別を代表にする
+  let best = null;
+  for (const e of g.engines) if (!best || e.thrustN > best.thrustN) best = e;
+  return best ? best.kind : 'jet';
+}
+
+// レバーの指示を、スプールアップのぶんだけ遅らせて `state.enginePower` に入れる。
+// キーは グループID（前へ進むエンジン）と 'lift'（垂直離陸用）。
+function spoolEnginePower(model, state, controls, dt) {
+  if (!state.enginePower) state.enginePower = {};
+  const power = state.enginePower;
+  const chase = (key, want, kind) => {
+    const now = power[key] === undefined ? want : power[key];
+    const secs = (want > now ? ENGINE_SPOOL_UP_S[kind] : ENGINE_SPOOL_DOWN_S[kind])
+      || ENGINE_SPOOL_UP_S.jet;
+    const step = dt / Math.max(secs, 1e-3);
+    power[key] = Math.abs(want - now) <= step ? want
+      : now + Math.sign(want - now) * step;
+  };
+  const ladder = engineGroupLadder(model, controls);
+  const lever = THREE.MathUtils.clamp(controls.throttle || 0, 0, 1);
+  for (const g of (model.engineGroups || [])) {
+    const i = ladder.findIndex((x) => x.id === g.id);
+    // 止めているグループ（はしごに居ない）は0へ落とす
+    chase(g.id, i < 0 ? 0 : ladderLever(ladder.length, i, lever), engineGroupKind(g));
+  }
+  const liftKind = (model.engines || []).find((e) => e.lift);
+  chase('lift', THREE.MathUtils.clamp(controls.vtolThrottle || 0, 0, 1),
+    liftKind ? liftKind.kind : 'rocket');
+  return power;
+}
+
+// いま実際に出ているレバー（スプールアップ後）。まだ回していないうちは指示そのまま。
+function engineDeliveredLever(model, state, controls, e) {
+  const power = state && state.enginePower;
+  if (e.lift) {
+    return power && power.lift !== undefined ? power.lift
+      : THREE.MathUtils.clamp(controls.vtolThrottle || 0, 0, 1);
+  }
+  if (power && power[e.group] !== undefined) return power[e.group];
+  const ladder = engineGroupLadder(model, controls);
+  const i = ladder.findIndex((x) => x.id === e.group);
+  return ladderLever(ladder.length, i, THREE.MathUtils.clamp(controls.throttle || 0, 0, 1));
+}
+
 // そのグループを止めているか
 function engineGroupOff(controls, group) {
   const off = controls && controls.engineGroupOff;
@@ -387,8 +458,9 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
   // 垂直離陸用（回転軸が上向き）のエンジンは別のレバーで出す。
   // 前へ進むためのエンジンと同じレバーにすると、離陸のために出力を上げた瞬間に
   // 前へも押されてしまい、ホバリングも垂直着陸もできない。
-  const vtolLever = controls.vtolThrottle || 0;
-  const mainLever = controls.throttle;
+  // レバーではなく**いま実際に出ている出力**を使う（spoolEnginePower）。
+  const vtolLever = engineDeliveredLever(model, state, controls,
+    { lift: true, group: 0, kind: 'rocket' });
   // 逆噴射。ジェットは排気を前へ振り向け、ターボプロップは羽根を裏返して後ろへ引く。
   // どちらも順推力そのままは出ないので reverseFraction ぶんに絞る。
   // **地上で、前へ走っているあいだだけ効かせる**——空中で使えると、自動操縦も手動も
@@ -406,12 +478,13 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
   for (const e of model.engines) {
     // 止めているグループは推力を出さない
     if (engineGroupOff(controls, e.group)) continue;
-    const lever = e.lift ? vtolLever : mainLever;
+    // **グループごとのレバー**（遅いグループから順に上がる。engineGroupLadder）
+    const lever = e.lift ? vtolLever : engineDeliveredLever(model, state, controls, e);
     const scale = engineThrustScale(e, airspeed, rho, lever, vMaxCut);
     // 垂直離陸用エンジンは前後バランス（trimScale）ぶん絞ってある。
     // ここで掛け忘れると、モデル構築時に消したはずの機首振りが物理では復活する。
     const t = e.lift ? e.thrustN * e.trimScale * lever * scale
-      : e.thrustN * (mainLever * scale - (e.canReverse ? revLever * scale : 0));
+      : e.thrustN * (lever * scale - (e.canReverse ? revLever * scale : 0));
     if (e.lift) vtolTotal += t; else thrustTotal += t;
     if (e.kind === 'jet_ab') abTotal = Math.max(abTotal, engineAfterburner(lever));
     out.force.addScaledVector(e.axis, t);
@@ -620,6 +693,8 @@ const _iv = {
 function flightStep(model, state, controls, windWorld, groundHeightAt, dt) {
   const acc = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
 
+  // レバーの指示を、エンジンの応答の速さぶん遅らせて実出力にする
+  spoolEnginePower(model, state, controls, dt);
   accumulateAeroForces(model, state, controls, windWorld, acc);
   accumulateVtolControl(model, state, controls, acc);
   accumulateGroundForces(model, state, controls, groundHeightAt, acc);

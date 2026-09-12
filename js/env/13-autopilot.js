@@ -509,7 +509,22 @@ function apBearingTo(fromX, fromZ, toX, toZ) {
 // 失速速度の何倍か、で測り、それより遅い側ではゲインを上げない（1で頭打ち）
 // ——低速側は実測でいまのままが正しく（練習機の旋回中の高度ずれは平均0m）、
 // むやみに強めれば別のところが壊れる。絞るのは速すぎる側だけでいい。
-const AP_GAIN_REF_STALLS = 4;  // 失速速度の何倍から、舵のゲインを絞り始めるか
+//
+const AP_GAIN_REF_STALLS = 4;
+// **絞るのにも下限が要る**。v²で割り続けると、超高速機では舵がまったく
+// 使えなくなる。実測でサンダーバード1号（巡航4116kt／失速279kt＝14.8倍）の
+// 倍率は0.073で、毎秒24m落ちているのにエレベーターは0.02しか当たらず、
+// 6秒で198m沈んでなお降下中だった——「落ち始めてるのにエレベーターを
+// 効かせようとしない」というのがこれ。
+//
+// 下限は**失速の8倍の機体に与えるぶん**（(4/8)²＝0.25）に置く。それより
+// 速い機体も、そこまでは舵を使える。基準そのものを上げる手もあるが、
+// それだと失速の4〜10倍で飛ぶ機体（Boeing 747は4.2倍）のゲインまで
+// 上がってしまい、マッハ2の試験機で符号反転が41回/18秒に戻った。
+// 実測（下限を入れる前→後、毎秒24m落ちている状態から高度維持）：
+//   6秒後の高度ずれ  -198m → -16m ／ プルプル試験 符号反転 0回→1回/18秒・
+//   最大ピッチ角速度 0.01→0.00 rad/s（暴れは戻っていない）
+const AP_GAIN_FLOOR = 0.25;
 
 function apSurfaceGain(state, spd) {
   if (!spd || !spd.stall) return 1;
@@ -517,7 +532,7 @@ function apSurfaceGain(state, spd) {
   const v = Math.max(state.airspeed, 1);
   if (v <= ref) return 1;
   const r = ref / v;
-  return r * r;
+  return Math.max(r * r, AP_GAIN_FLOOR);
 }
 
 // 指示のピッチ角を保つエレベーター。
@@ -609,19 +624,31 @@ function apElevatorForPitch(state, controls, wantPitchDeg, dt, spd, ap) {
 // apPitchRateLimit と同じで、自動操縦が使っていい回転の速さの上限。
 // ふつうの旋回で使うロール率は実測で 練習機16°/s・747で51°/s・TB2で25°/s
 // なので、69°/sを上限にすれば通常の飛行には触らない。
-const AP_ROLL_RATE_MAX = 1.2; // 自動操縦が使っていいロール率の上限(rad/s ≒ 69°/s)
+// **舵は「角度のずれ」ではなく「ロール率のずれ」で決める**。
+//
+// 角度のずれに比例させると、ずれが大きいうちは舵が振り切れたままになり、
+// 水平に戻ったときには大きなロール率が残っている——そこから初めて逆舵が
+// 入るので、必ず反対側へ行き過ぎる。実測でTB1は30°から戻すと1秒後に-24°
+// （54°の行き過ぎ）、747は-117°まで転がって戻れなかった。
+// 「ロールがかかり始めるとエルロンで余計に回してしまう」というのがこれ。
+//
+// そこで2段にする：角度のずれ → 目標のロール率（上限つき）→ 舵。
+// こうすると、目標のロール率は水平に近づくほど小さくなるので、機体は
+// 行き過ぎる前に自分で回転を止める。舵は常に「いまの回転を目標へ寄せる」
+// 向きにしかならないので、背面をまたいでも反転しない。
+//
+// 符号：この飛行モデルでは **rollDeg と角速度z は符号が逆**（実測：
+// エルロン+1を1秒当てると rollDeg +33.0°／角速度z -48.3°/s）。
+// バンクを減らしたいときは角速度zを正にしたいので、目標率は -err に比例させ、
+// 舵はさらに符号を反転させる。
+const AP_ROLL_RATE_MAX = 1.2;        // 自動操縦が使っていいロール率の上限(rad/s ≒ 69°/s)
+const AP_ROLL_RATE_PER_DEG = 0.024;  // バンクのずれ1°あたりの目標ロール率(rad/s)
+const AP_ROLL_RATE_KP = 2.2;         // ロール率のずれ(rad/s)あたりのエルロン
 function apAileronForBank(state, wantBankDeg, spd) {
   const err = apWrap180(wantBankDeg - state.rollDeg);
+  const wantRate = apClamp(-err * AP_ROLL_RATE_PER_DEG, -AP_ROLL_RATE_MAX, AP_ROLL_RATE_MAX);
   const rate = state.angularVelocity.z;
-  const damp = rate * AP_ROLL_KD;      // 回転を止める向き
-  const angle = err * AP_ROLL_KP;      // 角度を合わせにいく向き
-  // 残っている回転の余裕。いまの回転が上限に近いほど、回転を育てる指示を薄める
-  // （上限に達したら0＝それ以上は回さない）。回転を止める向きなら薄めない。
-  const headroom = apClamp(
-    (AP_ROLL_RATE_MAX - Math.abs(rate)) / (AP_ROLL_RATE_MAX * 0.5), 0, 1);
-  const driving = angle * damp < 0;    // 減衰と逆向き＝いまの回転を育てる向き
-  return apClamp(((driving ? angle * headroom : angle) + damp)
-    * apSurfaceGain(state, spd), -1, 1);
+  return apClamp(-(wantRate - rate) * AP_ROLL_RATE_KP * apSurfaceGain(state, spd), -1, 1);
 }
 
 // --- 中間の段 -----------------------------------------------------------------
@@ -866,7 +893,10 @@ function apBankMaxFor(vMps, stallMps, radiusMax) {
 // （渡さなければ世界の大きさから決めた上限のまま——目的地未設定の高度維持モードなど）。
 // currentVMps（いまの対気速度）を渡すと、実際に使うバンク角の上限をその速度で出す
 // （渡さなければ巡航速度のぶん）。
-function apSpeedSchedule(model, distToGoM, currentVMps, controls) {
+// 直線に入ったかどうかの判定（行って来いしないよう、入る／出るの境目をずらす）
+const AP_STRAIGHT_IN_DEG = 6;    // 目的地の方角とのずれがこれ以下になったら「直線」
+const AP_STRAIGHT_OUT_DEG = 14;  // これを超えたら「まだ曲がる」に戻す
+function apSpeedSchedule(model, distToGoM, currentVMps, controls, straight) {
   const W = model.massKg * 9.80665;
   const S = Math.max(model.wingArea, 0.01);
   const stall = Math.sqrt((2 * W) / (1.225 * S * 1.5));
@@ -915,7 +945,15 @@ function apSpeedSchedule(model, distToGoM, currentVMps, controls) {
     // サンダーバード1号が進入開始2052kt（進入速度362kt）で突っ込み、
     // 何度やり直しても降りられなかった（あの機体の抗力長さは約300km、
     // 巡航から進入速度まで落とすのに1100km要る）。
-    cruise: apClamp(Math.min(vMax * 0.97, turnableV, slowableV), stall * 1.4, vMax),
+    // **もう曲がらなくていいなら、曲がれる速さで頭打ちにしない**。
+    // turnableV は「その半径で曲がれる速さ」なので、旋回を終えて目的地へ
+    // まっすぐ向いているだけの区間でもこれで抑えられていた——どんな機体でも
+    // 巡航が旋回できる速さまでしか出ず、最高速度に届かなかった。
+    // まっすぐ飛ぶだけになったら外す（減速のぶん slowableV は残す——
+    // これを外すと目的地までに進入速度まで落としきれなくなる）。
+    cruise: apClamp(Math.min(vMax * 0.97, straight ? Infinity : turnableV, slowableV),
+      stall * 1.4, vMax),
+    straight: !!straight,
     approach,
     vMax,
     bankMax,  // 巡航中（nav()）が実際に使うバンク角の上限。進入・引き起こしはこれより浅い固定値のまま
@@ -1088,27 +1126,42 @@ function apManageEngineGroups(model, state, controls, ap, dt, env) {
   const slowPhase = AP_SLOW_PHASES.indexOf(ap.phase) >= 0;
   const distM = ap.distanceM === undefined ? Infinity : ap.distanceM;
 
-  const want = {};
-  for (const g of sorted) {
-    if (g === slowest) { want[g.id] = true; continue; }
-    if (slowPhase) { want[g.id] = false; continue; }
-    // そのグループを点ければ出せる速度で、目的地まで何秒かかるか。
-    // 何分もかかるほど遠いときだけ、速いエンジンを使う値打ちがある。
-    const secs = distM / Math.max(g.vMaxMps, 1);
-    const on = !controls.engineGroupOff[g.id];
-    // 入れる／切るの境目をずらす（同じ値だと境目で往復する）
-    want[g.id] = secs > (on ? AP_ENGINE_OFF_S : AP_ENGINE_ON_S);
+  // **点けるのは必ず「遅いほうから順に」**。グループを1本ずつ独立に判断すると、
+  // いちばん速いグループといちばん遅いグループだけが点いて真ん中が抜ける、
+  // という並びが出てしまう（速いグループほど「目的地まで何秒」が短くなるので、
+  // 判定が素直に順番になってくれない）。そこで決めるのは**何段目まで点けるか**
+  // という数ひとつにして、その段までを全部点ける。
+  let wantCount = 1;                    // いちばん遅いグループは常に回す
+  if (!slowPhase) {
+    for (let i = 1; i < sorted.length; i++) {
+      // そのグループを点ければ出せる速度で、目的地まで何秒かかるか。
+      // 何分もかかるほど遠いときだけ、速いエンジンを使う値打ちがある。
+      const secs = distM / Math.max(sorted[i].vMaxMps, 1);
+      const on = !controls.engineGroupOff[sorted[i].id];
+      // 入れる／切るの境目をずらす（同じ値だと境目で往復する）
+      if (secs > (on ? AP_ENGINE_OFF_S : AP_ENGINE_ON_S)) wantCount = i + 1;
+      else break;                       // ここで止める。先だけ点けたりはしない
+    }
   }
 
-  for (const g of sorted) {
-    const on = !controls.engineGroupOff[g.id];
-    if (on === want[g.id]) continue;
-    controls.engineGroupOff[g.id] = !want[g.id];
-    ap.engineHold = AP_ENGINE_HOLD_S;
-    if (env && env.announce) {
-      env.announce(`自動操縦：${g.label} ${want[g.id] ? '始動' : '停止'}`);
+  // いま何段目まで（頭から連続して）点いているか
+  let nowCount = 0;
+  while (nowCount < sorted.length && !controls.engineGroupOff[sorted[nowCount].id]) nowCount++;
+  // 途中に穴があれば埋める（手で切られた場合など）。無ければ1段ずつ動かす。
+  const holes = sorted.slice(0, Math.max(nowCount, 1))
+    .some((g) => controls.engineGroupOff[g.id]);
+  const next = holes ? wantCount
+    : (wantCount > nowCount ? nowCount + 1 : (wantCount < nowCount ? nowCount - 1 : nowCount));
+  if (next === nowCount && !holes) return;
+
+  const before = sorted.map((g) => !controls.engineGroupOff[g.id]);
+  sorted.forEach((g, i) => { controls.engineGroupOff[g.id] = i >= next; });
+  ap.engineHold = AP_ENGINE_HOLD_S;
+  if (env && env.announce) {
+    for (let i = 0; i < sorted.length; i++) {
+      const on = i < next;
+      if (on !== before[i]) env.announce(`自動操縦：${sorted[i].label} ${on ? '始動' : '停止'}`);
     }
-    break;    // 1回に1グループだけ動かす（一度に何本も入り切りしない）
   }
 }
 
@@ -1885,12 +1938,54 @@ function apStepHover(model, state, controls, ap, spd, dt, env) {
   ap.targetAltitudeM = Math.round(ap.hoverAltM);
 }
 
+// 高度維持のとき、**手を離したバンクをそのまま保つ**（水平には戻さない）。
+// 水平へ戻していたので、高度維持を入れると旋回ができなかった——エルロンを
+// 当てているあいだだけ傾き、離した瞬間に翼が起きてしまう。実機の
+// 「ウイングレベラー」ではなく「アティテュードホールド」の振る舞いにする。
+// ほぼ水平のところだけは0へ吸わせる（でないと0.5°の傾きが残り続けて、
+// 何もしていないのにゆっくり向きが変わる）。
+const AP_HOLD_BANK_SNAP_DEG = 2.5;   // これ以下の傾きは水平とみなす
+const AP_HOLD_BANK_MAX_DEG = 60;     // 保つバンクの上限
+// 旋回中は揚力の縦成分が cos(バンク) に減る。高度のずれが出てから追いかけると
+// 必ず沈むので、**要るぶんを先に足す**（前送り）。水平旋回に要る荷重倍数は
+// 1/cos(φ)、そのぶんの迎角＝ピッチを足す。30°バンクで+15%、45°で+41%。
+const AP_TURN_PITCH_COMP = 6;        // (1/cosφ - 1) 1.0あたり何度足すか
+
+// 「手で当てているか」は、**自動操縦が前のコマに書いた値と比べて**判断する。
+// controls.roll が0かどうかで見ると、自動操縦が自分で書いた舵を次のコマで
+// 「手の操作だ」と読んでしまい、そこで制御をやめる（バンクを保つように
+// してから表に出た。水平へ戻していたころは自分の出力もほぼ0だったので
+// たまたま動いていた）。実測で内蔵の練習機は30°で離したあと62.7°まで倒れ、
+// 60秒で386m落ちていた。
+function apHoldBankDeg(state, controls, ap) {
+  const wrote = ap.rollCmdOut === undefined ? 0 : ap.rollCmdOut;
+  if (Math.abs((controls.roll || 0) - wrote) >= 0.02) {
+    // 手で当てているあいだは、いまの傾きを覚えるだけ（操作はそのまま通す）
+    ap.holdBankDeg = apClamp(state.rollDeg, -AP_HOLD_BANK_MAX_DEG, AP_HOLD_BANK_MAX_DEG);
+    ap.rollCmdOut = undefined;
+    return undefined;
+  }
+  if (ap.holdBankDeg === undefined) ap.holdBankDeg = state.rollDeg;
+  if (Math.abs(ap.holdBankDeg) < AP_HOLD_BANK_SNAP_DEG) ap.holdBankDeg = 0;
+  return apClamp(ap.holdBankDeg, -AP_HOLD_BANK_MAX_DEG, AP_HOLD_BANK_MAX_DEG);
+}
+
+// 旋回のためにエレベーターも使う（バンクぶんの前送り）
+function apTurnPitchComp(bankDeg) {
+  const c = Math.cos(apClamp(bankDeg, -80, 80) * Math.PI / 180);
+  return apClamp((1 / Math.max(c, 0.17) - 1) * AP_TURN_PITCH_COMP, 0, 12);
+}
+
 // 高度維持だけ（横と出力は手動のまま）
 function apStepAltHold(model, state, controls, ap, spd, dt) {
+  const hold = apHoldBankDeg(state, controls, ap);
+  if (hold !== undefined) {
+    controls.roll = apAileronForBank(state, hold, spd);
+    ap.rollCmdOut = controls.roll;
+  }
   ap.vsCmd = apVsForAltitude(state, ap.targetAltitudeM, apClimbCap(state, spd), undefined, spd);
-  controls.pitch = apElevatorForPitch(state, controls, apPitchForVs(state, ap.vsCmd), dt, spd, ap);
-  // 翼を水平に戻すのは、手でロールを当てていないときだけ
-  if (Math.abs(controls.roll) < 0.02) controls.roll = apAileronForBank(state, 0, spd);
+  controls.pitch = apElevatorForPitch(state, controls,
+    apPitchForVs(state, ap.vsCmd) + apTurnPitchComp(state.rollDeg), dt, spd, ap);
 }
 
 // 自動操縦を1フレーム進める（環境に依らない本体）
@@ -1903,7 +1998,16 @@ function stepAutopilot(model, state, controls, ap, dt, env) {
   const distToGoM = ap.plan
     ? Math.hypot(ap.plan.faf.x - state.position.x, ap.plan.faf.z - state.position.z)
     : undefined;
-  const spd = apSpeedSchedule(model, distToGoM, state.airspeed, controls);
+  // 目的地へまっすぐ向いているか（旋回の余力を残さなくていいか）
+  if (ap.full && ap.plan) {
+    const bearing = Math.atan2(ap.plan.faf.x - state.position.x,
+      -(ap.plan.faf.z - state.position.z)) * 180 / Math.PI;
+    const err = Math.abs(apWrap180(bearing - state.headingDeg));
+    ap.straightRun = ap.straightRun ? err < AP_STRAIGHT_OUT_DEG : err < AP_STRAIGHT_IN_DEG;
+  } else {
+    ap.straightRun = false;
+  }
+  const spd = apSpeedSchedule(model, distToGoM, state.airspeed, controls, ap.straightRun);
   if (ap.full) apStepFull(model, state, controls, ap, spd, dt, env);
   else if (ap.hover) apStepHover(model, state, controls, ap, spd, dt, env);
   else if (ap.altHold) apStepAltHold(model, state, controls, ap, spd, dt);
