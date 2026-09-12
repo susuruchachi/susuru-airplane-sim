@@ -27,6 +27,10 @@ function defaultPropsForType(type) {
         parentWingId: null,    // どの主翼に属するか（任意）
         spanS: 0.78,           // 翼幅方向の位置（0=付け根 〜 1=翼端）。「後縁1/4に自動配置」で使う
       };
+    case 'viewpoint':
+      // コックピットの目の位置。パーツの回転がそのまま視線の向きになる
+      // （機首が-Z・上が+Y の機体座標で、回転0なら真っ直ぐ前を見る）。
+      return {};
     case 'light':
       return {
         kind: 'nav_red',
@@ -57,6 +61,8 @@ function createPartGizmoMesh(type, role, corners) {
   });
   const mesh = new THREE.Mesh(geo, mat);
   if (type === 'engine') mesh.rotation.z = Math.PI / 2;
+  // 円錐は既定で+Yへ尖っているので、機首の向き（-Z）へ倒す
+  if (type === 'viewpoint') mesh.rotation.x = -Math.PI / 2;
   mesh.userData.isPartGizmo = true;
   return mesh;
 }
@@ -73,6 +79,9 @@ function geometryForPart(type, role) {
       return new THREE.BoxGeometry(0.4, 0.04, 0.18);
     case 'light':
       return new THREE.SphereGeometry(0.07, 12, 12);
+    case 'viewpoint':
+      // 視線の向きが見えるよう、前（-Z）へ尖った円錐にする
+      return new THREE.ConeGeometry(0.12, 0.34, 12);
     default:
       return new THREE.SphereGeometry(0.1, 8, 8);
   }

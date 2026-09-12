@@ -466,6 +466,23 @@ function buildAircraftModel(config) {
   applyVtolTrim(engines);
   const engineTiltIgnored = dropHarmfulEngineTilt(engines);
 
+  // 4b) コックピットの目の位置。Builderで置いていなければ undefined で、
+  //     飛行側は機体の大きさから決めた既定の位置を使う。
+  //     パーツの回転がそのまま視線の向きになる（回転0＝真っ直ぐ前）。
+  const eyePart = parts.find((p) => p.type === 'viewpoint');
+  const eyeLocal = eyePart
+    ? acVec(eyePart.position || {}).applyMatrix4(modelMat).applyQuaternion(qFix).sub(cg)
+    : undefined;
+  let eyeQuat;
+  if (eyePart) {
+    const r = eyePart.rotation || {};
+    eyeQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(
+      THREE.MathUtils.degToRad(r.x || 0),
+      THREE.MathUtils.degToRad(r.y || 0),
+      THREE.MathUtils.degToRad(r.z || 0)
+    )).premultiply(qFix);
+  }
+
   // 5) 着陸脚の接地点。
   //    Builderの「地面にフィット」は脚の先端がモデル座標のY=0に来るように作るので、
   //    脚パーツの真下のY=0が接地点になる。脚が無い機体は境界箱の底から3点を作る。
@@ -529,6 +546,8 @@ function buildAircraftModel(config) {
     engineTiltIgnored,
     // 車輪の高さ（接地点が重心からどれだけ下か）
     gearHeight: contacts.length ? -Math.min(...contacts.map((c) => c.position.y)) : 1,
+    // コックピット視点（重心からの位置と、視線の向き）。置いていなければ undefined
+    eyeLocal, eyeQuat,
   };
 }
 

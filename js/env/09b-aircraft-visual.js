@@ -269,7 +269,19 @@ function buildAircraftLights(config, model, modelParent, bodyParent) {
     mesh.position.set(x, y, z);
     mesh.renderOrder = 4;
     parent.add(mesh);
-    out.push({ mesh, kind, blink: info.blink });
+    // **にじみ（ブルーム）**。空港の灯火と同じ考え方で、画面ぜんぶの後処理では
+    // なく「光らせたいものにだけ薄い光の玉を重ねる」（04b-airport.js の
+    // AIRPORT_GLOW_SCALE の説明を参照）。カメラのほうを向き続ける板なので、
+    // どの角度から見ても丸いにじみになる。
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+      color: info.color, map: navLightGlowTexture(), transparent: true,
+      opacity: 0, depthWrite: false, fog: false, blending: THREE.AdditiveBlending,
+    }));
+    glow.scale.setScalar(NAV_LIGHT_GLOW_SIZE);
+    glow.position.copy(mesh.position);
+    glow.renderOrder = 3;
+    parent.add(glow);
+    out.push({ mesh, glow, kind, blink: info.blink });
   };
 
   if (defs.length) {
@@ -288,6 +300,26 @@ function buildAircraftLights(config, model, modelParent, bodyParent) {
     mk(bodyParent, 'strobe', half, 0.9, 0.1);
   }
   return out;
+}
+
+// 航行灯のにじみ。玉の直径(m)と、芯に対する濃さ。
+const NAV_LIGHT_GLOW_SIZE = 1.6;
+const NAV_LIGHT_GLOW_OPACITY = 0.5;
+let _navGlowTexture = null;
+function navLightGlowTexture() {
+  if (_navGlowTexture) return _navGlowTexture;
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.2, 'rgba(255,255,255,0.55)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  _navGlowTexture = new THREE.CanvasTexture(canvas);
+  return _navGlowTexture;
 }
 
 // Builderの LIGHT_KINDS はこのページには無いので、必要なぶんだけ持つ
@@ -323,5 +355,6 @@ function updateAircraftVisual(ac, controls, state, dt, elapsed) {
     if (l.blink === 'strobe') on = (elapsed % 1.4) < 0.06 ? 1 : 0.02;
     else if (l.blink === 'pulse') on = 0.25 + 0.75 * Math.pow(Math.max(Math.sin(elapsed * 2.2), 0), 6);
     l.mesh.material.opacity = on;
+    if (l.glow) l.glow.material.opacity = on * NAV_LIGHT_GLOW_OPACITY;
   }
 }

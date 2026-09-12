@@ -11,13 +11,26 @@ const FLIGHT_THROTTLE_RATE = 0.55;  // スロットルが0→1まで動く速さ
 
 const FLIGHT_CAMERA_MODES = [
   { id: 'chase', label: '追尾' },
+  // 機体に貼り付いた視点。追尾は「世界の上下」を保つのでロールしても画面は回らないが、
+  // こちらは機体と一緒に回る——宙返りやロールの見え方が実際の機動そのものになる。
+  { id: 'rigid', label: '機体固定' },
   { id: 'cockpit', label: 'コックピット' },
   { id: 'orbit', label: '機体まわり' },
   { id: 'free', label: '自由（環境）' },
 ];
+// 機体固定の視点の位置（機体の大きさに対する割合。後ろ・上）
+const FLIGHT_RIGID_BACK = 1.5;
+const FLIGHT_RIGID_UP = 0.42;
 
 const _flightKeys = Object.create(null);
 let _flightKeyHandlersBound = false;
+
+// いまどの舵を手で当てているか。ホバリング（apStepHover）が「持ち場を置き直すか、
+// 押さえるか」を決めるのに使う。**controls の値では判定できない**——自動操縦が
+// 前のコマに書いた値がばね戻りの出発点になるので、手を離しても数フレームは
+// 残ってしまう。押されているキー／触れているレバーそのものを見る。
+const _flightManual = { pitch: false, roll: false, yaw: false, vtol: false };
+function flightManualAxes() { return _flightManual; }
 
 // キーの割り当て。1つの操作に複数のキーを当てておく（矢印とWASDのどちらでも飛ばせる）
 const FLIGHT_KEYMAP = {
@@ -86,6 +99,7 @@ function handleFlightKeyPress(code) {
       announceFlight(f.controls.spoiler ? 'スポイラー 展開' : 'スポイラー 格納');
       return true;
     }
+    case 'KeyJ': if (typeof toggleHover === 'function') toggleHover(); return true;
     case 'KeyP': f.controls.parkingBrake = !f.controls.parkingBrake; announceFlight(f.controls.parkingBrake ? '駐機ブレーキ' : '駐機ブレーキ解除'); return true;
     case 'KeyT': autoTrimFlight(); return true;
     case 'KeyO': if (typeof toggleAltitudeHold === 'function') toggleAltitudeHold(); return true;
@@ -121,6 +135,13 @@ function updateFlightInput(dt) {
   const touch = (name) => (typeof flightTouchOverride === 'function' ? flightTouchOverride(name) : null);
   const tp = touch('pitch'), tr = touch('roll'), ty = touch('yaw');
 
+  _flightManual.pitch = tp !== null
+    || _keyDown(FLIGHT_KEYMAP.pitchUp) || _keyDown(FLIGHT_KEYMAP.pitchDown);
+  _flightManual.roll = tr !== null
+    || _keyDown(FLIGHT_KEYMAP.rollLeft) || _keyDown(FLIGHT_KEYMAP.rollRight);
+  _flightManual.yaw = ty !== null
+    || _keyDown(FLIGHT_KEYMAP.yawLeft) || _keyDown(FLIGHT_KEYMAP.yawRight);
+
   c.pitch = tp !== null ? tp : axis(c.pitch, FLIGHT_KEYMAP.pitchDown, FLIGHT_KEYMAP.pitchUp);
   c.roll = tr !== null ? tr : axis(c.roll, FLIGHT_KEYMAP.rollLeft, FLIGHT_KEYMAP.rollRight);
   c.yaw = ty !== null ? ty : axis(c.yaw, FLIGHT_KEYMAP.yawLeft, FLIGHT_KEYMAP.yawRight);
@@ -137,6 +158,7 @@ function updateFlightInput(dt) {
   }
 
   const dVtol = (_keyDown(FLIGHT_KEYMAP.vtolUp) ? 1 : 0) - (_keyDown(FLIGHT_KEYMAP.vtolDown) ? 1 : 0);
+  _flightManual.vtol = dVtol !== 0 || touch('vtolLever') !== null;
   if (dVtol !== 0) {
     c.vtolThrottle = THREE.MathUtils.clamp((c.vtolThrottle || 0) + dVtol * FLIGHT_THROTTLE_RATE * dt, 0, 1);
     if (c.vtolThrottle > 0.02) c.parkingBrake = false;
@@ -190,12 +212,32 @@ function updateFlightCamera(dt) {
     return;
   }
 
-  if (f.cameraMode === 'cockpit') {
-    // 重心より少し前・少し上。機体と一緒に回る。
-    const eye = _cam.tmp.set(0, ac.model.gearHeight * 0.35 + 0.55, -size * 0.16).applyQuaternion(st.quaternion);
-    cam.position.copy(st.position).add(eye);
-    const fwd = _cam.want.set(0, 0, -1).applyQuaternion(st.quaternion);
+  if (f.cameraMode === 'rigid') {
+    // 機体に貼り付いて、機体に対して同じ向き・同じ位置を保つ。ばね追従は入れない
+    // （遅れがあると「機体に対して固定」ではなくなる）。
+    const off = _cam.want.set(0, size * FLIGHT_RIGID_UP, size * FLIGHT_RIGID_BACK)
+      .applyQuaternion(st.quaternion);
+    cam.position.copy(st.position).add(off);
     cam.up.copy(_cam.up.set(0, 1, 0).applyQuaternion(st.quaternion));
+    cam.lookAt(st.position);
+    EnvState.orbitControls.target.copy(st.position);
+    return;
+  }
+
+  if (f.cameraMode === 'cockpit') {
+    // 目の位置は**Builderで置いたコックピット視点のパーツ**があればそこ。
+    // 無ければ、重心より少し前・少し上という機体の大きさからの見積もり。
+    const m = ac.model;
+    const eye = m.eyeLocal
+      ? _cam.tmp.copy(m.eyeLocal)
+      : _cam.tmp.set(0, m.gearHeight * 0.35 + 0.55, -size * 0.16);
+    cam.position.copy(st.position).add(eye.applyQuaternion(st.quaternion));
+    // 視線の向きも、パーツの回転があればそれに従う（横を向いた席や、
+    // 少し下を見下ろす配置ができる）。
+    const look = _cam.q.copy(st.quaternion);
+    if (m.eyeQuat) look.multiply(m.eyeQuat);
+    const fwd = _cam.want.set(0, 0, -1).applyQuaternion(look);
+    cam.up.copy(_cam.up.set(0, 1, 0).applyQuaternion(look));
     cam.lookAt(_cam.look.copy(cam.position).add(fwd));
     EnvState.orbitControls.target.copy(cam.position).add(fwd.multiplyScalar(50));
     return;
@@ -254,7 +296,7 @@ function initFlightHUD() {
     <div id="hudHelp">
       W/S・↑↓ ピッチ ／ A/D・←→ ロール ／ Q/E ラダー ／ Shift・Ctrl 出力 ／ X/Z 垂直エンジン ／
       T トリムを取る ／ Y/H トリム微調整 ／ B・Space ブレーキ ／ G 脚 ／ V・C フラップ ／
-      K スポイラー ／ N 逆噴射（地上のみ） ／
+      K スポイラー ／ N 逆噴射（地上のみ） ／ J ホバリング ／
       O 高度維持 ／ I 全自動（離陸〜着陸） ／
       P 駐機 ／ Tab 視点 ／ R 滑走路へ戻る ／ F 飛行終了
     </div>`;

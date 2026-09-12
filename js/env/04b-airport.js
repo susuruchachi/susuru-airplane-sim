@@ -278,6 +278,10 @@ function buildControlTower(x, z) {
   return group;
 }
 
+// 灯火のにじみ（ブルーム）。芯の何倍の大きさで、どれだけ薄く重ねるか。
+const AIRPORT_GLOW_SCALE = 4.5;
+const AIRPORT_GLOW_OPACITY = 0.22;
+
 // 滑走路灯・進入灯・末端灯・誘導路灯を1つのPointsにまとめる（頂点カラーで色を分ける）
 function buildAirportLights(L, W, taxi) {
   const positions = [];
@@ -332,7 +336,25 @@ function buildAirportLights(L, W, taxi) {
     transparent: true, opacity: 0, depthWrite: false, fog: false,
     blending: THREE.AdditiveBlending,
   });
-  return new THREE.Points(geo, mat);
+  const core = new THREE.Points(geo, mat);
+
+  // **にじみ（ブルーム）**。画面ぜんぶに後処理を掛けるやり方（EffectComposer +
+  // UnrealBloomPass）は取らない——(1) CDNから5本も追加で読むことになり、
+  // このページはCDNが落ちたときの代替経路まで用意してある、(2) 明るいところが
+  // 一律ににじむので、**街明かりや水面の照り返しまで光ってしまう**（欲しいのは
+  // 空港の灯火と航行灯だけ）、(3) スマホで毎フレーム全画面を2回描き直す負担が重い。
+  // 同じ頂点をもう一組、大きく薄く加算で重ねるだけで、灯りのまわりの
+  // にじみはそれらしく出る。対象も「重ねた灯りだけ」に限れる。
+  const glowMat = new THREE.PointsMaterial({
+    size: 11 * AIRPORT_GLOW_SCALE, map: _lightSpriteTexture, vertexColors: true,
+    sizeAttenuation: true, transparent: true, opacity: 0, depthWrite: false, fog: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const glow = new THREE.Points(geo, glowMat);
+  glow.renderOrder = -1; // 芯より先に描く（芯が上に乗る）
+  core.add(glow);
+  core.userData.glow = glow;
+  return core;
 }
 
 // 吹き流し。yaw用とpitch用のGroupを分けて、向き（風向）と垂れ具合（風速）を別々に回す
@@ -527,6 +549,8 @@ function updateAirportForDaylight(dayFactor) {
     const target = mode === 'on' ? 1 : (mode === 'off' ? 0 : night);
     entry.lights.material.opacity = target;
     entry.lights.visible = target > 0.01;
+    const glow = entry.lights.userData.glow;
+    if (glow) glow.material.opacity = target * AIRPORT_GLOW_OPACITY;
   }
 }
 

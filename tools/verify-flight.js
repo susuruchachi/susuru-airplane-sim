@@ -47,6 +47,7 @@ const {
   apElevatorForPitch, apSurfaceGain, apBankLimit, apBankAglFactor, apTerrainFloor,
   aircraftDragLengthM, apBankClimbFactor, apVsLimits, apTerrainEscapeVs, apVtolHoverAngles,
   apAileronForBank, apSpoilerCommand, apReverseCommand,
+  aircraftBestClimb, apUpdateTerrainFloor,
 } = ctx;
 
 // 13-autopilot.js / 10-flight.js の同名の定数と同じ値。vmコンテキストの外からは
@@ -3224,6 +3225,200 @@ function autopilotFlight(opts) {
       `ブレーキだけ ${bare.toFixed(0)}m / スポイラー+逆噴射 ${eq.toFixed(0)}m`);
     check(eq < bare * 0.95, '減速装置を使えば着陸滑走が短くなる',
       `${bare.toFixed(0)}m → ${eq.toFixed(0)}m`);
+  }
+}
+
+// (12) 山越えと、その場に留まること。
+//
+// 「まえよりも山をよけきれてない」という報告から。原因は2つあった——
+// (a) 自動操縦が「どの機体も経路角7°で登れる」と決め打ちしていた（推力に
+//     何の関係もない幾何の仮定）。(b) 前方を見る距離が速度だけで決まっていて、
+//     遅い機体は下限の10kmしか見ておらず、そこから登っても間に合わなかった。
+// そして越えられない山は、そもそも登って越えるのではなく**よけて回る**。
+{
+  // (a) 出せる上昇率を、推力と抗力から測れていること
+  const plain = buildAircraftModel(defaultAircraftConfig());
+  const best = aircraftBestClimb(plain);
+  note('内蔵の練習機の上昇率', `計算 ${best.rateMps.toFixed(1)}m/s（${(best.speedMps * KT).toFixed(0)}kt）`
+    + ` / 幾何の7°だけなら ${(Math.max(best.speedMps, 10) * Math.sin(7 * Math.PI / 180)).toFixed(1)}m/s`);
+  check(best.rateMps > 1 && best.rateMps < 8, '練習機の上昇率が実機並み（数m/s）',
+    best.rateMps.toFixed(1) + 'm/s');
+
+  const fast = (() => {
+    const cfg = defaultAircraftConfig();
+    for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 40;
+    return buildAircraftModel(cfg);
+  })();
+  check(aircraftBestClimb(fast).rateMps > best.rateMps * 3,
+    '推力を増やせば上昇率も増える',
+    `${best.rateMps.toFixed(1)} → ${aircraftBestClimb(fast).rateMps.toFixed(1)}m/s`);
+  // 推力重量比が桁外れでも、真上（sinγ=1）を超えない
+  const rocket = (() => {
+    const cfg = defaultAircraftConfig();
+    for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 4000;
+    return buildAircraftModel(cfg);
+  })();
+  const rb = aircraftBestClimb(rocket);
+  check(rb.rateMps <= rb.speedMps + 1e-6, '真上より速くは登らない',
+    `${rb.rateMps.toFixed(0)}m/s（そのときの速度 ${rb.speedMps.toFixed(0)}m/s）`);
+
+  // (b) 上限が「幾何の7°」と「実力」の小さいほう
+  const spdPlain = apSpeedSchedule(plain);
+  const st = createFlightState();
+  st.position.set(0, 1000, 0); st.altitudeM = 1000; st.airspeed = 70;
+  const geoOnly = apVsLimits(st).up;
+  const withModel = apVsLimits(st, spdPlain).up;
+  note('昇降率の上限', `幾何だけ ${geoOnly.toFixed(1)}m/s → 実力を見て ${withModel.toFixed(1)}m/s`);
+  check(withModel < geoOnly, '出せない上昇率を指示しない',
+    `${geoOnly.toFixed(1)} → ${withModel.toFixed(1)}m/s`);
+  check(withModel > 0, '上限が0にはならない', withModel.toFixed(2));
+
+  // (c) 前方を見る距離が、登るのに要る距離で決まること
+  const ridge = (x) => ((x > 25000 && x < 35000) ? 2500 : 0);
+  const gh = (x) => ridge(x);
+  const far = createFlightState();
+  far.position.set(0, 1500, 0); far.altitudeM = 1500; far.airspeed = 70;
+  far.velocity.set(70, 0, 0); far.headingDeg = 90;
+  refreshFlightReadouts(plain, far, gh);
+  far.position.set(0, 1500, 0); far.altitudeM = 1500;
+  far.airspeed = 70; far.groundSpeed = 70; far.headingDeg = 90;
+  const tf = apTerrainFloor(far, { groundHeightAt: gh }, 300, spdPlain);
+  note('25km先の標高2500mの尾根', `見た距離 ${(tf.lookM / 1000).toFixed(0)}km`
+    + ` / いま要る高度 ${tf.floorM < -1e5 ? '—' : tf.floorM.toFixed(0) + 'm'}`);
+  check(tf.lookM > 25000, '登るのに要る距離まで先を見る', (tf.lookM / 1000).toFixed(0) + 'km');
+  check(tf.floorM > 1500, '25km先の尾根でも、いまから登れと言う', tf.floorM.toFixed(0) + 'm');
+
+  // (d) 目的地より先は見ない（着陸する空港の向こうの山を越えようとしない）
+  const clipped = apTerrainFloor(far, { groundHeightAt: gh }, 300, spdPlain, 10000);
+  check(clipped.floorM < 1000, '目的地より先の山は数えない',
+    `床 ${clipped.floorM < -1e5 ? '—' : clipped.floorM.toFixed(0) + 'm'}（区切らないと ${tf.floorM.toFixed(0)}m）`);
+
+  // (e) 越えられない山は、よけて回る。
+  //     経路の40km先に半径12km・高さ3000mの単独峰。まわりは平地なので、
+  //     練習機（上昇率3m/s台）でもよければ通れる。
+  {
+    const hill = (x, z) => {
+      const d = Math.hypot(x - 40000, z);
+      if (d >= 12000) return 0;
+      const t = Math.cos((d / 12000) * Math.PI / 2);
+      return 3000 * t * t;
+    };
+    const m = buildAircraftModel(defaultAircraftConfig());
+    const st2 = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(m, st2, 0, 0, 90, hill);
+    settleAircraftOnGround(m, st2, hill);
+    const ap = createAutopilotState();
+    ap.full = true; ap.targetAltitudeM = 1500; ap.destAirportId = 'DST';
+    ap.phase = 'takeoff'; ap.takeoffHeadingDeg = 90;
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 100000, z: 0, elevationM: 0 },
+      { runwayLengthM: 3000, headingDeg: 90 }, 0);
+    let t = 0, minAgl = Infinity, maxDodge = 0;
+    for (; t < 6000; t += 1 / 60) {
+      stepAutopilot(m, st2, c, ap, 1 / 60, { groundHeightAt: hill });
+      advanceFlight(m, st2, c, noWind, hill, 1 / 60);
+      maxDodge = Math.max(maxDodge, Math.abs(ap.terrainDodgeDeg || 0));
+      if (!st2.onGround && hill(st2.position.x, st2.position.z) > 200) {
+        minAgl = Math.min(minAgl, st2.altitudeAglM);
+      }
+      if (st2.crashed || ap.phase === 'done') break;
+    }
+    note('40km先の単独峰（半径12km・高さ3000m）',
+      `山の上の最低対地 ${minAgl === Infinity ? '通らなかった' : minAgl.toFixed(0) + 'm'}`
+      + ` / よけた角度 最大${maxDodge.toFixed(0)}°（直す前は対地-1m）`);
+    check(!st2.crashed, '越えられない山でも墜ちない', st2.crashed ? '墜落' : 'ok');
+    check(minAgl === Infinity || minAgl > 100, '越えられない山は、よけるか十分上を通る',
+      minAgl === Infinity ? '通らなかった' : minAgl.toFixed(0) + 'm');
+  }
+
+  // (f) 空港のそばではよけない（進入は滑走路へ向かうしかない）
+  {
+    const ap2 = createAutopilotState();
+    const st3 = createFlightState();
+    st3.position.set(0, 200, 0); st3.altitudeM = 200; st3.airspeed = 80;
+    st3.velocity.set(80, 0, 0); st3.headingDeg = 90; st3.groundSpeed = 80;
+    // 東（機首の向き）だけ越えられない壁。北や南へ振ればよけられる
+    const wall = (x, z) => (x > 3000 && Math.abs(z) < 30000 ? 3000 : 0);
+    const near = apUpdateTerrainFloor(st3, ap2, { groundHeightAt: wall }, 1, 5000, spdPlain, 90);
+    const ap3 = createAutopilotState();
+    const farAway = apUpdateTerrainFloor(st3, ap3, { groundHeightAt: wall }, 1, 80000, spdPlain, 90);
+    note('よける条件', `目的地まで5km:${near.dodgeDeg}° / 80km:${farAway.dodgeDeg}°`);
+    check(near.dodgeDeg === 0, '空港のそばではよけない（進入を捨てない）', String(near.dodgeDeg));
+    check(Math.abs(farAway.dodgeDeg) > 0, '遠いうちはよける', String(farAway.dodgeDeg));
+  }
+
+  // (g) ホバリング。垂直離着陸機がその場に留まれること
+  {
+    const cfg = defaultAircraftConfig();
+    // 上向きエンジンを4基足して、垂直離着陸機にする
+    for (const [i, x, z] of [[0, -3, -2], [1, 3, -2], [2, -3, 2], [3, 3, 2]]) {
+      cfg.parts.push({
+        id: 'lift' + i, type: 'engine', name: 'リフト' + i,
+        position: { x, y: 1.2, z }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+        props: { thrustKgf: 500, spinAxis: 'y' },
+      });
+    }
+    const m = buildAircraftModel(cfg);
+    check(m.hasVtol, 'テスト機に上向きエンジンが付いている', String(m.hasVtol));
+    const st4 = createFlightState(), c = createFlightControls();
+    st4.position.set(0, 400, 0); st4.altitudeM = 400;
+    st4.velocity.set(0, 0, -30);
+    c.parkingBrake = false; c.throttle = 0.4; c.vtolThrottle = 0.3;
+    refreshFlightReadouts(m, st4, flatGround);
+    const ap = createAutopilotState();
+    ap.hover = true;
+    ap.hoverX = 0; ap.hoverZ = 0; ap.hoverAltM = 400; ap.hoverHeadingDeg = st4.headingDeg;
+    const env = { manual: {} };
+    let t = 0;
+    for (; t < 300; t += 1 / 60) {
+      stepAutopilot(m, st4, c, ap, 1 / 60, env);
+      advanceFlight(m, st4, c, noWind, flatGround, 1 / 60);
+      if (st4.crashed) break;
+    }
+    const drift = Math.hypot(st4.position.x - ap.hoverX, st4.position.z - ap.hoverZ);
+    note('ホバリング（30m/sで入って300秒）',
+      `高度のずれ ${(st4.altitudeM - ap.hoverAltM).toFixed(1)}m / 持ち場から ${drift.toFixed(0)}m`
+      + ` / 対地速度 ${(st4.groundSpeed * KT).toFixed(1)}kt`);
+    check(!st4.crashed, 'ホバリング中に墜ちない', st4.crashed ? '墜落' : 'ok');
+    check(Math.abs(st4.altitudeM - ap.hoverAltM) < 20, 'ホバリングで高さを保つ',
+      (st4.altitudeM - ap.hoverAltM).toFixed(1) + 'm');
+    check(st4.groundSpeed * KT < 15, 'ホバリングで止まる',
+      (st4.groundSpeed * KT).toFixed(1) + 'kt');
+    check(drift < 400, '押した場所のそばに留まる', drift.toFixed(0) + 'm');
+    // 舵を当てているあいだは持ち場を置き直す（押さえつけない）
+    const before = { x: ap.hoverX, z: ap.hoverZ };
+    env.manual = { pitch: true };
+    st4.position.x += 100;
+    stepAutopilot(m, st4, c, ap, 1 / 60, env);
+    check(Math.abs(ap.hoverX - before.x) > 50, '舵を当てたら、離したところが新しい持ち場になる',
+      `${before.x.toFixed(0)} → ${ap.hoverX.toFixed(0)}`);
+  }
+
+  // (h) 引き起こしで機首上げが止まらなくなる、の作り直し。
+  //     apClamp は下限が優先なので、「いまの姿勢-1°」を下限にすると
+  //     上限（10°）を追い越して頭打ちが効かなくなっていた。
+  {
+    const m = buildAircraftModel(defaultAircraftConfig());
+    const spd = apSpeedSchedule(m);
+    const st5 = createFlightState(), c = createFlightControls();
+    st5.position.set(0, 30, 0); st5.altitudeM = 30; st5.altitudeAglM = 30;
+    st5.airspeed = 60; st5.groundSpeed = 60;
+    st5.quaternion.setFromEuler(new THREE.Euler(THREE.MathUtils.degToRad(25), 0, 0, 'YXZ'));
+    refreshFlightReadouts(m, st5, flatGround);
+    const ap = createAutopilotState();
+    ap.full = true; ap.phase = 'flare'; ap.destAirportId = 'DST';
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 200, z: 0, elevationM: 0 },
+      { runwayLengthM: 3000, headingDeg: 90 }, 0);
+    // **1コマでは分からない**。指示は姿勢から少しずつしか動かせない（変化率の
+    // 制限）ので、直っているかどうかは「このあと上限へ降りてくるか、それとも
+    // 姿勢と一緒に上がっていくか」で決まる。5秒ぶん回して見る。
+    const first = [];
+    for (let i = 0; i < 300; i++) {
+      stepAutopilot(m, st5, c, ap, 1 / 60, {});
+      if (i % 60 === 0) first.push(ap.pitchCmdDeg.toFixed(1));
+    }
+    note('引き起こし：姿勢25°から5秒', `指示ピッチ ${first.join('° → ')}°`);
+    check(ap.pitchCmdDeg <= 10.001, '引き起こしの指示が上限（10°）まで降りてくる',
+      ap.pitchCmdDeg.toFixed(1) + '°');
   }
 }
 }

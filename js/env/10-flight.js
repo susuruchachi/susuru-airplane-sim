@@ -639,6 +639,55 @@ function trimBisect(f, lo, hi) {
 // 自動操縦はこれで「目的地までに進入速度まで落としきれるか」を判断する。
 // 実測すると機体差は桁で違う——Boeing 747 が約15km、TB1（翼73m²に140t）は
 // 約300kmで、TB1 は巡航のまま突っ込むと1000km走っても進入速度まで落ちない。
+// 前へ進むエンジンが、その速度・高度で出せる推力の合計(N)。
+// 推力の項（accumulateAeroForces）と同じ式。
+function maxForwardThrustAt(model, speedMps, altitudeM) {
+  const ratio = THREE.MathUtils.clamp(speedMps / Math.max(model.vMaxMps, 1), 0, 1.4);
+  const propFactor = Math.max(1 - AERO_DEFAULTS.propDecay * ratio, 0.05);
+  const scale = propFactor * (airDensityAt(altitudeM) / FLIGHT_RHO0);
+  let t = 0;
+  for (const e of model.engines) {
+    if (e.lift) continue;
+    t += e.thrustN * Math.max(-e.axis.z, 0);
+  }
+  return t * scale;
+}
+
+// この機体が**実際に出せる**上昇率(m/s)と、そのときの速度。
+//
+// 自動操縦は長らく「どの機体も経路角7°で登れる」と決め打ちしていた
+// （apVsLimits）。これは推力に何の関係もない幾何の仮定で、内蔵の練習機では
+// 実測3.9m/sしか出ないところを8.5m/sと見積もっていた。倍以上の過大評価は
+// 2つの壊れ方を生む——(1) 出せない上昇率を指示するので速度が落ち、
+// 落ちると apClimbCap が指示を切り下げ、速度が戻るとまた指示が上がる、という
+// 10秒周期の往復になる（実測でピッチが3°⇔18°、上昇率が1⇔8m/sで振れていた）。
+// (2) 地形回避が「このくらいで登れるはず」と見積もって登りはじめを遅らせ、
+// **山に間に合わない**（実測で標高2500mの尾根に対地2mでぶつかっていた）。
+//
+// 定常上昇は sinγ = (推力 - 抗力)/重さ。水平飛行の釣り合い（solveLevelTrim）が
+// 返すスロットルは「その速度で抗力とつり合う量」なので、残り(1-スロットル)ぶんが
+// 余剰推力になる。速度をふって、いちばん登れるところを採る。
+function aircraftBestClimb(model) {
+  if (model._bestClimb) return model._bestClimb;
+  const stall = Math.sqrt((2 * model.massKg * FLIGHT_GRAVITY)
+    / (1.225 * Math.max(model.wingArea, 0.01) * 1.5));
+  const weight = model.massKg * FLIGHT_GRAVITY;
+  const best = { rateMps: 0, speedMps: stall * 1.3 };
+  for (let k = 1.15; k < 4.01; k += 0.15) {
+    const v = stall * k;
+    const trim = solveLevelTrim(model, v, 0);
+    if (!trim.ok) continue; // その速度では水平飛行そのものが釣り合わない
+    const excess = maxForwardThrustAt(model, v, 0) * (1 - trim.throttle);
+    // sinγ は1を超えない（＝真上）。推力重量比が桁外れなフィクション機は
+    // 余剰推力が重さの30倍あったりするので、ここを抑えないと
+    // 「毎秒6000m登れる」という答えが出る。
+    const rate = v * Math.min(Math.max(excess, 0) / weight, 1);
+    if (rate > best.rateMps) { best.rateMps = rate; best.speedMps = v; }
+  }
+  model._bestClimb = best;
+  return best;
+}
+
 function aircraftDragLengthM(model) {
   if (model._dragLengthM > 0) return model._dragLengthM;
   const s = _trimScratch;
@@ -868,6 +917,7 @@ if (typeof module !== 'undefined' && module.exports) {
     refreshFlightReadouts, placeAircraftOnGround, settleAircraftOnGround,
     airDensityAt, liftCoefficient,
     solveLevelTrim, trimToCurrentFlight, vtolClimbSpeedLimit, aircraftDragLengthM,
+    aircraftBestClimb, maxForwardThrustAt,
     FLIGHT_SUBSTEP, GEAR_SQUASH_M,
   };
 }

@@ -616,6 +616,20 @@ function renderTypeSpecificFields(part) {
 
   } else if (part.type === 'landing_gear') {
     renderLandingGearFields(container, part);
+
+  } else if (part.type === 'viewpoint') {
+    container.innerHTML = `
+      <div class="subgroup-title">コックピット視点</div>
+      <div class="hint">飛行画面の「コックピット」視点で、ここが目の位置になります。
+        上の「位置」をギズモか数値で動かして、操縦席に合わせてください。
+        「回転」は視線の向きです（0なら真っ直ぐ前。X を下げると見下ろし、
+        Y を回すと横向きの席になります）。</div>
+      <div class="hint">置いていない機体は、これまでどおり機体の大きさから
+        見積もった位置（重心の少し前・少し上）を使います。1機に1つで足ります。</div>
+      <div class="divider"></div>
+      <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
+    `;
+    document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
   }
 }
 
