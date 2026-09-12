@@ -178,6 +178,10 @@ function updateFlightInput(dt) {
 const _cam = {
   want: new THREE.Vector3(), look: new THREE.Vector3(), tmp: new THREE.Vector3(),
   up: new THREE.Vector3(), q: new THREE.Quaternion(),
+  // 機体固定の視点：機体から見たカメラの位置と、前のコマの機体の位置・姿勢。
+  // ドラッグで回した角度を「機体に対する角度」として持ち越すのに使う。
+  rigid: new THREE.Vector3(), rigidPrevPos: new THREE.Vector3(),
+  rigidPrevQ: new THREE.Quaternion(), rigidReady: false,
 };
 
 function cycleFlightCamera() {
@@ -189,8 +193,15 @@ function cycleFlightCamera() {
 function setFlightCamera(id) {
   const f = EnvState.flight;
   f.cameraMode = id;
-  // 「自由」と「機体まわり」だけ OrbitControls に操作を渡す
-  EnvState.orbitControls.enabled = (id === 'free' || id === 'orbit');
+  // 「自由」「機体まわり」「機体固定」は OrbitControls に操作を渡す。
+  // 機体固定はドラッグで見る角度を変えられるが、変えた角度は**機体に対して**
+  // 覚える（updateFlightCamera を参照）。
+  EnvState.orbitControls.enabled = (id === 'free' || id === 'orbit' || id === 'rigid');
+  // 機体固定だけは真下や真上からも見せる。他の視点は地面の下を覗き込みにくく
+  // するために浅い角度で止めてある。
+  EnvState.orbitControls.maxPolarAngle = id === 'rigid' ? Math.PI : Math.PI * 0.495;
+  // 入り直したら、いつもの「斜め後ろ上から」に戻す
+  if (id === 'rigid') _cam.rigidReady = false;
   const sel = document.getElementById('envFlightCamera');
   if (sel && sel.value !== id) sel.value = id;
   announceFlight('視点：' + (FLIGHT_CAMERA_MODES.find((m) => m.id === id) || {}).label);
@@ -215,11 +226,31 @@ function updateFlightCamera(dt) {
   if (f.cameraMode === 'rigid') {
     // 機体に貼り付いて、機体に対して同じ向き・同じ位置を保つ。ばね追従は入れない
     // （遅れがあると「機体に対して固定」ではなくなる）。
-    const off = _cam.want.set(0, size * FLIGHT_RIGID_UP, size * FLIGHT_RIGID_BACK)
-      .applyQuaternion(st.quaternion);
-    cam.position.copy(st.position).add(off);
+    //
+    // **見る角度はドラッグで変えられる**。ただし変えた角度は世界ではなく
+    // **機体に対して**覚える——そうしないと、せっかく選んだ「右斜め前から」が
+    // 機体が向きを変えるたびに別の角度になってしまう。
+    //
+    // やり方：このコマの頭で OrbitControls が（前のコマの機体位置を中心に）
+    // カメラを動かしている。その結果を**前のコマの姿勢**で機体座標へ畳み戻せば、
+    // ドラッグぶんがそのまま「機体から見たカメラの位置」の変化になる。
+    // あとはそれを**今のコマの姿勢**で世界へ戻せばいい。
+    if (!_cam.rigidReady) {
+      _cam.rigid.set(0, size * FLIGHT_RIGID_UP, size * FLIGHT_RIGID_BACK);
+      _cam.rigidReady = true;
+    } else {
+      _cam.rigid.copy(cam.position).sub(_cam.rigidPrevPos)
+        .applyQuaternion(_cam.q.copy(_cam.rigidPrevQ).invert());
+      // 中心に吸い込まれて向きを見失わないよう、近すぎるところで止める
+      const min = size * 0.15;
+      if (_cam.rigid.lengthSq() < min * min) _cam.rigid.setLength(min);
+    }
+    cam.position.copy(st.position)
+      .add(_cam.want.copy(_cam.rigid).applyQuaternion(st.quaternion));
     cam.up.copy(_cam.up.set(0, 1, 0).applyQuaternion(st.quaternion));
     cam.lookAt(st.position);
+    _cam.rigidPrevPos.copy(st.position);
+    _cam.rigidPrevQ.copy(st.quaternion);
     EnvState.orbitControls.target.copy(st.position);
     return;
   }

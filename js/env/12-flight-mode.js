@@ -109,6 +109,9 @@ async function toggleFlightMode() {
     if (typeof stopAutopilot === 'function') stopAutopilot(null);
     if (f.aircraft) f.aircraft.group.visible = false;
     EnvState.orbitControls.enabled = true;
+    // 「機体固定」の視点は真下からも覗けるように上下の制限を外してある。
+    // 環境プレビューへ戻るときは、地面の下を覗き込みにくい元の制限へ戻す。
+    EnvState.orbitControls.maxPolarAngle = Math.PI * 0.495;
     document.body.classList.remove('flying');
     releaseFlightTouch(); // 指を置いたまま飛行を抜けても舵が残らないように
     updateFlightPanelReadout();
