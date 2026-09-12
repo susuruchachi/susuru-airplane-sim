@@ -531,6 +531,8 @@ const PLUME_LOOK = {
 };
 // アフターバーナーの炎（AB付きジェットが9割より上で出す）
 const PLUME_AB = { len: 12, core: 0xfff0d0, halo: 0xff7a2a, alpha: 0.6, glow: 0xff8a3a };
+// 陽炎の濃さ。ほとんど透明——「言われれば気付く」くらいで止める。
+const PLUME_SHIMMER_ALPHA = 0.07;
 // 炎のゆらぎ（長さの振れ幅と、1秒あたりの速さ）
 const PLUME_FLICKER = 0.14;
 const PLUME_FLICKER_HZ = 17;
@@ -584,12 +586,14 @@ function heatShimmerTexture() {
   return tex;
 }
 
-// 陽炎は**明るくなる帯と暗くなる帯の両方**が要る。片方だけだと、ただ白く
-// かぶった円錐にしか見えない（光が曲がって見える、という感じにならない）。
-// 加算合成の1枚と乗算合成の1枚を、少しずれた速さで流して重ねる。
-// これは本当の屈折ではなく、屈折らしく見せるための模様（画面を読み直す
-// 後処理を入れずに済ませるため）。
-function plumeShimmer(multiply) {
+// 陽炎。**ほとんど透明な1枚だけ**にしてある。
+//
+// はじめは「明るくなる帯（加算）と暗くなる帯（乗算）の2枚を重ねれば、光が
+// 曲がって見える感じが出る」と考えて2枚にしていたが、実際に出してみると
+// 灰色の帯が機体の後ろにまとわりついて**気持ちの悪い見た目**になった。
+// 屈折を本当に描くには画面をもう一度読み直す後処理が要り、そこまでは入れない。
+// それなら、あるかないか分からないくらいの淡い揺らぎに留めるほうが素直。
+function plumeShimmer() {
   const geo = new THREE.ConeGeometry(1, 1, 14, 1, true);
   geo.translate(0, 0.5, 0);
   const tex = heatShimmerTexture().clone();
@@ -597,10 +601,9 @@ function plumeShimmer(multiply) {
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(1, 3);
   const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-    map: tex, color: multiply ? 0x7a8590 : 0xffffff,
+    map: tex, color: 0xffffff,
     transparent: true, opacity: 0, depthWrite: false,
-    blending: multiply ? THREE.MultiplyBlending : THREE.AdditiveBlending,
-    side: THREE.DoubleSide, fog: false,
+    blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
   }));
   mesh.renderOrder = 3;
   mesh.visible = false;
@@ -642,10 +645,7 @@ function buildEnginePlumes(model, parent) {
       return mesh;
     };
 
-    if (look.shimmer > 0) {
-      entry.shimmerAdd = place(plumeShimmer(false), 1.1);
-      entry.shimmerMul = place(plumeShimmer(true), 1.15);
-    }
+    if (look.shimmer > 0) entry.shimmerAdd = place(plumeShimmer(), 1.1);
     if (look.flame) {
       entry.halo = place(plumeCone(look.flame.halo, look.flame.alpha * 0.55), 1.55);
       entry.core = place(plumeCone(look.flame.core, look.flame.alpha), 1.0);
@@ -689,15 +689,13 @@ function updateEnginePlumes(ac, controls, state, dt, elapsed) {
       c.scale.set(p.radius * c.userData.radScale, len, p.radius * c.userData.radScale);
     };
 
-    // 陽炎。アイドルでも少し出て、出力を上げるほど長く濃くなる。
+    // 陽炎。アイドルでも少し出て、出力を上げるほど長くなる。
+    // 濃さは**ほとんど透明**のまま（PLUME_SHIMMER_ALPHA）。
     if (p.shimmerAdd) {
       const heat = off ? 0 : (0.18 + 0.82 * lever);
       const len = p.radius * p.look.shimmer * p.lenScale * heat;
-      // 模様を後ろへ流す（速さを少し変えると、2枚が干渉して揺らいで見える）
       p.shimmerAdd.userData.tex.offset.y = (elapsed * -1.7) % 1;
-      p.shimmerMul.userData.tex.offset.y = (elapsed * -2.3) % 1;
-      setCone(p.shimmerAdd, len, heat * 0.22);
-      setCone(p.shimmerMul, len * 1.05, heat * 0.55);
+      setCone(p.shimmerAdd, len, heat * PLUME_SHIMMER_ALPHA);
     }
     // ふだんの炎（ロケット）
     if (p.core) {

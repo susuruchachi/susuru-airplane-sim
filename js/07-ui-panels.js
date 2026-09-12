@@ -389,16 +389,16 @@ function renderTypeSpecificFields(part) {
         </select>
       </div>
       <div class="hint">プロペラは速度が上がるほど推力が落ち、空気が薄いと弱ります。ジェットは速度による落ちがゆるく、薄い空気にもプロペラより強い。アフターバーナー付きは出力レバーを9割より上げたときだけ推力が5割増しになり、炎を吹きます。ロケットは空気を使わないので、速度にも高度にもまったく左右されません。<br>見た目は、プロペラは何も出さず、ジェットはノズル後方の<b>陽炎</b>だけ（炎は出ません）。アフターバーナー付きは9割から上で炎、ロケットは炎と煙を吹きます。</div>
-      ${part.props.engineKind === 'prop' ? '' : `
       <div class="field">
-        <label>炎・排気の太さ（m／0で自動）</label>
+        <label>ノズルの直径（m／0で自動）</label>
         <input type="text" inputmode="decimal" id="fPlumeWidth" value="${part.props.plumeWidth || 0}">
       </div>
+      <div class="hint">ここで決めた太さの筒が画面のエンジンの形になり、飛行中の炎・排気もこの太さで出ます。<b>機体モデルのエンジンの大きさに合わせてください</b>。0なら推力から自動（いまは約 ${engineNozzleDiameter(part.props).toFixed(2)} m。実機のノズルは推力の平方根におよそ比例するので、それに合わせています）。<br>筒の<b>太いほうの円が噴射口</b>で、その向きがそのまま噴射の向きです。</div>
+      ${part.props.engineKind === 'prop' ? '' : `
       <div class="field">
         <label>炎・排気の長さ（倍率）</label>
         <input type="text" inputmode="decimal" id="fPlumeLength" value="${part.props.plumeLength === undefined ? 1 : part.props.plumeLength}">
       </div>
-      <div class="hint">太さはノズルの直径です。0なら推力から自動で決めます（実機のノズルは推力の平方根におよそ比例するので、それに合わせています）。太すぎる・細すぎると感じたらここで直してください。</div>
       `}
       <div class="field">
         <label>回転軸（プロペラ/ファン）</label>
@@ -447,9 +447,15 @@ function renderTypeSpecificFields(part) {
     `;
     document.getElementById('fThrust').addEventListener('change', (e) => {
       part.props.thrustKgf = parseFloat(e.target.value) || 0;
+      // 直径が「自動」なら推力から決まるので、形も作り直す
+      if (!(part.props.plumeWidth > 0)) updateEngineGizmoShape(part);
+      renderInspector();
+      renderModelSettingsPanel();
     });
     document.getElementById('fSpinAxis').addEventListener('change', (e) => {
       part.props.spinAxis = e.target.value;
+      // 筒の向き（＝噴射の向き）を合わせ直す
+      updateEngineGizmoShape(part);
       // 回転軸を変えると、出す欄が変わる（リフトエンジンにはグループの欄が無く、
       // 代わりに前後バランスの欄が出る）。選び直さないと切り替わらなかった。
       renderInspector();
@@ -466,6 +472,8 @@ function renderTypeSpecificFields(part) {
     const elPw = document.getElementById('fPlumeWidth');
     if (elPw) elPw.addEventListener('change', (e) => {
       part.props.plumeWidth = Math.max(parseFloat(e.target.value) || 0, 0);
+      updateEngineGizmoShape(part);
+      renderInspector();
     });
     const elPl = document.getElementById('fPlumeLength');
     if (elPl) elPl.addEventListener('change', (e) => {

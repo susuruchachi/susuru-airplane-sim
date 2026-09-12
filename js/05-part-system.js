@@ -64,26 +64,80 @@ function defaultPropsForType(type) {
   }
 }
 
-function createPartGizmoMesh(type, role, corners) {
+function createPartGizmoMesh(type, role, corners, props) {
   const color = new THREE.Color(PART_TYPE_COLORS[type]);
-  const geo = (type === 'wing' && corners) ? buildWingGeometryFromCorners(corners, role) : geometryForPart(type, role);
+  const geo = (type === 'wing' && corners) ? buildWingGeometryFromCorners(corners, role) : geometryForPart(type, role, props);
   const mat = new THREE.MeshStandardMaterial({
     color, emissive: color, emissiveIntensity: type === 'light' ? 0.9 : 0.25,
     roughness: 0.4, metalness: 0.2, transparent: true, opacity: 0.92,
     side: type === 'wing' ? THREE.DoubleSide : THREE.FrontSide,
   });
   const mesh = new THREE.Mesh(geo, mat);
-  if (type === 'engine') mesh.rotation.z = Math.PI / 2;
+  if (type === 'engine') applyEngineGizmoOrientation(mesh, props && props.spinAxis);
   // 円錐は既定で+Yへ尖っているので、機首の向き（-Z）へ倒す
   if (type === 'viewpoint') mesh.rotation.x = -Math.PI / 2;
   mesh.userData.isPartGizmo = true;
   return mesh;
 }
 
-function geometryForPart(type, role) {
+// エンジンのノズル（排気口）の直径(m)。
+// Builderで入れていればその値、0なら推力から決める。
+//
+// 実機のノズルは推力の平方根におよそ比例する——CFM56（110kN）でファン直径1.7m、
+// GE90（510kN）で3.6m。d ≒ 2·0.00256·√(推力N) がその2点を通る。
+// 飛行側の既定（09b-aircraft-visual.js の enginePlumeRadius）と同じ式で、
+// **ここで見ている太さの筒が、そのまま炎・排気の太さになる**。
+// 推力が桁外れな架空の機体（推力40万kNのロケットなど）では、この式のままだと
+// 直径103mになって機体が見えなくなる。機体の大きさに対して極端にならないよう、
+// いちばん長い辺の1.5〜12%に収める（飛行側も翼幅で同じように抑えている）。
+function engineNozzleDiameter(props) {
+  const w = props && props.plumeWidth;
+  if (w > 0) return w;
+  const kgf = Math.max((props && props.thrustKgf) || 0, 0);
+  let d = Math.max(2 * 0.00256 * Math.sqrt(kgf * 9.80665), 0.12);
+  const box = typeof computeModelMeshBoundingBox === 'function' ? computeModelMeshBoundingBox() : null;
+  if (box) {
+    const size = box.getSize(new THREE.Vector3());
+    const unit = Math.max(size.x, size.y, size.z);
+    if (unit > 0.2) d = Math.min(Math.max(d, unit * 0.015), unit * 0.12);
+  }
+  return d;
+}
+
+// エンジンのギズモを、**噴射の向き**に合わせて倒す。
+//
+// 円柱は既定で軸が+Y、**大きいほうの円（＝ノズル）が-Y側**にある。
+// 噴射は推力と逆向きなので、-Y を噴射の向きへ向ける
+// （＝ +Y を推力の向きへ向ける）。推力の向きは 09-aircraft.js と同じ約束で、
+// spinAxis が 'z' なら -Z（機首の向き）、'x' なら +X、'y' なら +Y。
+//
+// 以前は spinAxis に関わらず rotation.z = 90° で倒していたので、既定の
+// 「Z軸（前後方向）」のエンジンでも筒が左右を向いていて、**画面で見ている向きと
+// 実際に噴射する向きが食い違っていた**。
+function applyEngineGizmoOrientation(mesh, spinAxis) {
+  mesh.rotation.set(0, 0, 0);
+  if (spinAxis === 'y') return;                     // 上向き：+Yが推力、ノズルは下。そのまま
+  if (spinAxis === 'x') { mesh.rotation.z = -Math.PI / 2; return; }   // +Y → +X
+  mesh.rotation.x = -Math.PI / 2;                   // 既定：+Y → -Z（機首の向き）
+}
+
+// 回転軸・推力・ノズル直径を変えたとき、ギズモの形と向きを作り直す
+function updateEngineGizmoShape(part) {
+  if (part.type !== 'engine' || !part.gizmo) return;
+  part.gizmo.geometry.dispose();
+  part.gizmo.geometry = geometryForPart('engine', null, part.props);
+  applyEngineGizmoOrientation(part.gizmo, part.props.spinAxis);
+}
+
+function geometryForPart(type, role, props) {
   switch (type) {
-    case 'engine':
-      return new THREE.CylinderGeometry(0.18, 0.22, 0.4, 16);
+    case 'engine': {
+      // ノズル（大きいほうの円）が -Y 側。吸い込み側は少し細くして、
+      // どちらが噴射口か見ただけで分かるようにする。
+      const d = engineNozzleDiameter(props);
+      const r = d / 2;
+      return new THREE.CylinderGeometry(r * 0.62, r, d * 1.8, 16);
+    }
     case 'wing':
       // 垂直尾翼は縦に立てた薄板、それ以外（主翼・水平尾翼）は横に広い薄板
       if (role === 'vtail') return new THREE.BoxGeometry(0.35, 0.9, 0.3);
@@ -474,7 +528,7 @@ function addPart(type, position) {
 
   const gizmoMesh = type === 'landing_gear'
     ? buildLandingGearHierarchy(props)
-    : createPartGizmoMesh(type, props.role, props.corners);
+    : createPartGizmoMesh(type, props.role, props.corners, props);
   const pos = position || defaultSpawnPosition();
   gizmoMesh.position.copy(pos);
   // モデルのローカル座標系の子として追加する：モデル本体の回転/拡縮に自動追従させるため
@@ -635,7 +689,7 @@ function mirrorPart(id) {
 
   const gizmoMesh = src.type === 'landing_gear'
     ? buildLandingGearHierarchy(mirroredProps)
-    : createPartGizmoMesh(src.type, mirroredProps.role, mirroredProps.corners);
+    : createPartGizmoMesh(src.type, mirroredProps.role, mirroredProps.corners, mirroredProps);
   gizmoMesh.position.set(-src.position.x, src.position.y, src.position.z);
   // 鏡像変換：X軸まわりの回転はそのまま、Y・Z軸まわりの回転は符号反転
   gizmoMesh.rotation.set(
@@ -688,7 +742,7 @@ function rebuildPartsFromSaved(savedParts) {
 
     const gizmoMesh = sp.type === 'landing_gear'
       ? buildLandingGearHierarchy(props)
-      : createPartGizmoMesh(sp.type, props.role, props.corners);
+      : createPartGizmoMesh(sp.type, props.role, props.corners, props);
     gizmoMesh.position.set(sp.position.x, sp.position.y, sp.position.z);
     gizmoMesh.rotation.set(
       THREE.MathUtils.degToRad(sp.rotation.x),
