@@ -90,24 +90,25 @@ function modelRootScale() {
 // エンジンのノズル（排気口）の直径(m)。
 // Builderで入れていればその値、0なら推力から決める。
 //
-// 実機のノズルは推力の平方根におよそ比例する——CFM56（110kN）でファン直径1.7m、
-// GE90（510kN）で3.6m。d ≒ 2·0.00256·√(推力N) がその2点を通る。
-// 飛行側の既定（09b-aircraft-visual.js の enginePlumeRadius）と同じ式で、
+// 合わせるのは「ファンの直径」ではなく**排気ノズルの直径**。実機の排気ノズルは
+// 推力の平方根におよそ比例する（d ≒ 0.0016·√(推力N)。実機7種で比の幾何平均0.98。
+// 09b-aircraft-visual.js の PLUME_NOZZLE_K の説明に内訳）。
+// 飛行側の既定（enginePlumeRadius）と同じ式で、
 // **ここで見ている太さの筒が、そのまま炎・排気の太さになる**。
 // 推力が桁外れな架空の機体（推力40万kNのロケットなど）では、この式のままだと
-// 直径103mになって機体が見えなくなる。機体の大きさに対して極端にならないよう、
-// いちばん長い辺の1.5〜12%に収める（飛行側も同じように抑えている）。
+// 直径30mを超えて機体が見えなくなる。機体の大きさに対して極端にならないよう、
+// いちばん長い辺の0.4〜2.4%に収める（飛行側も同じように抑えている）。
 // 返すのは**実寸(m)**。境界箱も world 空間なので、そのまま比べられる。
 function engineNozzleDiameter(props) {
   const w = props && props.plumeWidth;
   if (w > 0) return w;
   const kgf = Math.max((props && props.thrustKgf) || 0, 0);
-  let d = Math.max(2 * 0.00256 * Math.sqrt(kgf * 9.80665), 0.12);
+  let d = Math.max(0.0016 * Math.sqrt(kgf * 9.80665), 0.06);
   const box = typeof computeModelMeshBoundingBox === 'function' ? computeModelMeshBoundingBox() : null;
   if (box) {
     const size = box.getSize(new THREE.Vector3());
     const unit = Math.max(size.x, size.y, size.z);
-    if (unit > 0.2) d = Math.min(Math.max(d, unit * 0.015), unit * 0.12);
+    if (unit > 0.2) d = Math.min(Math.max(d, unit * 0.004), unit * 0.024);
   }
   return d;
 }

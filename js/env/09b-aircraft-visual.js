@@ -512,16 +512,21 @@ function updateLandingLightPool(ac, controls, state) {
 // 炎は「根元が太く、後ろへ細くなる円錐」を2枚（芯＋にじみ）重ねて作る。
 // 加算合成なので、昼は空に溶け、夜ははっきり光る。
 //
-// 太さの既定は**推力から決める**。翼幅の何割、という決め方だと、翼の大きな機体で
-// ノズルが胴体より太くなった（実測で翼幅73mのBoeing 747だと半径7.3m）。
-// 実機のノズルは推力の平方根におよそ比例する——CFM56（110kN）でファン半径0.85m、
-// GE90（510kN）で1.8m。r ≒ 0.00256·√(推力N) がその2点を通る。
-// 機体の大きさに対して極端にならないよう、翼幅の0.8%〜5%に収める。
-// Builderの「炎の太さ」「炎の長さ」で上書きできる。
-const PLUME_NOZZLE_K = 0.00256;
-// 機体のいちばん長い辺に対する半径の下限・上限（Builder側の 1.5〜12%（直径）と同じ）
-const PLUME_R_MIN_SPAN = 0.0075;
-const PLUME_R_MAX_SPAN = 0.06;
+// 太さの既定は**推力から決める**。ただし合わせるのは「ファンの直径」ではなく
+// **排気ノズルの直径**——前はファンで合わせていたので、炎が3倍太かった。
+// 実機の排気ノズルは推力の平方根におよそ比例する。d ≒ 0.0016·√(推力N) を
+// 実機7種に当てはめると、比の幾何平均が0.98になる：
+//   CFM56コア 120kN 式0.55m/実機0.70m ／ CF6コア 250kN 0.80/1.00
+//   J79(AB) 79kN 0.45/0.60 ／ F110(AB) 129kN 0.57/0.90
+//   Merlin 1D 845kN 1.47/0.92 ／ RD-180 1,900kN 2.21/1.43 ／ F-1 6,770kN 4.16/3.70
+// （ロケットは燃焼室の圧力が高いぶん、式より実機のほうが細い）
+// Builderの「ノズルの直径」で上書きできる。
+const PLUME_NOZZLE_K = 0.0008;                 // 半径 = この値·√(推力N)
+// 機体のいちばん長い辺に対する半径の下限・上限（Builder側の 0.4〜2.4%（直径）と同じ）。
+// 推力が桁外れな架空の機体を抑えるためのもの。ここが緩すぎて、
+// TB2（全長60m）のノズルが直径7.2mになっていた。
+const PLUME_R_MIN_SPAN = 0.002;
+const PLUME_R_MAX_SPAN = 0.012;
 
 const PLUME_LOOK = {
   prop:   null,
@@ -539,7 +544,7 @@ const PLUME_FLICKER = 0.14;
 const PLUME_FLICKER_HZ = 17;
 // 炎のにじみ（航行灯と同じ考え方——画面ぜんぶの後処理ではなく、光らせたいものに
 // だけ薄い光の玉を重ねる。04b-airport.js の AIRPORT_GLOW_SCALE の説明を参照）。
-const PLUME_GLOW_SIZE = 5.5;      // ノズル半径に対する玉の大きさ
+const PLUME_GLOW_SIZE = 2.2;      // ノズル半径に対する玉の大きさ
 const PLUME_GLOW_OPACITY = 0.55;
 
 // 根元が原点、+Y の向きに伸びる円錐。先を細く尖らせておく。
@@ -658,11 +663,11 @@ function buildEnginePlumes(model, parent) {
 
     if (look.shimmer > 0) entry.shimmerAdd = place(plumeShimmer(), 1.1);
     if (look.flame) {
-      entry.halo = place(plumeCone(look.flame.halo, look.flame.alpha * 0.55), 1.55);
+      entry.halo = place(plumeCone(look.flame.halo, look.flame.alpha * 0.55), 1.15);
       entry.core = place(plumeCone(look.flame.core, look.flame.alpha), 1.0);
     }
     if (e.kind === 'jet_ab') {
-      entry.abHalo = place(plumeCone(PLUME_AB.halo, PLUME_AB.alpha * 0.5), 1.5);
+      entry.abHalo = place(plumeCone(PLUME_AB.halo, PLUME_AB.alpha * 0.5), 1.15);
       entry.abCore = place(plumeCone(PLUME_AB.core, PLUME_AB.alpha), 0.85);
     }
     // 炎のにじみ。ノズルの口に光の玉を1つ置く。
@@ -932,9 +937,12 @@ const SMOKE_LIFE_S = 7;
 const SMOKE_STEP_FRAC = 0.55;      // 置く間隔（出たての大きさに対する割合）
 const SMOKE_STEP_MIN_S = 0.03;
 const SMOKE_PUFFS_MAX = 6;         // 全開のとき、1回に置く数
-const SMOKE_SPREAD = 0.55;         // ノズル半径に対する、置く位置のばらつき
-const SMOKE_SIZE_FROM = 4.0;       // ノズル半径に対する、出たての大きさ
-const SMOKE_SIZE_TO = 30;          // 消えるころの大きさ
+const SMOKE_SPREAD = 1.8;          // ノズル半径に対する、置く位置のばらつき
+// 煙はノズルより**ずっと太く広がる**（ロケットの噴煙は口の何倍にもなる）。
+// ノズルの太さを実機に合わせて細くしたぶん、ここの倍率を上げて
+// 見た目の大きさを保つ。
+const SMOKE_SIZE_FROM = 13;        // ノズル半径に対する、出たての大きさ
+const SMOKE_SIZE_TO = 96;          // 消えるころの大きさ
 const SMOKE_ALPHA = 0.72;
 const SMOKE_COLOR = 0xf4f6f8;      // 白い煙
 

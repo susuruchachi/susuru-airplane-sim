@@ -60,6 +60,7 @@ const FLIGHT_TRIM_RATE = 0.35; // トリムが端から端まで動く速さ（�
 function setupFlightControls() {
   if (_flightKeyHandlersBound) return;
   _flightKeyHandlersBound = true;
+  setupRigidCameraDrag();
 
   const isTyping = (e) => {
     const t = e.target;
@@ -238,11 +239,68 @@ function updateFlightInput(dt) {
 const _cam = {
   want: new THREE.Vector3(), look: new THREE.Vector3(), tmp: new THREE.Vector3(),
   up: new THREE.Vector3(), q: new THREE.Quaternion(),
-  // 機体固定の視点：機体から見たカメラの位置と、前のコマの機体の位置・姿勢。
-  // ドラッグで回した角度を「機体に対する角度」として持ち越すのに使う。
-  rigid: new THREE.Vector3(), rigidPrevPos: new THREE.Vector3(),
-  rigidPrevQ: new THREE.Quaternion(), rigidReady: false,
+  // 機体固定の視点。**機体から見た向き**を、方位・伏せ角・距離で持つ。
+  // 0 なら真後ろ。ドラッグで動かすのはこの3つで、世界の向きは一切入らない。
+  rigidYaw: 0, rigidPitch: 0, rigidDist: 0, rigidReady: false,
 };
+
+// --- 機体固定の視点をドラッグで回す ------------------------------------------
+//
+// **OrbitControls は使えない**。OrbitControls は「どの軸のまわりを回すか」を
+// 作られたときの camera.up から一度だけ決める（three r128 の OrbitControls は
+// update を組み立てるときに setFromUnitVectors(object.up, +Y) を1回だけ計算する）。
+// 機体固定の視点は camera.up を機体と一緒に回すので、**傾いて旋回している間は
+// 「画面で見えている上」と「OrbitControlsが回す軸」が食い違い、ドラッグすると
+// 明後日の方向へ動く**。そこで、この視点のときだけ自前で受ける。
+//
+// 持つのは機体から見た方位・伏せ角・距離だけなので、機体がどれだけ回っていても
+// ドラッグの手ごたえは変わらない。
+const RIGID_DRAG_PER_PX = 0.006;     // 1ピクセル動かしたときに回る角（rad）
+const RIGID_PITCH_MAX = Math.PI / 2 * 0.98;
+const RIGID_ZOOM_PER_NOTCH = 1.12;
+const RIGID_DIST_MIN_SPAN = 0.25;    // 機体の大きさに対する、近づける限界
+const RIGID_DIST_MAX_SPAN = 12;
+
+const _rigidDrag = { id: null, x: 0, y: 0 };
+
+function rigidCameraActive() {
+  const f = EnvState.flight;
+  return !!(f && f.active && f.cameraMode === 'rigid');
+}
+
+function setupRigidCameraDrag() {
+  const el = EnvState.renderer && EnvState.renderer.domElement;
+  if (!el || el.dataset.rigidDragBound) return;
+  el.dataset.rigidDragBound = '1';
+
+  el.addEventListener('pointerdown', (e) => {
+    if (!rigidCameraActive() || _rigidDrag.id !== null) return;
+    _rigidDrag.id = e.pointerId;
+    _rigidDrag.x = e.clientX; _rigidDrag.y = e.clientY;
+    el.setPointerCapture(e.pointerId);
+  });
+  const end = (e) => {
+    if (_rigidDrag.id !== e.pointerId) return;
+    _rigidDrag.id = null;
+    if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+  };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+  el.addEventListener('pointermove', (e) => {
+    if (_rigidDrag.id !== e.pointerId || !rigidCameraActive()) return;
+    const dx = e.clientX - _rigidDrag.x, dy = e.clientY - _rigidDrag.y;
+    _rigidDrag.x = e.clientX; _rigidDrag.y = e.clientY;
+    _cam.rigidYaw -= dx * RIGID_DRAG_PER_PX;
+    // 下へドラッグすると、カメラが上へ回る（OrbitControlsと同じ手ごたえ）
+    _cam.rigidPitch = THREE.MathUtils.clamp(
+      _cam.rigidPitch + dy * RIGID_DRAG_PER_PX, -RIGID_PITCH_MAX, RIGID_PITCH_MAX);
+  });
+  el.addEventListener('wheel', (e) => {
+    if (!rigidCameraActive()) return;
+    e.preventDefault();
+    _cam.rigidDist *= e.deltaY > 0 ? RIGID_ZOOM_PER_NOTCH : 1 / RIGID_ZOOM_PER_NOTCH;
+  }, { passive: false });
+}
 
 function cycleFlightCamera() {
   const f = EnvState.flight;
@@ -253,13 +311,10 @@ function cycleFlightCamera() {
 function setFlightCamera(id) {
   const f = EnvState.flight;
   f.cameraMode = id;
-  // 「自由」「機体まわり」「機体固定」は OrbitControls に操作を渡す。
-  // 機体固定はドラッグで見る角度を変えられるが、変えた角度は**機体に対して**
-  // 覚える（updateFlightCamera を参照）。
-  EnvState.orbitControls.enabled = (id === 'free' || id === 'orbit' || id === 'rigid');
-  // 機体固定だけは真下や真上からも見せる。他の視点は地面の下を覗き込みにくく
-  // するために浅い角度で止めてある。
-  EnvState.orbitControls.maxPolarAngle = id === 'rigid' ? Math.PI : Math.PI * 0.495;
+  // 「自由」「機体まわり」は OrbitControls に操作を渡す。
+  // **機体固定は自前で受ける**（setupRigidCameraDrag の説明を参照）。
+  EnvState.orbitControls.enabled = (id === 'free' || id === 'orbit');
+  EnvState.orbitControls.maxPolarAngle = Math.PI * 0.495;
   // 入り直したら、いつもの「斜め後ろ上から」に戻す
   if (id === 'rigid') _cam.rigidReady = false;
   const sel = document.getElementById('envFlightCamera');
@@ -296,21 +351,23 @@ function updateFlightCamera(dt) {
     // ドラッグぶんがそのまま「機体から見たカメラの位置」の変化になる。
     // あとはそれを**今のコマの姿勢**で世界へ戻せばいい。
     if (!_cam.rigidReady) {
-      _cam.rigid.set(0, size * FLIGHT_RIGID_UP, size * FLIGHT_RIGID_BACK);
+      _cam.rigidYaw = 0;
+      _cam.rigidPitch = Math.atan2(FLIGHT_RIGID_UP, FLIGHT_RIGID_BACK);
+      _cam.rigidDist = size * Math.hypot(FLIGHT_RIGID_BACK, FLIGHT_RIGID_UP);
       _cam.rigidReady = true;
-    } else {
-      _cam.rigid.copy(cam.position).sub(_cam.rigidPrevPos)
-        .applyQuaternion(_cam.q.copy(_cam.rigidPrevQ).invert());
-      // 中心に吸い込まれて向きを見失わないよう、近すぎるところで止める
-      const min = size * 0.15;
-      if (_cam.rigid.lengthSq() < min * min) _cam.rigid.setLength(min);
     }
-    cam.position.copy(st.position)
-      .add(_cam.want.copy(_cam.rigid).applyQuaternion(st.quaternion));
+    _cam.rigidDist = THREE.MathUtils.clamp(_cam.rigidDist,
+      size * RIGID_DIST_MIN_SPAN, size * RIGID_DIST_MAX_SPAN);
+    // 機体から見た位置。方位0・伏せ角0で真後ろ（+Z）、伏せ角を上げると上へ。
+    const cp = Math.cos(_cam.rigidPitch), sp = Math.sin(_cam.rigidPitch);
+    _cam.want.set(
+      Math.sin(_cam.rigidYaw) * cp,
+      sp,
+      Math.cos(_cam.rigidYaw) * cp
+    ).multiplyScalar(_cam.rigidDist);
+    cam.position.copy(st.position).add(_cam.want.applyQuaternion(st.quaternion));
     cam.up.copy(_cam.up.set(0, 1, 0).applyQuaternion(st.quaternion));
     cam.lookAt(st.position);
-    _cam.rigidPrevPos.copy(st.position);
-    _cam.rigidPrevQ.copy(st.quaternion);
     EnvState.orbitControls.target.copy(st.position);
     return;
   }
