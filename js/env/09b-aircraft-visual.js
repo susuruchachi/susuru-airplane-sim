@@ -519,8 +519,9 @@ function updateLandingLightPool(ac, controls, state) {
 // 機体の大きさに対して極端にならないよう、翼幅の0.8%〜5%に収める。
 // Builderの「炎の太さ」「炎の長さ」で上書きできる。
 const PLUME_NOZZLE_K = 0.00256;
-const PLUME_R_MIN_SPAN = 0.008;
-const PLUME_R_MAX_SPAN = 0.05;
+// 機体のいちばん長い辺に対する半径の下限・上限（Builder側の 1.5〜12%（直径）と同じ）
+const PLUME_R_MIN_SPAN = 0.0075;
+const PLUME_R_MAX_SPAN = 0.06;
 
 const PLUME_LOOK = {
   prop:   null,
@@ -614,7 +615,10 @@ function plumeShimmer() {
 const _plumeDir = new THREE.Vector3();
 const _plumeUp = new THREE.Vector3(0, 1, 0);
 
-// このエンジンのノズル半径(m)。Builderで入れていれば、その値を使う。
+// このエンジンのノズル半径(m)。Builderで入れていれば、その値をそのまま使う。
+// unit は**機体のいちばん長い辺**（Builder側の engineNozzleDiameter が
+// 境界箱で抑えているのと同じ基準）。翼幅で抑えていたころは、Builderの画面で
+// 見ている筒と飛行中の炎の太さが機体によって食い違っていた。
 function enginePlumeRadius(e, unit) {
   const w = (e.plumeWidthM || 0);
   if (w > 0) return w / 2;
@@ -622,11 +626,18 @@ function enginePlumeRadius(e, unit) {
     unit * PLUME_R_MIN_SPAN, unit * PLUME_R_MAX_SPAN);
 }
 
+// 機体のいちばん長い辺(m)。ノズルの大きさを抑える基準に使う。
+function aircraftLongestSide(model) {
+  const e = model.extent;
+  const v = e ? Math.max(e.x, e.y, e.z) : 0;
+  return Math.max(v, Math.max(model.wingSpan || 0, 2));
+}
+
 function buildEnginePlumes(model, parent) {
   const out = [];
   const engines = model.engines || [];
   if (!engines.length) return out;
-  const unit = Math.max(model.wingSpan, 2);
+  const unit = aircraftLongestSide(model);
   for (const e of engines) {
     const look = PLUME_LOOK[e.kind];
     if (!look) continue;                       // プロペラは何も出さない
@@ -692,7 +703,9 @@ function updateEnginePlumes(ac, controls, state, dt, elapsed) {
     // 陽炎。アイドルでも少し出て、出力を上げるほど長くなる。
     // 濃さは**ほとんど透明**のまま（PLUME_SHIMMER_ALPHA）。
     if (p.shimmerAdd) {
-      const heat = off ? 0 : (0.18 + 0.82 * lever);
+      // **止めているエンジン・レバーを閉じたエンジンは何も出さない**。
+      // このシミュレータはレバー0で推力も0なので、排気だけ出ているのはおかしい。
+      const heat = (off || lever <= 0.005) ? 0 : (0.18 + 0.82 * lever);
       const len = p.radius * p.look.shimmer * p.lenScale * heat;
       p.shimmerAdd.userData.tex.offset.y = (elapsed * -1.7) % 1;
       setCone(p.shimmerAdd, len, heat * PLUME_SHIMMER_ALPHA);
@@ -910,14 +923,20 @@ function buildContrail(model) {
 // （r128 の vertexColors は vec3 で、アルファが入らない）。小さな ShaderMaterial を
 // 自前で書く。対数深度バッファを使っているシーンなので、その処理を入れ忘れると
 // 煙だけ地形の手前後ろが入れ替わる——three.js の同名チャンクを include して合わせる。
-const SMOKE_PER_ROCKET = 220;
-const SMOKE_LIFE_S = 6;
-const SMOKE_STEP_FRAC = 0.30;      // 置く間隔（出たての大きさに対する割合）
+// ロケットの煙は**白くて量が多い**（固体ロケットの煙そのもの）。
+// 出力に比例して、本数も濃さも増える。
+// 1基あたりの点の数。全開で毎秒100個ほど置くので、消えるまで（7秒）持たせるには
+// これくらい要る。足りないと、いちばん古い煙が消える前に上書きされて筋が途中で切れる。
+const SMOKE_PER_ROCKET = 900;
+const SMOKE_LIFE_S = 7;
+const SMOKE_STEP_FRAC = 0.55;      // 置く間隔（出たての大きさに対する割合）
 const SMOKE_STEP_MIN_S = 0.03;
-const SMOKE_SIZE_FROM = 2.2;       // ノズル半径に対する、出たての大きさ
-const SMOKE_SIZE_TO = 14;          // 消えるころの大きさ
-const SMOKE_ALPHA = 0.5;
-const SMOKE_COLOR = 0x4a4a4e;
+const SMOKE_PUFFS_MAX = 6;         // 全開のとき、1回に置く数
+const SMOKE_SPREAD = 0.55;         // ノズル半径に対する、置く位置のばらつき
+const SMOKE_SIZE_FROM = 4.0;       // ノズル半径に対する、出たての大きさ
+const SMOKE_SIZE_TO = 30;          // 消えるころの大きさ
+const SMOKE_ALPHA = 0.72;
+const SMOKE_COLOR = 0xf4f6f8;      // 白い煙
 
 const SMOKE_VERT = `
 #include <common>
@@ -965,7 +984,7 @@ function smokeTexture() {
 }
 
 function buildRocketSmoke(model) {
-  const unit = Math.max(model.wingSpan, 2);
+  const unit = aircraftLongestSide(model);
   const emitters = (model.engines || [])
     .filter((e) => e.kind === 'rocket')
     .map((e) => ({ engine: e, local: e.position.clone(), radius: enginePlumeRadius(e, unit) }));
@@ -985,7 +1004,9 @@ function buildRocketSmoke(model) {
   points.renderOrder = 1;
   points.visible = false;
   return { points, emitters, age: new Float32Array(total).fill(Infinity),
-    cursor: new Int32Array(emitters.length), dist: 0, timer: 0 };
+    cursor: new Int32Array(emitters.length), dist: 0, timer: 0,
+    // 前に置いた場所（ワールド）。置いた場所と場所のあいだを埋めるのに使う。
+    last: emitters.map(() => null) };
 }
 
 const _smWorld = new THREE.Vector3();
@@ -1011,16 +1032,34 @@ function updateRocketSmoke(ac, controls, state, dt) {
   if (spawn) {
     for (let i = 0; i < sm.emitters.length; i++) {
       const em = sm.emitters[i];
+      // **止めているエンジンは何も出さない**。上向きのリフトエンジンは
+      // 出力レバーが別なので、そちらを見る（前へ進むレバーで煙が出ていた）。
       const off = typeof engineGroupOff === 'function' && engineGroupOff(controls, em.engine.group);
-      const power = off ? 0 : controls.throttle;
-      if (power <= 0.02) continue;
-      const slot = i * SMOKE_PER_ROCKET + sm.cursor[i];
-      sm.cursor[i] = (sm.cursor[i] + 1) % SMOKE_PER_ROCKET;
+      const power = off ? 0 : (em.engine.lift ? (controls.vtolThrottle || 0) : controls.throttle);
+      if (power <= 0.02) { sm.last[i] = null; continue; }
+      // 出力に比例して、1回に置く数を増やす（全開で SMOKE_PUFFS_MAX 個）
+      const puffs = Math.max(1, Math.round(SMOKE_PUFFS_MAX * power));
+      // いまのノズルの位置（ワールド）
       _smWorld.copy(em.local).applyQuaternion(ac.group.quaternion).add(ac.group.position);
-      pos[slot * 3] = _smWorld.x; pos[slot * 3 + 1] = _smWorld.y; pos[slot * 3 + 2] = _smWorld.z;
-      sm.age[slot] = 0;
-      alpha[slot] = SMOKE_ALPHA * power;
-      size[slot] = em.radius * SMOKE_SIZE_FROM;
+      const now = _smWorld.clone();
+      // **前に置いた場所から今までの区間に、ばらまく**。同じ1点に何個も重ねても
+      // 濃くなるだけで筋は埋まらない——実際、点々に切れた破線にしか見えなかった。
+      const from = sm.last[i] || now;
+      for (let k = 0; k < puffs; k++) {
+        const slot = i * SMOKE_PER_ROCKET + sm.cursor[i];
+        sm.cursor[i] = (sm.cursor[i] + 1) % SMOKE_PER_ROCKET;
+        const t = puffs > 1 ? (k + 1) / puffs : 1;
+        _smWorld.lerpVectors(from, now, t);
+        const spread = em.radius * SMOKE_SPREAD;
+        _smWorld.x += (Math.random() * 2 - 1) * spread;
+        _smWorld.y += (Math.random() * 2 - 1) * spread;
+        _smWorld.z += (Math.random() * 2 - 1) * spread;
+        pos[slot * 3] = _smWorld.x; pos[slot * 3 + 1] = _smWorld.y; pos[slot * 3 + 2] = _smWorld.z;
+        sm.age[slot] = 0;
+        alpha[slot] = SMOKE_ALPHA * power;
+        size[slot] = em.radius * SMOKE_SIZE_FROM;
+      }
+      sm.last[i] = now;
     }
   }
 

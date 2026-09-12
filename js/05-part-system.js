@@ -73,11 +73,18 @@ function createPartGizmoMesh(type, role, corners, props) {
     side: type === 'wing' ? THREE.DoubleSide : THREE.FrontSide,
   });
   const mesh = new THREE.Mesh(geo, mat);
-  if (type === 'engine') applyEngineGizmoOrientation(mesh, props && props.spinAxis);
-  // 円錐は既定で+Yへ尖っているので、機首の向き（-Z）へ倒す
-  if (type === 'viewpoint') mesh.rotation.x = -Math.PI / 2;
   mesh.userData.isPartGizmo = true;
   return mesh;
+}
+
+// 機体モデルにかけている拡縮。パーツの座標もギズモの形も**この倍率がかかった状態で**
+// 画面に出る。ノズルの直径のように「実寸(m)で言いたい」ものは、ここで割ってから
+// ジオメトリを作らないと、拡縮した機体では見た目と実寸が食い違う。
+function modelRootScale() {
+  const r = State.model && State.model.root;
+  if (!r) return 1;
+  const s = (Math.abs(r.scale.x) + Math.abs(r.scale.y) + Math.abs(r.scale.z)) / 3;
+  return s > 1e-6 ? s : 1;
 }
 
 // エンジンのノズル（排気口）の直径(m)。
@@ -89,7 +96,8 @@ function createPartGizmoMesh(type, role, corners, props) {
 // **ここで見ている太さの筒が、そのまま炎・排気の太さになる**。
 // 推力が桁外れな架空の機体（推力40万kNのロケットなど）では、この式のままだと
 // 直径103mになって機体が見えなくなる。機体の大きさに対して極端にならないよう、
-// いちばん長い辺の1.5〜12%に収める（飛行側も翼幅で同じように抑えている）。
+// いちばん長い辺の1.5〜12%に収める（飛行側も同じように抑えている）。
+// 返すのは**実寸(m)**。境界箱も world 空間なので、そのまま比べられる。
 function engineNozzleDiameter(props) {
   const w = props && props.plumeWidth;
   if (w > 0) return w;
@@ -104,21 +112,22 @@ function engineNozzleDiameter(props) {
   return d;
 }
 
-// エンジンのギズモを、**噴射の向き**に合わせて倒す。
+// エンジンのギズモを**噴射の向き**に合わせる回転。
 //
 // 円柱は既定で軸が+Y、**大きいほうの円（＝ノズル）が-Y側**にある。
 // 噴射は推力と逆向きなので、-Y を噴射の向きへ向ける
 // （＝ +Y を推力の向きへ向ける）。推力の向きは 09-aircraft.js と同じ約束で、
 // spinAxis が 'z' なら -Z（機首の向き）、'x' なら +X、'y' なら +Y。
 //
-// 以前は spinAxis に関わらず rotation.z = 90° で倒していたので、既定の
-// 「Z軸（前後方向）」のエンジンでも筒が左右を向いていて、**画面で見ている向きと
-// 実際に噴射する向きが食い違っていた**。
-function applyEngineGizmoOrientation(mesh, spinAxis) {
-  mesh.rotation.set(0, 0, 0);
-  if (spinAxis === 'y') return;                     // 上向き：+Yが推力、ノズルは下。そのまま
-  if (spinAxis === 'x') { mesh.rotation.z = -Math.PI / 2; return; }   // +Y → +X
-  mesh.rotation.x = -Math.PI / 2;                   // 既定：+Y → -Z（機首の向き）
+// **メッシュの rotation ではなくジオメトリを回す**。メッシュの rotation は
+// パーツの回転（applyPartToGizmo）で上書きされるので、パーツを動かした瞬間や
+// 保存から読み直した瞬間に向きが消えてしまう——実際、ノズル径を入れ直した
+// ときだけ正しく、そのあと位置を動かすとまた横を向いていた。
+function orientEngineGeometry(geo, spinAxis) {
+  if (spinAxis === 'y') return geo;                  // 上向き：+Yが推力、ノズルは下。そのまま
+  if (spinAxis === 'x') { geo.rotateZ(-Math.PI / 2); return geo; }   // +Y → +X
+  geo.rotateX(-Math.PI / 2);                         // 既定：+Y → -Z（機首の向き）
+  return geo;
 }
 
 // 回転軸・推力・ノズル直径を変えたとき、ギズモの形と向きを作り直す
@@ -126,7 +135,6 @@ function updateEngineGizmoShape(part) {
   if (part.type !== 'engine' || !part.gizmo) return;
   part.gizmo.geometry.dispose();
   part.gizmo.geometry = geometryForPart('engine', null, part.props);
-  applyEngineGizmoOrientation(part.gizmo, part.props.spinAxis);
 }
 
 function geometryForPart(type, role, props) {
@@ -134,9 +142,12 @@ function geometryForPart(type, role, props) {
     case 'engine': {
       // ノズル（大きいほうの円）が -Y 側。吸い込み側は少し細くして、
       // どちらが噴射口か見ただけで分かるようにする。
-      const d = engineNozzleDiameter(props);
+      // 直径は実寸(m)なので、機体の拡縮ぶんで割ってからジオメトリにする
+      // （そうしないと、拡縮した機体では画面の太さと飛行中の炎の太さが食い違う）。
+      const d = engineNozzleDiameter(props) / modelRootScale();
       const r = d / 2;
-      return new THREE.CylinderGeometry(r * 0.62, r, d * 1.8, 16);
+      return orientEngineGeometry(
+        new THREE.CylinderGeometry(r * 0.62, r, d * 1.8, 16), props && props.spinAxis);
     }
     case 'wing':
       // 垂直尾翼は縦に立てた薄板、それ以外（主翼・水平尾翼）は横に広い薄板
@@ -146,9 +157,14 @@ function geometryForPart(type, role, props) {
       return new THREE.BoxGeometry(0.4, 0.04, 0.18);
     case 'light':
       return new THREE.SphereGeometry(0.07, 12, 12);
-    case 'viewpoint':
-      // 視線の向きが見えるよう、前（-Z）へ尖った円錐にする
-      return new THREE.ConeGeometry(0.12, 0.34, 12);
+    case 'viewpoint': {
+      // 視線の向きが見えるよう、前（-Z）へ尖った円錐にする。
+      // エンジンと同じ理由で、メッシュの rotation ではなくジオメトリを回す
+      // （パーツの回転で上書きされてしまうため）。
+      const cone = new THREE.ConeGeometry(0.12, 0.34, 12);
+      cone.rotateX(-Math.PI / 2);
+      return cone;
+    }
     default:
       return new THREE.SphereGeometry(0.1, 8, 8);
   }
