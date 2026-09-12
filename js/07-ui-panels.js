@@ -393,7 +393,7 @@ function renderTypeSpecificFields(part) {
         <label>ノズルの直径（m／0で自動）</label>
         <input type="text" inputmode="decimal" id="fPlumeWidth" value="${part.props.plumeWidth || 0}">
       </div>
-      <div class="hint">ここで決めた太さの筒が画面のエンジンの形になり、飛行中の炎・排気もこの太さで出ます。<b>機体モデルのエンジンの大きさに合わせてください</b>。0なら推力から自動（いまは約 ${engineNozzleDiameter(part.props).toFixed(2)} m。実機のノズルは推力の平方根におよそ比例するので、それに合わせています）。<br>筒の<b>太いほうの円が噴射口</b>で、その向きがそのまま噴射の向きです。</div>
+      <div class="hint">ここで決めた太さの筒が画面のエンジンの形になり、飛行中の炎・排気もこの太さで出ます。<b>機体モデルのエンジンの大きさに合わせてください</b>。0なら推力から自動（いまは約 ${engineNozzleDiameter(Object.assign({}, part.props, { plumeWidth: 0 })).toFixed(2)} m。実機のノズルは推力の平方根におよそ比例するので、それに合わせています）。<br>筒の<b>太いほうの円が噴射口</b>で、その向きがそのまま噴射の向きです。</div>
       ${part.props.engineKind === 'prop' ? '' : `
       <div class="field">
         <label>炎・排気の長さ（倍率）</label>

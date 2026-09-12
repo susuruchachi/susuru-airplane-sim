@@ -247,7 +247,9 @@ async function createAircraft(config, cgOverride) {
   group.add(landingPool);
 
   // 排気と炎（エンジンの種別ごと）。機体座標のまま置けるので group の子。
-  const plumes = buildEnginePlumes(model, group);
+  // ノズルの太さを抑える基準は、Builderと同じ**メッシュの境界箱**で測る。
+  const meshUnit = aircraftMeshUnit(visual, model);
+  const plumes = buildEnginePlumes(model, group, meshUnit);
   // 衝撃波（音速まわりの白い雲と、抜けていく輪）。機体と一緒に動く。
   const boom = buildSonicBoom(model, group);
 
@@ -256,7 +258,7 @@ async function createAircraft(config, cgOverride) {
   // シーンに足す（12-flight-mode.js）。
   const contrail = buildContrail(model);
   // ロケットの煙。飛行機雲と同じ入れ物（シーン直下）へ入れる。
-  const smoke = buildRocketSmoke(model);
+  const smoke = buildRocketSmoke(model, meshUnit);
   if (smoke) contrail.group.add(smoke.points);
 
   return {
@@ -528,15 +530,22 @@ const PLUME_NOZZLE_K = 0.0008;                 // 半径 = この値·√(推力
 const PLUME_R_MIN_SPAN = 0.002;
 const PLUME_R_MAX_SPAN = 0.012;
 
+// 炎の**長さ**も、太さと同じように実機で合わせる。ここの数字は
+// 「ノズルの**半径**の何倍か」（＝直径の半分が単位）なので、実機の
+// 「ノズル直径の何倍まで炎が見えるか」を2倍したもの。
+//   ロケット（海面）：Merlin 1D ノズル0.92m／炎およそ4m＝4.3倍
+//                     RS-25 2.4m／12m＝5.0倍 ／ F-1 3.7m／20m＝5.4倍  → 平均4.9倍
+//   アフターバーナー：F110 ノズル0.9m／炎およそ3m＝3.3倍 ／ J79 0.6m／2m＝3.3倍
+// 以前は 16倍・12倍（＝直径の8倍・6倍）で、実機の1.6〜1.8倍長かった。
 const PLUME_LOOK = {
   prop:   null,
   jet:    { shimmer: 7.0 },
   jet_ab: { shimmer: 7.0 },
-  rocket: { shimmer: 0, flame: { len: 16, core: 0xfff6e0, halo: 0xffa33c, alpha: 0.5 },
+  rocket: { shimmer: 0, flame: { len: 9.8, core: 0xfff6e0, halo: 0xffa33c, alpha: 0.5 },
             glow: 0xffb055, smoke: true },
 };
 // アフターバーナーの炎（AB付きジェットが9割より上で出す）
-const PLUME_AB = { len: 12, core: 0xfff0d0, halo: 0xff7a2a, alpha: 0.6, glow: 0xff8a3a };
+const PLUME_AB = { len: 6.6, core: 0xfff0d0, halo: 0xff7a2a, alpha: 0.6, glow: 0xff8a3a };
 // 陽炎の濃さ。ほとんど透明——「言われれば気付く」くらいで止める。
 const PLUME_SHIMMER_ALPHA = 0.07;
 // 炎のゆらぎ（長さの振れ幅と、1秒あたりの速さ）
@@ -544,15 +553,46 @@ const PLUME_FLICKER = 0.14;
 const PLUME_FLICKER_HZ = 17;
 // 炎のにじみ（航行灯と同じ考え方——画面ぜんぶの後処理ではなく、光らせたいものに
 // だけ薄い光の玉を重ねる。04b-airport.js の AIRPORT_GLOW_SCALE の説明を参照）。
-const PLUME_GLOW_SIZE = 2.2;      // ノズル半径に対する玉の大きさ
-const PLUME_GLOW_OPACITY = 0.55;
+// ノズルの口が白熱して見えるぶんだけでよく、玉そのものが見えてはいけない。
+// 2.2倍・0.55では、大きなノズルほど白い球が並んで機体を隠していた。
+const PLUME_GLOW_SIZE = 1.2;      // ノズル半径に対する玉の大きさ
+const PLUME_GLOW_OPACITY = 0.40;
+
+// 炎の根元から先へ向かう薄れかた。
+//
+// **これが無いと、長い炎は先まで同じ濃さのまま**になる。加算合成なので、
+// 真後ろから覗くと視線が炎の全長を貫いて色が足し算され、画面が白く飛ぶ
+// （TB2・ノズル10mで画面の27%が真っ白になっていた）。実際の炎も、
+// ノズルの口がいちばん明るく、先へ行くほど薄れて消える。
+let _plumeFadeTexture = null;
+function plumeFadeTexture() {
+  if (_plumeFadeTexture) return _plumeFadeTexture;
+  const H = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(1, H);
+  for (let j = 0; j < H; j++) {
+    // ConeGeometry の v は底（＝ノズルの口）が0、先端が1
+    const v = j / (H - 1);
+    const a = Math.pow(1 - v, 1.6);
+    img.data[j * 4] = img.data[j * 4 + 1] = img.data[j * 4 + 2] = 255;
+    img.data[j * 4 + 3] = Math.round(a * 255);
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  _plumeFadeTexture = tex;
+  return tex;
+}
 
 // 根元が原点、+Y の向きに伸びる円錐。先を細く尖らせておく。
 function plumeCone(color, opacity, blending) {
   const geo = new THREE.ConeGeometry(1, 1, 14, 1, true);
   geo.translate(0, 0.5, 0);   // 底面を原点に
   const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-    color, transparent: true, opacity, depthWrite: false,
+    color, map: plumeFadeTexture(),
+    transparent: true, opacity, depthWrite: false,
     blending: blending || THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
   }));
   mesh.renderOrder = 3;
@@ -638,11 +678,34 @@ function aircraftLongestSide(model) {
   return Math.max(v, Math.max(model.wingSpan || 0, 2));
 }
 
-function buildEnginePlumes(model, parent) {
+// ノズルの大きさを抑える基準は、**Builderと同じものを測らないといけない**。
+// Builder（05-part-system.js の engineNozzleDiameter）はモデルのメッシュの
+// 境界箱で抑えている。こちらが翼・エンジン・接地点の広がり（model.extent）で
+// 抑えていたので、同じ機体なのに自動の太さが食い違っていた
+// （TB2 でメッシュ73.6m に対し extent 60.2m ＝ 上限1.77m と1.44m）。
+// 見た目のメッシュがあるならそれを測り、無い機体だけ extent に落とす。
+const _meshUnitBox = new THREE.Box3();
+const _meshUnitSize = new THREE.Vector3();
+function aircraftMeshUnit(visual, model) {
+  if (visual) {
+    // 親（機体まるごとの拡縮）がまだ world 行列に入っていないので、先に通す。
+    // これを忘れると modelTransform.scale が効かず、拡大した機体で測り間違える。
+    visual.updateWorldMatrix(true, true);
+    _meshUnitBox.setFromObject(visual);
+    if (!_meshUnitBox.isEmpty()) {
+      _meshUnitBox.getSize(_meshUnitSize);
+      const v = Math.max(_meshUnitSize.x, _meshUnitSize.y, _meshUnitSize.z);
+      if (v > 0.2) return v;
+    }
+  }
+  return aircraftLongestSide(model);
+}
+
+function buildEnginePlumes(model, parent, meshUnit) {
   const out = [];
   const engines = model.engines || [];
   if (!engines.length) return out;
-  const unit = aircraftLongestSide(model);
+  const unit = meshUnit > 0 ? meshUnit : aircraftLongestSide(model);
   for (const e of engines) {
     const look = PLUME_LOOK[e.kind];
     if (!look) continue;                       // プロペラは何も出さない
@@ -945,6 +1008,13 @@ const SMOKE_SIZE_FROM = 13;        // ノズル半径に対する、出たての
 const SMOKE_SIZE_TO = 96;          // 消えるころの大きさ
 const SMOKE_ALPHA = 0.72;
 const SMOKE_COLOR = 0xf4f6f8;      // 白い煙
+// 煙の大きさを決める半径は、**自動のノズルと同じ上限で頭打ちにする**。
+// 倍率が13〜96倍と大きいので、ノズルを手で大きく入れると煙だけが桁違いに育つ。
+// TB2（いちばん長い辺73.6m）でノズルに10mを入れたとき、煙の粒は出たて65m・
+// 最大112mになり、真後ろから見ると**画面の28%が真っ白**になっていた
+// （炎そのものは同じ条件で0.2%しか白飛びしない。犯人は煙のほうだった）。
+// 炎は入れた値どおりの太さで出し、煙だけ機体の大きさで抑える。
+const SMOKE_R_MAX_SPAN = PLUME_R_MAX_SPAN;
 
 const SMOKE_VERT = `
 #include <common>
@@ -991,11 +1061,14 @@ function smokeTexture() {
   return _smokeTexture;
 }
 
-function buildRocketSmoke(model) {
-  const unit = aircraftLongestSide(model);
+function buildRocketSmoke(model, meshUnit) {
+  const unit = meshUnit > 0 ? meshUnit : aircraftLongestSide(model);
   const emitters = (model.engines || [])
     .filter((e) => e.kind === 'rocket')
-    .map((e) => ({ engine: e, local: e.position.clone(), radius: enginePlumeRadius(e, unit) }));
+    .map((e) => ({
+      engine: e, local: e.position.clone(),
+      radius: Math.min(enginePlumeRadius(e, unit), unit * SMOKE_R_MAX_SPAN),
+    }));
   if (!emitters.length) return null;
   const total = emitters.length * SMOKE_PER_ROCKET;
   const geo = new THREE.BufferGeometry();
