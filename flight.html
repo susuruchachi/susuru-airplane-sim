@@ -40,7 +40,12 @@
   #topbar .spacer{flex:1 1 auto;min-width:0;}
 
   #envCenter{grid-column:1;grid-row:2;position:relative;background:#000;overflow:hidden;}
-  #envViewport{width:100%;height:100%;display:block;}
+  /* 指の操作はこちらで全部受ける。touch-actionを既定のままにしておくと、
+     2本指を置いた瞬間にブラウザが「ページの拡大」だと判断して pointercancel を
+     投げてくるので、**ピンチが一度も届かない**（機体固定の視点で実際そうなった。
+     OrbitControlsは touchstart/touchmove を自分で preventDefault していたので
+     気づけなかった）。 */
+  #envViewport{width:100%;height:100%;display:block;touch-action:none;}
   #versionTag{
     position:absolute;bottom:8px;left:10px;font-size:11px;color:var(--text-dim);font-family:var(--mono);
     white-space:pre-wrap;max-width:70%;pointer-events:none;

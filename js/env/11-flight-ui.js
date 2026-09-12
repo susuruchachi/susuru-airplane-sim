@@ -255,17 +255,34 @@ const _cam = {
 //
 // 持つのは機体から見た方位・伏せ角・距離だけなので、機体がどれだけ回っていても
 // ドラッグの手ごたえは変わらない。
+// 近づく／遠ざかるは、**ホイール（PC）と2本指のピンチ（タッチ）の両方**で要る。
+// OrbitControlsをやめたときにピンチも一緒に落としてしまい、指で飛ばしていると
+// 近づけも遠ざかりもできなくなっていた（ホイールだけは効いていた）。
 const RIGID_DRAG_PER_PX = 0.006;     // 1ピクセル動かしたときに回る角（rad）
 const RIGID_PITCH_MAX = Math.PI / 2 * 0.98;
 const RIGID_ZOOM_PER_NOTCH = 1.12;
+const RIGID_PINCH_MIN_PX = 12;       // これより指が近いと、比が暴れるので見ない
 const RIGID_DIST_MIN_SPAN = 0.25;    // 機体の大きさに対する、近づける限界
 const RIGID_DIST_MAX_SPAN = 12;
 
-const _rigidDrag = { id: null, x: 0, y: 0 };
+// 押さえている指（またはボタン）を全部おぼえる。1本なら回す、2本ならピンチ。
+const _rigidPtrs = new Map();
+let _rigidPinchPx = 0;
+
+function rigidPinchSpan() {
+  const it = _rigidPtrs.values();
+  const a = it.next().value, b = it.next().value;
+  if (!a || !b) return 0;
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
 
 function rigidCameraActive() {
   const f = EnvState.flight;
   return !!(f && f.active && f.cameraMode === 'rigid');
+}
+
+function rigidCameraZoom(factor) {
+  _cam.rigidDist *= factor;
 }
 
 function setupRigidCameraDrag() {
@@ -274,22 +291,38 @@ function setupRigidCameraDrag() {
   el.dataset.rigidDragBound = '1';
 
   el.addEventListener('pointerdown', (e) => {
-    if (!rigidCameraActive() || _rigidDrag.id !== null) return;
-    _rigidDrag.id = e.pointerId;
-    _rigidDrag.x = e.clientX; _rigidDrag.y = e.clientY;
+    if (!rigidCameraActive() || _rigidPtrs.size >= 2) return;
+    _rigidPtrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
     el.setPointerCapture(e.pointerId);
+    // 2本目が下りた瞬間の指の間隔を、ピンチの基準にする
+    if (_rigidPtrs.size === 2) _rigidPinchPx = rigidPinchSpan();
   });
   const end = (e) => {
-    if (_rigidDrag.id !== e.pointerId) return;
-    _rigidDrag.id = null;
+    if (!_rigidPtrs.has(e.pointerId)) return;
+    _rigidPtrs.delete(e.pointerId);
+    _rigidPinchPx = 0;
     if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
   };
   el.addEventListener('pointerup', end);
   el.addEventListener('pointercancel', end);
+  // 画面の外でボタンを離したときなど、pointerupが来ないことがある。
+  // 指が押さえっぱなしだと覚えたままになり、次に触ったときいきなり2本指
+  // （＝ピンチ）扱いになって回せなくなるので、捕まえ損ねも終わりとして扱う。
+  el.addEventListener('lostpointercapture', end);
   el.addEventListener('pointermove', (e) => {
-    if (_rigidDrag.id !== e.pointerId || !rigidCameraActive()) return;
-    const dx = e.clientX - _rigidDrag.x, dy = e.clientY - _rigidDrag.y;
-    _rigidDrag.x = e.clientX; _rigidDrag.y = e.clientY;
+    const p = _rigidPtrs.get(e.pointerId);
+    if (!p || !rigidCameraActive()) return;
+    const dx = e.clientX - p.x, dy = e.clientY - p.y;
+    p.x = e.clientX; p.y = e.clientY;
+    if (_rigidPtrs.size >= 2) {
+      // ピンチ。**指を広げたら近づく**（間隔が広がったぶんだけ距離を割る）
+      const now = rigidPinchSpan();
+      if (now > RIGID_PINCH_MIN_PX && _rigidPinchPx > RIGID_PINCH_MIN_PX) {
+        rigidCameraZoom(_rigidPinchPx / now);
+        _rigidPinchPx = now;
+      }
+      return;   // 2本指のあいだは回さない（ピンチのたびに視点が振れてしまう）
+    }
     _cam.rigidYaw -= dx * RIGID_DRAG_PER_PX;
     // 下へドラッグすると、カメラが上へ回る（OrbitControlsと同じ手ごたえ）
     _cam.rigidPitch = THREE.MathUtils.clamp(
@@ -298,7 +331,7 @@ function setupRigidCameraDrag() {
   el.addEventListener('wheel', (e) => {
     if (!rigidCameraActive()) return;
     e.preventDefault();
-    _cam.rigidDist *= e.deltaY > 0 ? RIGID_ZOOM_PER_NOTCH : 1 / RIGID_ZOOM_PER_NOTCH;
+    rigidCameraZoom(e.deltaY > 0 ? RIGID_ZOOM_PER_NOTCH : 1 / RIGID_ZOOM_PER_NOTCH);
   }, { passive: false });
 }
 
@@ -342,14 +375,10 @@ function updateFlightCamera(dt) {
     // 機体に貼り付いて、機体に対して同じ向き・同じ位置を保つ。ばね追従は入れない
     // （遅れがあると「機体に対して固定」ではなくなる）。
     //
-    // **見る角度はドラッグで変えられる**。ただし変えた角度は世界ではなく
-    // **機体に対して**覚える——そうしないと、せっかく選んだ「右斜め前から」が
-    // 機体が向きを変えるたびに別の角度になってしまう。
-    //
-    // やり方：このコマの頭で OrbitControls が（前のコマの機体位置を中心に）
-    // カメラを動かしている。その結果を**前のコマの姿勢**で機体座標へ畳み戻せば、
-    // ドラッグぶんがそのまま「機体から見たカメラの位置」の変化になる。
-    // あとはそれを**今のコマの姿勢**で世界へ戻せばいい。
+    // **見る角度と距離はドラッグ・ホイール・ピンチで変えられる**（setupRigidCameraDrag）。
+    // ただし覚えるのは世界に対する向きではなく、**機体から見た方位・伏せ角・距離**
+    // ——そうしないと、せっかく選んだ「右斜め前から」が、機体が向きを変えるたびに
+    // 別の角度になってしまう。ここでは覚えたその3つを世界へ戻すだけ。
     if (!_cam.rigidReady) {
       _cam.rigidYaw = 0;
       _cam.rigidPitch = Math.atan2(FLIGHT_RIGID_UP, FLIGHT_RIGID_BACK);
