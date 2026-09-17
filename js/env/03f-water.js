@@ -119,7 +119,7 @@ function buildRiverInstance(river) {
 
   const mesh = new THREE.Mesh(geo, EnvState.waterMaterial);
   mesh.position.set(ox, oy, oz);
-  mesh.renderOrder = 1; // 海(2)より先、地形より後
+  mesh.renderOrder = ENV_ORDER.water; // 海より先、地形より後
   mesh.matrixAutoUpdate = false;
   mesh.updateMatrix();
   EnvState.waterGroup.add(mesh);
@@ -166,7 +166,7 @@ function buildLakeInstance(lake) {
 
   const mesh = new THREE.Mesh(geo, EnvState.waterMaterial);
   mesh.position.set(lake.x, lake.level, lake.z);
-  mesh.renderOrder = 1;
+  mesh.renderOrder = ENV_ORDER.water;
   mesh.matrixAutoUpdate = false;
   mesh.updateMatrix();
   EnvState.waterGroup.add(mesh);

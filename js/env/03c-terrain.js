@@ -526,7 +526,7 @@ function initSea() {
 
   EnvState.sea = new THREE.Mesh(buildSeaGeometry(), mat);
   EnvState.sea.frustumCulled = false; // 常にカメラの真下にあるので判定するだけ無駄
-  EnvState.sea.renderOrder = 2;       // 半透明なので地形より後に描く
+  EnvState.sea.renderOrder = ENV_ORDER.sea;   // 半透明なので地形より後に描く
   EnvState.scene.add(EnvState.sea);
   EnvState.seaNormalMap = nmap;
 }

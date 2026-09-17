@@ -117,6 +117,7 @@ function updateSkyForSunDirection(sunDir, elevationDeg) {
   if (typeof updateSeaForDaylight === 'function') updateSeaForDaylight(dayFactor, warmth);
   if (typeof updateWaterForDaylight === 'function') updateWaterForDaylight(dayFactor, warmth);
   if (typeof updatePlacesForDaylight === 'function') updatePlacesForDaylight(dayFactor);
+  if (typeof updateSmokeForDaylight === 'function') updateSmokeForDaylight(dayFactor);
 }
 
 // 高度（プレビュー用スライダー）に応じて霧の色・濃さを変える。高いほど霞が減り、空の色が濃くなる。

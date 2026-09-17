@@ -292,7 +292,7 @@ function buildAircraftLights(config, model, modelParent, bodyParent) {
       new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 1, fog: false })
     );
     mesh.position.set(x, y, z);
-    mesh.renderOrder = 4;
+    mesh.renderOrder = ENV_ORDER.light;
     parent.add(mesh);
     // **にじみ（ブルーム）**。空港の灯火と同じ考え方で、画面ぜんぶの後処理では
     // なく「光らせたいものにだけ薄い光の玉を重ねる」（04b-airport.js の
@@ -304,7 +304,7 @@ function buildAircraftLights(config, model, modelParent, bodyParent) {
     }));
     glow.scale.setScalar(NAV_LIGHT_GLOW_SIZE);
     glow.position.copy(mesh.position);
-    glow.renderOrder = 3;
+    glow.renderOrder = ENV_ORDER.light - 1;
     parent.add(glow);
     out.push({ mesh, glow, kind, blink: info.blink });
   };
@@ -450,7 +450,7 @@ function buildLandingPool() {
     // 実際に重なりを避けているのは LANDING_POOL_LIFT_M の高さのほう。
     polygonOffset: true, polygonOffsetFactor: -8, polygonOffsetUnits: -8,
   }));
-  mesh.renderOrder = 2;
+  mesh.renderOrder = ENV_ORDER.effect;
   mesh.visible = false;
   mesh.frustumCulled = false;
   return mesh;
@@ -605,7 +605,7 @@ function plumeCone(color, opacity, fadeExp, blending) {
     transparent: true, opacity, depthWrite: false,
     blending: blending || THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
   }));
-  mesh.renderOrder = 3;
+  mesh.renderOrder = ENV_ORDER.effect;
   mesh.visible = false;
   return mesh;
 }
@@ -661,7 +661,7 @@ function plumeShimmer() {
     transparent: true, opacity: 0, depthWrite: false,
     blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
   }));
-  mesh.renderOrder = 3;
+  mesh.renderOrder = ENV_ORDER.effect;
   mesh.visible = false;
   mesh.userData.tex = tex;
   return mesh;
@@ -756,7 +756,7 @@ function buildEnginePlumes(model, parent, meshUnit) {
         opacity: 0, depthWrite: false, fog: false, blending: THREE.AdditiveBlending,
       }));
       glow.position.copy(e.position).addScaledVector(dir, r * 0.5);
-      glow.renderOrder = 3;
+      glow.renderOrder = ENV_ORDER.effect;
       glow.visible = false;
       parent.add(glow);
       entry.glow = glow;
@@ -857,7 +857,7 @@ function buildSonicBoom(model, parent) {
   // +Y を機首（-Z）へ向ける。底面（広いほう）が後ろに残る。
   cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, -1));
   cone.scale.set(unit * BOOM_CONE_RADIUS_SPAN, unit * BOOM_CONE_LEN_SPAN, unit * BOOM_CONE_RADIUS_SPAN);
-  cone.renderOrder = 2;
+  cone.renderOrder = ENV_ORDER.effect;
   cone.visible = false;
   parent.add(cone);
 
@@ -867,7 +867,7 @@ function buildSonicBoom(model, parent) {
     color: 0xffffff, transparent: true, opacity: 0, depthWrite: false,
     side: THREE.DoubleSide, blending: THREE.AdditiveBlending, fog: false,
   }));
-  ring.renderOrder = 2;
+  ring.renderOrder = ENV_ORDER.effect;
   ring.visible = false;
   parent.add(ring);
 
@@ -987,14 +987,17 @@ function buildContrail(model) {
   geo.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(total), 1));
   // 点はワールド中を飛び回るので、視界外判定は自前では持たない
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), Infinity);
-  // 煙と同じシェーダ（点ごとに大きさと濃さを持てる）。色だけ白にする。
-  const points = new THREE.Points(geo, new THREE.ShaderMaterial({
-    uniforms: { uMap: { value: contrailTexture() }, uColor: { value: new THREE.Color(0xffffff) } },
-    vertexShader: SMOKE_VERT, fragmentShader: SMOKE_FRAG,
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  geo.setAttribute('aHeat', new THREE.BufferAttribute(new Float32Array(total), 1));
+  // 煙と同じシェーダ・同じ作り方（点ごとに大きさと濃さを持てる）。色だけ白にする。
+  // **同じ作り方に寄せておくこと**——シェーダに uHot / uLight / 霧を足したとき、
+  // ここだけ自前で材質を組んでいたせいで、飛行機雲だけ uniform が欠けていた。
+  // 夜の下限は煙より高め（0.35）。氷の粒なので、月明かりでもうっすら見える。
+  const points = new THREE.Points(geo, makeSmokeMaterial({
+    color: 0xffffff, map: contrailTexture(),
+    blending: THREE.AdditiveBlending, nightLight: 0.35,
   }));
   points.frustumCulled = false;
-  points.renderOrder = 1;
+  points.renderOrder = ENV_ORDER.smoke;
   points.visible = false;
   const group = new THREE.Group();
   group.name = 'aircraft-contrail';
@@ -1031,6 +1034,12 @@ const SMOKE_SIZE_FROM = 13;        // ノズル半径に対する、出たての
 const SMOKE_SIZE_TO = 96;          // 消えるころの大きさ
 const SMOKE_ALPHA = 0.72;
 const SMOKE_COLOR = 0xf4f6f8;      // 白い煙
+// 炎に照らされている色と、その照り返しの抜け方。ノズルのすぐ後ろだけが赤く光る。
+const SMOKE_HOT_COLOR = 0xff8a3c;
+const SMOKE_HOT_FROM = 0.75;       // 出たての照らされ具合（全開のとき）
+const SMOKE_HOT_FADE_S = 0.45;     // これだけの秒数で照り返しが抜ける
+// 夜、煙をどこまで暗くするか。0にすると真っ黒な粒になって、かえって目立つ
+const SMOKE_NIGHT_LIGHT = 0.2;
 // 煙の大きさを決める半径は、**自動のノズルと同じ上限で頭打ちにする**。
 // 倍率が13〜96倍と大きいので、ノズルを手で大きく入れると煙だけが桁違いに育つ。
 // TB2（いちばん長い辺73.6m）でノズルに10mを入れたとき、煙の粒は出たて65m・
@@ -1039,32 +1048,87 @@ const SMOKE_COLOR = 0xf4f6f8;      // 白い煙
 // 炎は入れた値どおりの太さで出し、煙だけ機体の大きさで抑える。
 const SMOKE_R_MAX_SPAN = PLUME_R_MAX_SPAN;
 
+// 煙の色は3つの要素でできている。
+//   uColor … 煙そのものの色（白〜灰色）
+//   uHot   … 炎に照らされている色。出たての粒だけがこれに寄る
+//   uLight … まわりの明るさ（昼1.0・夜0.2）。**これが無かったので夜も白く光っていた**
+// 霧（fog）も入れる。入っていなかったので、遠くの煙だけが霞に負けずくっきり残り、
+// 雲や海の向こうに浮いて見えていた。
 const SMOKE_VERT = `
 #include <common>
+#include <fog_pars_vertex>
 #include <logdepthbuf_pars_vertex>
 attribute float aAlpha;
 attribute float aSize;
+attribute float aHeat;
 varying float vAlpha;
+varying float vHeat;
 void main() {
   vAlpha = aAlpha;
-  vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  gl_PointSize = aSize * (300.0 / max(-mv.z, 1.0));
-  gl_Position = projectionMatrix * mv;
+  vHeat = aHeat;
+  // 変数名は mvPosition でなければならない（fog_vertex チャンクがこの名前を読む）
+  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+  gl_PointSize = aSize * (300.0 / max(-mvPosition.z, 1.0));
+  gl_Position = projectionMatrix * mvPosition;
   #include <logdepthbuf_vertex>
+  #include <fog_vertex>
 }`;
 const SMOKE_FRAG = `
 #include <common>
+#include <fog_pars_fragment>
 #include <logdepthbuf_pars_fragment>
 uniform sampler2D uMap;
 uniform vec3 uColor;
+uniform vec3 uHot;
+uniform float uLight;
 varying float vAlpha;
+varying float vHeat;
 void main() {
   #include <logdepthbuf_fragment>
   vec4 t = texture2D(uMap, gl_PointCoord);
   float a = t.a * vAlpha;
   if (a < 0.004) discard;
-  gl_FragColor = vec4(uColor, a);
+  // 煙は自分で光らない。炎に照らされているぶん（vHeat）だけが明るい。
+  gl_FragColor = vec4(mix(uColor * uLight, uHot, vHeat), a);
+  #include <fog_fragment>
 }`;
+
+// 煙の材質を作る。昼夜と霧に追従させるため、作ったものは全部ここで覚えておく
+// （機体を作り直しても古いものが残らないよう、使うたびに生きているものだけ残す）。
+const _smokeMaterials = [];
+function makeSmokeMaterial(opt) {
+  const color = opt.color;
+  const mat = new THREE.ShaderMaterial({
+    uniforms: THREE.UniformsUtils.merge([
+      THREE.UniformsLib.fog,
+      {
+        uMap: { value: null },
+        uColor: { value: new THREE.Color(color) },
+        uHot: { value: new THREE.Color(opt.hot === undefined ? color : opt.hot) },
+        uLight: { value: 1 },
+      },
+    ]),
+    vertexShader: SMOKE_VERT, fragmentShader: SMOKE_FRAG,
+    transparent: true, depthWrite: false, fog: true,
+    blending: opt.blending === undefined ? THREE.NormalBlending : opt.blending,
+  });
+  // UniformsUtils.merge はテクスチャを複製しようとするので、あとから入れる
+  mat.uniforms.uMap.value = opt.map || smokeTexture();
+  // 夜にどこまで暗くするか（0にすると真っ黒な粒になって、かえって目立つ）
+  mat.userData.nightLight = opt.nightLight === undefined ? SMOKE_NIGHT_LIGHT : opt.nightLight;
+  _smokeMaterials.push(mat);
+  return mat;
+}
+
+// 昼夜に追従させる（03-sky.js の updateSkyForSunDirection から呼ばれる）
+function updateSmokeForDaylight(dayFactor) {
+  for (let i = _smokeMaterials.length - 1; i >= 0; i--) {
+    const m = _smokeMaterials[i];
+    if (!m.uniforms || !m.uniforms.uLight) { _smokeMaterials.splice(i, 1); continue; }
+    const floor = m.userData.nightLight;
+    m.uniforms.uLight.value = floor + (1 - floor) * dayFactor;
+  }
+}
 
 let _smokeTexture = null;
 function smokeTexture() {
@@ -1099,13 +1163,10 @@ function buildRocketSmoke(model, meshUnit) {
   geo.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array(total), 1));
   geo.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(total), 1));
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), Infinity);
-  const points = new THREE.Points(geo, new THREE.ShaderMaterial({
-    uniforms: { uMap: { value: smokeTexture() }, uColor: { value: new THREE.Color(SMOKE_COLOR) } },
-    vertexShader: SMOKE_VERT, fragmentShader: SMOKE_FRAG,
-    transparent: true, depthWrite: false, blending: THREE.NormalBlending,
-  }));
+  geo.setAttribute('aHeat', new THREE.BufferAttribute(new Float32Array(total), 1));
+  const points = new THREE.Points(geo, makeSmokeMaterial({ color: SMOKE_COLOR, hot: SMOKE_HOT_COLOR }));
   points.frustumCulled = false;
-  points.renderOrder = 1;
+  points.renderOrder = ENV_ORDER.smoke;
   points.visible = false;
   return { points, emitters, age: new Float32Array(total).fill(Infinity),
     cursor: new Int32Array(emitters.length), dist: 0, timer: 0,
@@ -1144,13 +1205,10 @@ function buildTyreSmoke(model, meshUnit) {
   geo.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array(total), 1));
   geo.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(total), 1));
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), Infinity);
-  const points = new THREE.Points(geo, new THREE.ShaderMaterial({
-    uniforms: { uMap: { value: smokeTexture() }, uColor: { value: new THREE.Color(TYRE_SMOKE_COLOR) } },
-    vertexShader: SMOKE_VERT, fragmentShader: SMOKE_FRAG,
-    transparent: true, depthWrite: false, blending: THREE.NormalBlending,
-  }));
+  geo.setAttribute('aHeat', new THREE.BufferAttribute(new Float32Array(total), 1));
+  const points = new THREE.Points(geo, makeSmokeMaterial({ color: TYRE_SMOKE_COLOR }));
   points.frustumCulled = false;
-  points.renderOrder = 1;
+  points.renderOrder = ENV_ORDER.smoke;
   points.visible = false;
   return { points, emitters, age: new Float32Array(total).fill(Infinity),
     cursor: new Int32Array(emitters.length), burst: 0, wasOnGround: true, timer: 0 };
@@ -1231,6 +1289,7 @@ function updateRocketSmoke(ac, controls, state, dt) {
   const pos = geo.attributes.position.array;
   const alpha = geo.attributes.aAlpha.array;
   const size = geo.attributes.aSize.array;
+  const heat = geo.attributes.aHeat.array;
 
   // 置く間隔。速いほど短い時間で置かないと、煙が点々に切れる。
   // 止まっていても（ホバリング中など）時間で置けるよう、下限を置く。
@@ -1247,8 +1306,17 @@ function updateRocketSmoke(ac, controls, state, dt) {
       const em = sm.emitters[i];
       // **止めているエンジンは何も出さない**。上向きのリフトエンジンは
       // 出力レバーが別なので、そちらを見る（前へ進むレバーで煙が出ていた）。
+      //
+      // 見るのは**いま実際に出ている出力**（engineDeliveredLever）。
+      // 手元のレバー（controls.throttle）で見ていたので、**点いてはいるが
+      // まだ0%のロケット**——遅いグループから順に上がる積み上げ式なので、
+      // レバーを少し開けただけでは上のグループはまだ0%——からも煙が出ていた。
+      // 炎のほうは同じ直しがもう入っている（updateEnginePlumes）。
       const off = typeof engineGroupOff === 'function' && engineGroupOff(controls, em.engine.group);
-      const power = off ? 0 : (em.engine.lift ? (controls.vtolThrottle || 0) : controls.throttle);
+      const power = off ? 0
+        : (typeof engineDeliveredLever === 'function'
+          ? engineDeliveredLever(ac.model, state, controls, em.engine)
+          : (em.engine.lift ? (controls.vtolThrottle || 0) : controls.throttle));
       if (power <= 0.02) { sm.last[i] = null; continue; }
       // 出力に比例して、1回に置く数を増やす（全開で SMOKE_PUFFS_MAX 個）
       const puffs = Math.max(1, Math.round(SMOKE_PUFFS_MAX * power));
@@ -1271,6 +1339,8 @@ function updateRocketSmoke(ac, controls, state, dt) {
         sm.age[slot] = 0;
         alpha[slot] = SMOKE_ALPHA * power;
         size[slot] = em.radius * SMOKE_SIZE_FROM;
+        // 出たてはノズルのすぐ後ろ＝炎に照らされている。離れるほど白い煙に戻る。
+        heat[slot] = SMOKE_HOT_FROM * power;
       }
       sm.last[i] = now;
     }
@@ -1287,11 +1357,14 @@ function updateRocketSmoke(ac, controls, state, dt) {
     alpha[s] *= Math.pow(1 - dt / SMOKE_LIFE_S, 1.4);
     const em = sm.emitters[Math.floor(s / SMOKE_PER_ROCKET)] || sm.emitters[0];
     size[s] = em.radius * (SMOKE_SIZE_FROM + (SMOKE_SIZE_TO - SMOKE_SIZE_FROM) * t);
+    // 炎の照り返しは、離れるぶんだけ速く抜ける（煙そのものより短い）
+    heat[s] = Math.max(heat[s] - dt / SMOKE_HOT_FADE_S, 0);
     live++;
   }
   geo.attributes.position.needsUpdate = true;
   geo.attributes.aAlpha.needsUpdate = true;
   geo.attributes.aSize.needsUpdate = true;
+  geo.attributes.aHeat.needsUpdate = true;
   sm.points.visible = live > 0;
 }
 

@@ -147,7 +147,7 @@ function initWeather() {
 // そのままだと「視程0.7kmの濃霧なのに青空が見える」ことになるので、
 // カメラを囲む球に霧色を塗って空を覆う。
 //
-// 深度テストは有効のまま、半透明の中でいちばん先（renderOrder -1）に描く。
+// 深度テストは有効のまま、半透明の中でいちばん先に描く（ENV_ORDER.haze）。
 //   - 球より手前の地形・滑走路・水面・降水は、あとから普通に上書きされる
 //   - 球より奥の空ドーム・遠景の雲は霞に沈む（そこはもう霧で真っ白な距離）
 // 霧の色は自分で塗らず、霧そのものに塗らせる（fog: true）。
@@ -162,7 +162,7 @@ function buildSkyHaze() {
   });
   const haze = new THREE.Mesh(new THREE.SphereGeometry(SKY_HAZE_RADIUS, 32, 16), mat);
   haze.frustumCulled = false;
-  haze.renderOrder = -1;
+  haze.renderOrder = ENV_ORDER.haze;
   haze.visible = false;
   EnvState.skyHaze = haze;
   EnvState.scene.add(haze);
@@ -276,7 +276,7 @@ function buildCloudDeck() {
   });
   EnvState.cloudDeck = new THREE.Mesh(buildDeckGeometry(), mat);
   EnvState.cloudDeck.frustumCulled = false;
-  EnvState.cloudDeck.renderOrder = 3; // 半透明なので海(2)より後
+  EnvState.cloudDeck.renderOrder = ENV_ORDER.clouds; // 半透明なので海より後
   EnvState.cloudDeck.visible = false;
   EnvState.weatherGroup.add(EnvState.cloudDeck);
   EnvState.cloudDeckTexture = tex;

@@ -212,6 +212,10 @@ function makeLabelSprite(text, color, fontPx) {
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
     map: tex, transparent: true, depthTest: false, depthWrite: false, fog: false,
   }));
+  // **深度テストを切っただけでは前に出ない**。半透明はあとから描いたほうが上に乗るので、
+  // 番号を振っていないと（＝0）海や雲底より先に描かれて、そのまま塗りつぶされる
+  // ——「海の上や雲の中で地名が消える」の正体がこれだった（ENV_ORDER 参照）。
+  sprite.renderOrder = ENV_ORDER.label;
   sprite.userData.aspect = w / h;
   return sprite;
 }
