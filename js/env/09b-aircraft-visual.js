@@ -1030,18 +1030,46 @@ const SMOKE_SPREAD = 1.8;          // ノズル半径に対する、置く位置
 // 煙はノズルより**ずっと太く広がる**（ロケットの噴煙は口の何倍にもなる）。
 // ノズルの太さを実機に合わせて細くしたぶん、ここの倍率を上げて
 // 見た目の大きさを保つ。
-const SMOKE_SIZE_FROM = 13;        // ノズル半径に対する、出たての大きさ
-const SMOKE_SIZE_TO = 96;          // 消えるころの大きさ
+// **大きくするのは「膨らんだあと」のほう。** 真後ろから見たときに画面が真っ白に
+// なるかどうかは、出たての粒の大きさでほぼ決まる（濃い粒が重なるのはノズルの
+// すぐ後ろだから）。実測（ノズル半径0.13mの機体を真後ろ70mから全開で見て、
+// 真っ白な画素の割合）で、13→96 のとき5.9%。両方1.4倍（18→135）にすると
+// **20.3%** まで跳ね上がるが、出たてを控えめにして終わりだけ伸ばす
+// （15→150）と **6.7%** で収まる。煙の見た目は、出たてが1.15倍・
+// 膨らんだあとが1.56倍になる。
+const SMOKE_SIZE_FROM = 15;        // ノズル半径に対する、出たての大きさ
+const SMOKE_SIZE_TO = 150;         // 消えるころの大きさ
 const SMOKE_ALPHA = 0.72;
 const SMOKE_COLOR = 0xf4f6f8;      // 白い煙
 // 炎に照らされている色と、その照り返しの抜け方。ノズルのすぐ後ろだけが赤く光る。
 const SMOKE_HOT_COLOR = 0xff8a3c;
 const SMOKE_HOT_FROM = 0.75;       // 出たての照らされ具合（全開のとき）
-const SMOKE_HOT_FADE_S = 0.45;     // これだけの秒数で照り返しが抜ける
+// **照り返しは「時間」ではなく「ノズルから離れた距離」で抜く。**
+// 秒数で抜いていたので、速い機体ほど赤いところが長く伸びていた——照らしているのは
+// 炎で、炎はノズルのそばにしかないのだから、離れれば消えるのが本当のところ。
+// 0.45秒で抜く作りだと、マッハ2（毎秒680m）の機体では**300m先まで赤い**。
+// 距離はノズル半径の倍数で持つ。炎の長さがノズル半径の9.8倍なので、その約10倍
+// ＝「炎の光が届くあたり」まで。**遅い機体の見えかたを変えないところ**でもある
+// （実測：ノズル半径0.13mの機体を100ktで飛ばすと、秒数で抜いていたときの
+//   赤い範囲が26m。この値だと13mで、見た目はほぼ変わらない。
+//   同じ機体をマッハ2で飛ばすと295m→50mになる）。
+const SMOKE_HOT_FADE_SPAN = 100;
+// ただし**どんなに速くても、出たての粒2〜3個ぶんは赤いままにする**。
+// 距離だけで決めると、粒の間隔が広がる速い機体では1個も赤くならない
+// （実測：ノズル半径0.13mの機体をマッハ2で飛ばすと、粒の間隔が19.8mに対して
+//   赤くする距離が3.4mしかなく、赤い粒が0個になった）。
+const SMOKE_HOT_MIN_PUFFS = 2.5;
+// 止まっているとき（ホバリングなど）の保険。距離では抜けないので、秒数でも抜く。
+const SMOKE_HOT_FADE_MAX_S = 2.5;
+// **噴射で後ろへ押し出される速さ。** 置いたあと、ノズルの向きの反対へ流れていく。
+// ノズル半径の倍数（毎秒）で持ち、出力に比例させる。抵抗ですぐ止まるので、
+// 流れる距離は だいたい 速さ ÷ 抵抗 ＝ ノズル半径の7.5倍。
+const SMOKE_JET_SPAN = 12;
+const SMOKE_JET_DRAG = 1.6;        // 毎秒どれだけ速さが落ちるか（e^-1.6）
 // 夜、煙をどこまで暗くするか。0にすると真っ黒な粒になって、かえって目立つ
 const SMOKE_NIGHT_LIGHT = 0.2;
 // 煙の大きさを決める半径は、**自動のノズルと同じ上限で頭打ちにする**。
-// 倍率が13〜96倍と大きいので、ノズルを手で大きく入れると煙だけが桁違いに育つ。
+// 倍率が15〜150倍と大きいので、ノズルを手で大きく入れると煙だけが桁違いに育つ。
 // TB2（いちばん長い辺73.6m）でノズルに10mを入れたとき、煙の粒は出たて65m・
 // 最大112mになり、真後ろから見ると**画面の28%が真っ白**になっていた
 // （炎そのものは同じ条件で0.2%しか白飛びしない。犯人は煙のほうだった）。
@@ -1154,6 +1182,8 @@ function buildRocketSmoke(model, meshUnit) {
     .filter((e) => e.kind === 'rocket')
     .map((e) => ({
       engine: e, local: e.position.clone(),
+      // 噴射が出ていく向き（機体座標）。推力の向きの反対。
+      exhaust: e.axis.clone().negate().normalize(),
       radius: Math.min(enginePlumeRadius(e, unit), unit * SMOKE_R_MAX_SPAN),
     }));
   if (!emitters.length) return null;
@@ -1169,6 +1199,12 @@ function buildRocketSmoke(model, meshUnit) {
   points.renderOrder = ENV_ORDER.smoke;
   points.visible = false;
   return { points, emitters, age: new Float32Array(total).fill(Infinity),
+    // 噴射で押し出される速さ（ワールド、m/s）。置いたあと抵抗で落ちていく。
+    vel: new Float32Array(total * 3),
+    // 炎の照り返し。置いたときの強さと、そのときの走行距離を覚えておき、
+    // **毎フレーム「ノズルからどれだけ離れたか」から出し直す**
+    // （毎フレーム少しずつ引くやり方だと、コマ落ちしている機械で一気に抜ける）。
+    hot0: new Float32Array(total), odo0: new Float32Array(total), odo: 0,
     cursor: new Int32Array(emitters.length), dist: 0, timer: 0,
     // 前に置いた場所（ワールド）。置いた場所と場所のあいだを埋めるのに使う。
     last: emitters.map(() => null) };
@@ -1281,6 +1317,7 @@ function updateTyreSmoke(ac, controls, state, dt) {
 }
 
 const _smWorld = new THREE.Vector3();
+const _smJet = new THREE.Vector3();
 
 function updateRocketSmoke(ac, controls, state, dt) {
   const sm = ac.smoke;
@@ -1290,6 +1327,9 @@ function updateRocketSmoke(ac, controls, state, dt) {
   const alpha = geo.attributes.aAlpha.array;
   const size = geo.attributes.aSize.array;
   const heat = geo.attributes.aHeat.array;
+  const vel = sm.vel;
+  // 機体の走行距離。粒は置いたら動かないので、これがそのまま「ノズルから離れた距離」。
+  sm.odo += state.airspeed * dt;
 
   // 置く間隔。速いほど短い時間で置かないと、煙が点々に切れる。
   // 止まっていても（ホバリング中など）時間で置けるよう、下限を置く。
@@ -1323,6 +1363,10 @@ function updateRocketSmoke(ac, controls, state, dt) {
       // いまのノズルの位置（ワールド）
       _smWorld.copy(em.local).applyQuaternion(ac.group.quaternion).add(ac.group.position);
       const now = _smWorld.clone();
+      // 噴射の速さ（ワールド）。出力に比例、ノズルの大きさに比例。
+      _smJet.copy(em.exhaust).applyQuaternion(ac.group.quaternion)
+        .multiplyScalar(em.radius * SMOKE_JET_SPAN * power);
+      const jetSpread = em.radius * SMOKE_JET_SPAN * power * 0.18;
       // **前に置いた場所から今までの区間に、ばらまく**。同じ1点に何個も重ねても
       // 濃くなるだけで筋は埋まらない——実際、点々に切れた破線にしか見えなかった。
       const from = sm.last[i] || now;
@@ -1340,11 +1384,26 @@ function updateRocketSmoke(ac, controls, state, dt) {
         alpha[slot] = SMOKE_ALPHA * power;
         size[slot] = em.radius * SMOKE_SIZE_FROM;
         // 出たてはノズルのすぐ後ろ＝炎に照らされている。離れるほど白い煙に戻る。
-        heat[slot] = SMOKE_HOT_FROM * power;
+        sm.hot0[slot] = SMOKE_HOT_FROM * power;
+        sm.odo0[slot] = sm.odo;
+        heat[slot] = sm.hot0[slot];
+        // **噴射のぶん、後ろへ押し出す。** 置きっぱなしだと機体が置いていくだけの
+        // 筋になって、吹き出している感じが出ない。向きはノズルの反対で、
+        // 速さは出力に比例。少しだけ散らして、まっすぐな棒にならないようにする。
+        vel[slot * 3] = _smJet.x + (Math.random() * 2 - 1) * jetSpread;
+        vel[slot * 3 + 1] = _smJet.y + (Math.random() * 2 - 1) * jetSpread;
+        vel[slot * 3 + 2] = _smJet.z + (Math.random() * 2 - 1) * jetSpread;
       }
       sm.last[i] = now;
     }
   }
+
+  // このフレームで、照り返しがどれだけ抜けるか。
+  // 粒は置いたら動かない（噴射ぶんを除く）ので、ノズルから離れる速さ＝機体の速さ。
+  // 止まっているときのために、秒数でも抜く保険を足しておく。
+  const spacingM = Math.max(stepM, state.airspeed * SMOKE_STEP_MIN_S);
+  const fadeM = Math.max(r0 * SMOKE_HOT_FADE_SPAN, spacingM * SMOKE_HOT_MIN_PUFFS, 1e-3);
+  const drag = Math.exp(-SMOKE_JET_DRAG * dt);
 
   for (let s = 0; s < sm.age.length; s++) {
     const a = sm.age[s];
@@ -1357,8 +1416,18 @@ function updateRocketSmoke(ac, controls, state, dt) {
     alpha[s] *= Math.pow(1 - dt / SMOKE_LIFE_S, 1.4);
     const em = sm.emitters[Math.floor(s / SMOKE_PER_ROCKET)] || sm.emitters[0];
     size[s] = em.radius * (SMOKE_SIZE_FROM + (SMOKE_SIZE_TO - SMOKE_SIZE_FROM) * t);
-    // 炎の照り返しは、離れるぶんだけ速く抜ける（煙そのものより短い）
-    heat[s] = Math.max(heat[s] - dt / SMOKE_HOT_FADE_S, 0);
+    // 噴射で押し出されたぶんだけ動かす（抵抗ですぐ止まる）
+    const vx = vel[s * 3], vy = vel[s * 3 + 1], vz = vel[s * 3 + 2];
+    if (vx || vy || vz) {
+      pos[s * 3] += vx * dt; pos[s * 3 + 1] += vy * dt; pos[s * 3 + 2] += vz * dt;
+      vel[s * 3] = vx * drag; vel[s * 3 + 1] = vy * drag; vel[s * 3 + 2] = vz * drag;
+    }
+    // 炎の照り返しは**ノズルから離れた距離**で抜く（SMOKE_HOT_FADE_SPAN の説明）。
+    // 止まっているときのために、経った時間ぶんも足す。
+    if (sm.hot0[s] > 0) {
+      const gone = (sm.odo - sm.odo0[s]) / fadeM + na / SMOKE_HOT_FADE_MAX_S;
+      heat[s] = gone >= 1 ? 0 : sm.hot0[s] * (1 - gone);
+    }
     live++;
   }
   geo.attributes.position.needsUpdate = true;
