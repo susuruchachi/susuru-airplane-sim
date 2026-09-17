@@ -614,14 +614,46 @@ function gearDesignLoadN(model) {
   return weight + model.contacts.length * (moment / base);
 }
 
-function gearSpringRate(model) {
+// 緩衝支柱の伸び縮みの幅(m)。静止時の沈み込み（GEAR_SQUASH_M）よりずっと深い。
+// 実機の大型機の支柱も40〜60cmは縮む。
+const GEAR_STROKE_M = 0.5;
+
+// 脚のばねを**縮むほど硬くなる**ものにする（実機の緩衝支柱と同じ）。
+//
+// **受け止める荷重を「静止時の沈み込み」で割って、一本調子のばねにしていた。**
+// 推力のモーメントまで含めた設計荷重で静止時に8cmしか沈まない硬さを出すので、
+// 推力の大きい機体の脚が桁違いに硬くなる——サンダーバード2号（51t）は
+// 設計荷重が重さの52倍で、ばねも52倍硬かった。硬いばねは沈む余地が無いぶん、
+// 同じ沈下率でも受け止めるときのGが √(硬さ) に比例して上がる
+// （一本調子のばねでは G ＝ 沈下率 ÷ √(g·沈み込み)）。
+//
+// かといって全体を柔らかくすると、推力が重さの2,000倍あるような機体
+// （実際に試験にある）が地面へめり込んで抜けてしまう。支柱を縮み具合で分ける。
+//   ・浅いところ … 重さを静止時に GEAR_SQUASH_M（8cm）で受け止める硬さ
+//   ・深いところ … 3乗で立ち上がり、縮みきる GEAR_STROKE_M（50cm）で
+//                  設計荷重（重さ＋推力のモーメント）に届く硬さ
+// 接地の瞬間に効くのは浅いほうだけなので着地は柔らかく、推力で押しつけられた
+// ときだけ深いほうが効いて支える。
+function gearSpringRates(model) {
   const n = Math.max(model.contacts.length, 1);
-  const k = gearDesignLoadN(model) / (GEAR_SQUASH_M * n);
   // どれだけ荷重が大きくても、刻みで積分できる硬さを超えさせない。
   // ここで頭打ちになると設計より深く沈むが、弾け飛ぶよりはるかにましで、
   // 「沈む」ほうは見た目が少し埋まるだけで済む。
   const kMax = Math.pow(GEAR_STABLE_WDT / FLIGHT_SUBSTEP, 2) * (model.massKg / n);
-  return Math.min(k, kMax);
+  const soft = Math.min((model.massKg * FLIGHT_GRAVITY) / (GEAR_SQUASH_M * n), kMax);
+  const full = Math.min(gearDesignLoadN(model) / (GEAR_STROKE_M * n), kMax);
+  return { n, soft, hard: Math.max(full - soft, 0), kMax };
+}
+
+// 縮み pen のときの、ばねの力と、その場の接線の硬さ（減衰に使う）。
+// 縮み具合は2（支柱の2倍）で頭打ち——それ以上は「底突き」で、
+// 力を増やし続けると弾け飛ぶ。
+function gearNormalSpring(rate, pen) {
+  const s = Math.min(pen / GEAR_STROKE_M, 2);
+  return {
+    force: rate.soft * pen + rate.hard * s * s * s * GEAR_STROKE_M,
+    k: Math.min(rate.soft + 3 * rate.hard * s * s, rate.kMax),
+  };
 }
 
 // 脚ごとにばねと摩擦を出す。力は機体座標で返す（空力と同じ入れ物に足せるように）。
@@ -632,8 +664,7 @@ function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
   const q = state.quaternion;
   const qInv = _fv.qInv.copy(q).invert();
   const n = model.contacts.length;
-  const kSpring = gearSpringRate(model);
-  const cDamp = 2 * Math.sqrt(kSpring * (model.massKg / n)) * 0.9;
+  const rate = gearSpringRates(model);
 
   const steerRad = THREE.MathUtils.degToRad(GEAR_STEER_MAX_DEG) * controls.yaw
     * THREE.MathUtils.clamp(1 - state.groundSpeed / 40, 0, 1);
@@ -653,13 +684,22 @@ function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
     const vel = _gv.vel.crossVectors(state.angularVelocity, r).applyQuaternion(q).add(state.velocity);
 
     // 垂直抗力。沈み込みのばねと、めり込む速度への減衰。
+    //
+    // **減衰は、沈み込んだぶんだけ効かせる**。減衰を最初から丸ごと掛けていたので、
+    // 触れた最初の1フレームに「まだ1mmも沈んでいないのに、沈む速度ぶんの
+    // 減衰力が丸ごと」立ち上がり、そこだけ跳ね上がっていた——実測で
+    // サンダーバード2号が -399fpm（毎秒2.0m）という穏やかな沈下で接地した
+    // 瞬間に**20.4G**を記録し、次のフレームには4.9G、その次には浮いていた
+    // （＝1フレームだけの棘）。実機の緩衝支柱も、縮みはじめのオリフィスは
+    // ほとんど絞っておらず、縮むほど減衰が立ち上がる。
+    // 減衰の強さは**その場の接線の硬さ**から出す（ばねが縮み具合で硬さを
+    // 変えるので、一本の値では足りない。gearNormalSpring 参照）。
     const vNormal = vel.y;
-    let normal = kSpring * pen - cDamp * vNormal;
+    const sp = gearNormalSpring(rate, pen);
+    const cDamp = 2 * Math.sqrt(sp.k * (model.massKg / n)) * 0.9;
+    const damp = cDamp * THREE.MathUtils.clamp(pen / GEAR_SQUASH_M, 0, 1);
+    let normal = sp.force - damp * vNormal;
     if (normal < 0) normal = 0;
-    // 沈みすぎたときに弾き飛ばさないよう上限を置く。ばねが GEAR_SQUASH_M の
-    // 8倍まで縮んだぶん＝そのばねで出せる力の8倍を上限にする（硬さと同じ基準で
-    // 決まるので、重い機体でも大推力の機体でも自動で釣り合う）。
-    normal = Math.min(normal, kSpring * GEAR_SQUASH_M * 8);
 
     // 車輪の向き（機体の前方を地面へ落とし、前輪なら舵角ぶん回す）
     const fwd = _gv.fwd.set(0, 0, -1);

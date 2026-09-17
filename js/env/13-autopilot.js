@@ -483,6 +483,8 @@ const AP_FLAP_RAMP_M = 5000;
 // 4まで上げると今度は行き過ぎて19.4Gに戻る。
 const AP_PITCH_VS_KD = 2;
 const AP_FLARE_PITCH_MAX = 10;  // 引き起こしで許す機首上げの上限(°)
+// 着陸滑走で跳ねて浮いたときに狙う機首上げ(°)。0にすると前輪から突っ込む
+const AP_ROLLOUT_PITCH_DEG = 5;
 const AP_FLAP_TRIM_PIN = 0.9;
 const AP_FLAP_BACK_RATE = 0.05; // 戻す／また下ろす速さ（毎秒）
 const AP_FLAP_BACK_MIN = 0.3;   // これ以上は戻さない
@@ -2104,18 +2106,48 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   // ---- 減速 -----------------------------------------------------------------
   if (ap.phase === 'rollout') {
     controls.throttle = 0;
-    controls.flap = 1;
+    // **接地したあとにフラップを足さない**。ここで全開（1.0）にしていたので、
+    // 接地した直後に揚力が増えて、そのまま浮き上がっていた——実測で
+    // Boeing747が148kt（失速129kt）で接地した0.5秒後にフラップが0.3→1.0になり、
+    // **対地102mまで舞い上がって**、10秒かけて落ちてきて-4,030fpm・10.7Gで
+    // 叩きつけられていた（このあいだ昇降舵は-1.00に張り付いていて、
+    // 姿勢はもう戻せない）。スポイラーを積んでいない機体で揚力を捨てる手段は
+    // フラップを戻すことしかないので、戻す。積んでいる機体はスポイラーが
+    // その役目をするので、フラップはそのままでいい。
+    controls.flap = model.hasSpoiler ? 1 : 0;
     controls.roll = apAileronForBank(state, 0, spd);
     controls.yaw = apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP, -1, 1);
     // 跳ねて浮いたら、ブレーキを離してもう一度接地の姿勢へ。
-    // 浮いている間に舵を中立へ落とすと、前輪から突っ込むことになる。
+    // 浮いている間に舵を中立へ落とすと、前輪から突っ込むことになるので、
+    // 機首は少しだけ上げたところ（AP_ROLLOUT_PITCH_DEG）を狙う。
+    //
+    // **指示ピッチに「いまのピッチ」を使ってはいけない**。
+    // `clamp(state.pitchDeg, 0, 8)` は上がったぶんをそのまま追認するだけで、
+    // 戻す力がどこにも無い。**トリムも接地のぶんを持ち越していた**ので、
+    // いったん浮くと機首上げが残ったまま上がり続ける——実測でBoeing747が
+    // 148ktで接地したあと、ピッチ2.8°→46°で**対地137mまで舞い上がり**、
+    // 10秒かけて落ちてきて-4,346fpm・8.8Gで叩きつけられていた。
+    // **スポイラーも立てたままにする**。浮いているあいだに引っ込めると
+    // 捨てたはずの揚力が戻り、失速速度の1.15倍で接地した機体は素直に
+    // また飛ぶ。実機の地上スポイラーも、跳ねている最中に戻したりはしない。
     if (!state.onGround) {
       controls.brake = 0;
-      controls.pitch = apElevatorForPitch(state, controls, apClamp(state.pitchDeg, 0, 8), dt, spd, ap);
+      controls.trim = 0;
+      controls.spoiler = model.hasSpoiler ? 1 : 0;
+      controls.pitch = apElevatorForPitch(state, controls, AP_ROLLOUT_PITCH_DEG, dt, spd, ap);
       return;
     }
-    controls.pitch = 0;
     controls.trim = 0; // 接地で溜めた機首上げを残すと、前輪が浮いて舵が効かない
+    // **速いうちは機首を少し上げたまま保つ**（実機のエアロダイナミック
+    // ブレーキングと同じ）。舵を中立へ落としていたので、スポイラーとブレーキの
+    // 抗力が重心より下に掛かるぶんで機首が突っ込んでいた——実測で
+    // サンダーバード1号が接地の1.5秒後にピッチ-16.6°、2.5秒後に-87.7°まで
+    // 突っ込み、前脚から地面を掘って22.4Gを記録した。失速速度に近づいたら
+    // 中立へ戻す（前輪が接地しないとブレーキも操舵も効かない）。
+    const noseUp = apClamp(state.groundSpeed / Math.max(spd.stall, 1) - 0.6, 0, 1);
+    controls.pitch = noseUp > 0
+      ? apElevatorForPitch(state, controls, AP_ROLLOUT_PITCH_DEG * noseUp, dt, spd, ap)
+      : 0;
     controls.brake = 1;
     // 接地したらスポイラーを全開にする（実機の「揚力を捨てる」操作）。
     // 車輪のブレーキは車輪に掛かっている重さのぶんしか効かないので、

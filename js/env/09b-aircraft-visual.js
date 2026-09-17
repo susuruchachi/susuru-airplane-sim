@@ -260,10 +260,13 @@ async function createAircraft(config, cgOverride) {
   // ロケットの煙。飛行機雲と同じ入れ物（シーン直下）へ入れる。
   const smoke = buildRocketSmoke(model, meshUnit);
   if (smoke) contrail.group.add(smoke.points);
+  // タイヤの煙。滑走路に置き去りにするものなので、飛行機雲と同じ入れ物へ。
+  const tyreSmoke = buildTyreSmoke(model, meshUnit);
+  if (tyreSmoke) contrail.group.add(tyreSmoke.points);
 
   return {
     model, group, orient, modelRoot, modelXform, visual, lights, landingPool,
-    plumes, boom, contrail, smoke, fx: contrail.group,
+    plumes, boom, contrail, smoke, tyreSmoke, fx: contrail.group,
     source,
     name: config.name || (source === 'builder' ? '機体' : '内蔵の練習機'),
     propeller: visual.userData ? visual.userData.propeller : null,
@@ -1110,6 +1113,115 @@ function buildRocketSmoke(model, meshUnit) {
     last: emitters.map(() => null) };
 }
 
+// --- タイヤの煙（接地の瞬間） -------------------------------------------------
+//
+// 接地したとき、車輪はまだ止まっている。滑走路の上を**引きずられながら回りだす**
+// までの1秒足らずのあいだ、ゴムが削れて白い煙が上がる——実機の着陸で誰もが
+// 見るあれ。速く接地するほど濃く、長く出る。
+const TYRE_SMOKE_PER_WHEEL = 24;   // 車輪1本ぶんに持つ粒の数
+const TYRE_SMOKE_LIFE_S = 2.2;     // 粒が消えるまで
+const TYRE_SMOKE_MIN_MPS = 12;     // これより遅い接地では出ない（タキシングで出たら困る）
+const TYRE_SMOKE_FULL_MPS = 70;    // この速さで接地したら全開
+const TYRE_SMOKE_BURST_S = 0.8;    // 車輪が回りきるまでの時間（全開のとき）
+const TYRE_SMOKE_SIZE_FROM = 1.2;  // 車輪の直径に対する、出たての大きさ
+const TYRE_SMOKE_SIZE_TO = 5.0;    // 消えるころの大きさ
+const TYRE_SMOKE_ALPHA = 0.55;
+const TYRE_SMOKE_COLOR = 0xdcdcd8; // ゴムの削りかす混じりの、少し灰色がかった白
+const TYRE_SMOKE_RISE_MPS = 2.0;   // 粒が上がっていく速さ
+const TYRE_SMOKE_DIA_MIN = 0.35;   // 車輪の半径が分からない機体で使う直径(m)
+
+function buildTyreSmoke(model, meshUnit) {
+  const wheels = (model.contacts || []);
+  if (!wheels.length) return null;
+  const unit = meshUnit > 0 ? meshUnit : aircraftLongestSide(model);
+  // 車輪の大きさ。脚の部品は接地点しか持っていないので、機体の大きさから見積もる
+  // （実機の車輪はだいたい全長の1.5%くらい：747で1.2m、練習機で0.4m）。
+  const dia = Math.max(unit * 0.015, TYRE_SMOKE_DIA_MIN);
+  const emitters = wheels.map((c) => ({ local: c.position.clone(), dia }));
+  const total = emitters.length * TYRE_SMOKE_PER_WHEEL;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(total * 3), 3));
+  geo.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array(total), 1));
+  geo.setAttribute('aSize', new THREE.BufferAttribute(new Float32Array(total), 1));
+  geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), Infinity);
+  const points = new THREE.Points(geo, new THREE.ShaderMaterial({
+    uniforms: { uMap: { value: smokeTexture() }, uColor: { value: new THREE.Color(TYRE_SMOKE_COLOR) } },
+    vertexShader: SMOKE_VERT, fragmentShader: SMOKE_FRAG,
+    transparent: true, depthWrite: false, blending: THREE.NormalBlending,
+  }));
+  points.frustumCulled = false;
+  points.renderOrder = 1;
+  points.visible = false;
+  return { points, emitters, age: new Float32Array(total).fill(Infinity),
+    cursor: new Int32Array(emitters.length), burst: 0, wasOnGround: true, timer: 0 };
+}
+
+const _tyWorld = new THREE.Vector3();
+
+function updateTyreSmoke(ac, controls, state, dt) {
+  const ts = ac.tyreSmoke;
+  if (!ts) return;
+  const geo = ts.points.geometry;
+  const pos = geo.attributes.position.array;
+  const alpha = geo.attributes.aAlpha.array;
+  const size = geo.attributes.aSize.array;
+
+  // 接地した瞬間を見つける。脚を畳んでいるときは出さない（胴体着陸なので）。
+  const nowOn = !!state.onGround;
+  if (nowOn && !ts.wasOnGround && controls.gearDown) {
+    const hard = THREE.MathUtils.clamp(
+      (state.groundSpeed - TYRE_SMOKE_MIN_MPS) / (TYRE_SMOKE_FULL_MPS - TYRE_SMOKE_MIN_MPS), 0, 1);
+    ts.burst = Math.max(ts.burst, TYRE_SMOKE_BURST_S * hard);
+    ts.hard = hard;
+  }
+  ts.wasOnGround = nowOn;
+
+  if (ts.burst > 0) {
+    const hard = ts.hard || 0;
+    ts.burst = Math.max(ts.burst - dt, 0);
+    ts.timer += dt;
+    // 置く間隔は「車輪1個ぶんの直径を進むごと」。速いほど短い時間で置かないと
+    // 点々になる（ロケットの煙と同じ理由。SMOKE_STEP_FRAC の説明を参照）。
+    const step = ts.emitters[0].dia / Math.max(state.groundSpeed, 1);
+    if (ts.timer >= step) {
+      ts.timer = 0;
+      for (let i = 0; i < ts.emitters.length; i++) {
+        const em = ts.emitters[i];
+        // 車輪の接地点＝脚の位置を、地面の高さまで落としたところ
+        _tyWorld.copy(em.local).applyQuaternion(ac.group.quaternion).add(ac.group.position);
+        const slot = i * TYRE_SMOKE_PER_WHEEL + ts.cursor[i];
+        ts.cursor[i] = (ts.cursor[i] + 1) % TYRE_SMOKE_PER_WHEEL;
+        const spread = em.dia * 0.6;
+        pos[slot * 3] = _tyWorld.x + (Math.random() * 2 - 1) * spread;
+        pos[slot * 3 + 1] = _tyWorld.y + em.dia * 0.2;
+        pos[slot * 3 + 2] = _tyWorld.z + (Math.random() * 2 - 1) * spread;
+        ts.age[slot] = 0;
+        alpha[slot] = TYRE_SMOKE_ALPHA * hard;
+        size[slot] = em.dia * TYRE_SMOKE_SIZE_FROM;
+      }
+    }
+  }
+
+  let live = 0;
+  for (let s = 0; s < ts.age.length; s++) {
+    const a = ts.age[s];
+    if (!(a < TYRE_SMOKE_LIFE_S)) { if (alpha[s] !== 0) alpha[s] = 0; continue; }
+    const na = a + dt;
+    ts.age[s] = na;
+    if (na >= TYRE_SMOKE_LIFE_S) { alpha[s] = 0; continue; }
+    const t = na / TYRE_SMOKE_LIFE_S;
+    alpha[s] *= Math.pow(1 - dt / TYRE_SMOKE_LIFE_S, 1.6);
+    pos[s * 3 + 1] += TYRE_SMOKE_RISE_MPS * dt;   // ゆっくり立ちのぼる
+    const em = ts.emitters[Math.floor(s / TYRE_SMOKE_PER_WHEEL)] || ts.emitters[0];
+    size[s] = em.dia * (TYRE_SMOKE_SIZE_FROM + (TYRE_SMOKE_SIZE_TO - TYRE_SMOKE_SIZE_FROM) * t);
+    live++;
+  }
+  geo.attributes.position.needsUpdate = true;
+  geo.attributes.aAlpha.needsUpdate = true;
+  geo.attributes.aSize.needsUpdate = true;
+  ts.points.visible = live > 0;
+}
+
 const _smWorld = new THREE.Vector3();
 
 function updateRocketSmoke(ac, controls, state, dt) {
@@ -1320,5 +1432,6 @@ function updateAircraftVisual(ac, controls, state, dt, elapsed) {
   updateEnginePlumes(ac, controls, state, dt, elapsed);
   updateContrail(ac, controls, state, dt);
   updateRocketSmoke(ac, controls, state, dt);
+  updateTyreSmoke(ac, controls, state, dt);
   updateSonicBoom(ac, controls, state, dt);
 }
