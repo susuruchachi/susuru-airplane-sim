@@ -1021,11 +1021,20 @@ function buildContrail(model) {
 // 出力に比例して、本数も濃さも増える。
 // 1基あたりの点の数。全開で毎秒100個ほど置くので、消えるまで（7秒）持たせるには
 // これくらい要る。足りないと、いちばん古い煙が消える前に上書きされて筋が途中で切れる。
-const SMOKE_PER_ROCKET = 900;
+// **粒は「距離」で置く。時間で置いてはいけない。**
+// ロケットの噴射は途切れずに出続けるものなので、筋も途切れてはいけない。
+// 時間で置く（毎秒何個）と、置く間隔が速度に比例して開いてしまい、
+// 速い機体では点線にしか見えなかった——実測（ノズル半径0.13m）で、
+// マッハ2では粒の間隔が19.8mに対して粒の直径が2.0m、**隙間が9.9倍**。
+// 進んだ距離を「置きたい間隔」で割った数だけ置けば、速度に関係なく
+// 同じ密度で並ぶ。置きたい間隔は出たての粒の直径の半分（SMOKE_STEP_FRAC）。
+const SMOKE_PER_ROCKET = 2000;
 const SMOKE_LIFE_S = 7;
-const SMOKE_STEP_FRAC = 0.55;      // 置く間隔（出たての大きさに対する割合）
-const SMOKE_STEP_MIN_S = 0.03;
-const SMOKE_PUFFS_MAX = 6;         // 全開のとき、1回に置く数
+const SMOKE_STEP_FRAC = 0.5;       // 置く間隔（出たての大きさに対する割合）
+// 止まっているとき（ホバリング）に、時間で置くぶん。距離では増えないので。
+const SMOKE_HOVER_STEP_S = 0.05;
+// 1フレームで置ける数の上限。コマ落ちや瞬間移動のあとに、一気に使い切らないため。
+const SMOKE_PUFFS_MAX_FRAME = 60;
 const SMOKE_SPREAD = 1.8;          // ノズル半径に対する、置く位置のばらつき
 // 煙はノズルより**ずっと太く広がる**（ロケットの噴煙は口の何倍にもなる）。
 // ノズルの太さを実機に合わせて細くしたぶん、ここの倍率を上げて
@@ -1331,17 +1340,25 @@ function updateRocketSmoke(ac, controls, state, dt) {
   // 機体の走行距離。粒は置いたら動かないので、これがそのまま「ノズルから離れた距離」。
   sm.odo += state.airspeed * dt;
 
-  // 置く間隔。速いほど短い時間で置かないと、煙が点々に切れる。
-  // 止まっていても（ホバリング中など）時間で置けるよう、下限を置く。
   const r0 = sm.emitters[0].radius;
-  const stepM = r0 * SMOKE_SIZE_FROM * SMOKE_STEP_FRAC;
-  const every = Math.max(stepM / Math.max(state.airspeed, 1), SMOKE_STEP_MIN_S);
-  sm.timer += dt;
-  const spawn = sm.timer >= every;
-  if (spawn) sm.timer = 0;
+  // 置きたい間隔（m）。出たての粒の直径の半分にすると、粒どうしが重なって筋になる。
+  const stepM = Math.max(r0 * SMOKE_SIZE_FROM * SMOKE_STEP_FRAC, 1e-3);
+  // **持っている粒で、途切れずに描ける筋の長さ**。これを超えて伸ばそうとすると
+  // 間隔を開けるしかなくなり、点線に戻ってしまう。
+  const trailMaxM = stepM * SMOKE_PER_ROCKET;
+  // だから、速いときは寿命のほうを縮める。「7秒ぶん」ではなく「この長さぶん」。
+  const life = Math.min(SMOKE_LIFE_S, trailMaxM / Math.max(state.airspeed, 1));
+  sm.life = life;
+
+  // 置く数は**進んだ距離 ÷ 置きたい間隔**。端数は次のフレームへ持ち越す
+  // （切り捨てると、遅いときに1個も置けなくなる）。
+  sm.debt = (sm.debt || 0) + (state.airspeed * dt) / stepM + dt / SMOKE_HOVER_STEP_S;
+  let nPuffs = Math.floor(sm.debt);
+  if (nPuffs > 0) sm.debt -= nPuffs;
+  if (nPuffs > SMOKE_PUFFS_MAX_FRAME) nPuffs = SMOKE_PUFFS_MAX_FRAME;
   let live = 0;
 
-  if (spawn) {
+  if (nPuffs > 0) {
     for (let i = 0; i < sm.emitters.length; i++) {
       const em = sm.emitters[i];
       // **止めているエンジンは何も出さない**。上向きのリフトエンジンは
@@ -1358,8 +1375,10 @@ function updateRocketSmoke(ac, controls, state, dt) {
           ? engineDeliveredLever(ac.model, state, controls, em.engine)
           : (em.engine.lift ? (controls.vtolThrottle || 0) : controls.throttle));
       if (power <= 0.02) { sm.last[i] = null; continue; }
-      // 出力に比例して、1回に置く数を増やす（全開で SMOKE_PUFFS_MAX 個）
-      const puffs = Math.max(1, Math.round(SMOKE_PUFFS_MAX * power));
+      // **数は出力で減らさない**（減らすと、絞ったとたんに点線に戻る）。
+      // 出力は濃さ（alpha）で出す。数はほんの少しだけ減らして、
+      // 絞ったときに筋が細く見えるようにする。
+      const puffs = Math.max(1, Math.round(nPuffs * (0.6 + 0.4 * power)));
       // いまのノズルの位置（ワールド）
       _smWorld.copy(em.local).applyQuaternion(ac.group.quaternion).add(ac.group.position);
       const now = _smWorld.clone();
@@ -1401,19 +1420,18 @@ function updateRocketSmoke(ac, controls, state, dt) {
   // このフレームで、照り返しがどれだけ抜けるか。
   // 粒は置いたら動かない（噴射ぶんを除く）ので、ノズルから離れる速さ＝機体の速さ。
   // 止まっているときのために、秒数でも抜く保険を足しておく。
-  const spacingM = Math.max(stepM, state.airspeed * SMOKE_STEP_MIN_S);
-  const fadeM = Math.max(r0 * SMOKE_HOT_FADE_SPAN, spacingM * SMOKE_HOT_MIN_PUFFS, 1e-3);
+  const fadeM = Math.max(r0 * SMOKE_HOT_FADE_SPAN, stepM * SMOKE_HOT_MIN_PUFFS, 1e-3);
   const drag = Math.exp(-SMOKE_JET_DRAG * dt);
 
   for (let s = 0; s < sm.age.length; s++) {
     const a = sm.age[s];
-    if (!(a < SMOKE_LIFE_S)) { if (alpha[s] !== 0) alpha[s] = 0; continue; }
+    if (!(a < life)) { if (alpha[s] !== 0) alpha[s] = 0; continue; }
     const na = a + dt;
     sm.age[s] = na;
-    if (na >= SMOKE_LIFE_S) { alpha[s] = 0; continue; }
-    const t = na / SMOKE_LIFE_S;
+    if (na >= life) { alpha[s] = 0; continue; }
+    const t = na / life;
     // 出たては濃く小さく、時間とともに膨らみながら薄れる
-    alpha[s] *= Math.pow(1 - dt / SMOKE_LIFE_S, 1.4);
+    alpha[s] *= Math.pow(1 - dt / life, 1.4);
     const em = sm.emitters[Math.floor(s / SMOKE_PER_ROCKET)] || sm.emitters[0];
     size[s] = em.radius * (SMOKE_SIZE_FROM + (SMOKE_SIZE_TO - SMOKE_SIZE_FROM) * t);
     // 噴射で押し出されたぶんだけ動かす（抵抗ですぐ止まる）
