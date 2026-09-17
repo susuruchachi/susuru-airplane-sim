@@ -3624,7 +3624,7 @@ function autopilotFlight(opts) {
       ap.phase = phase; ap.distanceM = distM; ap.engineHold = 0;
       let flips = 0, prev = !c3.engineGroupOff[gid];
       for (let t = 0; t < seconds; t += 0.5) {
-        apManageEngineGroups(two, st3, c3, ap, 0.5, null);
+        apManageEngineGroups(two, st3, c3, ap, undefined, 0.5, null);
         const now = !c3.engineGroupOff[gid];
         if (now !== prev) { flips++; prev = now; }
       }
@@ -3648,7 +3648,7 @@ function autopilotFlight(opts) {
       `${edge.flips}回`);
     // いちばん遅いグループは、どの段でも止めない
     ap.phase = 'approach'; ap.distanceM = 1000; ap.engineHold = 0;
-    for (let t = 0; t < 60; t += 0.5) apManageEngineGroups(two, st3, c3, ap, 0.5, null);
+    for (let t = 0; t < 60; t += 0.5) apManageEngineGroups(two, st3, c3, ap, undefined, 0.5, null);
     check(!c3.engineGroupOff[two.engineGroups[0].id],
       'いちばん遅いグループは、進入中でも止めない');
     note('自動操縦のグループ切替（マッハ21のロケット）',

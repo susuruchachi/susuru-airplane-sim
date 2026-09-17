@@ -467,7 +467,14 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
   // 「減速したいから引く」を高度でやってしまい、実機なら空中分解する使い方が
   // 最適解になってしまう。止まりかけで切るのは REVERSE_FADE_MPS の説明を参照。
   // 接地判定は前のフレームのものだが、1フレーム（16ms）のずれは効果に出ない。
-  const revLever = state.onGround
+  //
+  // **例外は、垂直離着陸用のエンジンを持つ機体**。垂直着陸は「着地点の真上で
+  // 止まってから降りる」もので、翼が支えを失うほど遅い速度まで空中で
+  // 落としきらなければいけない。抗力とスポイラーだけでは足りず、実測で
+  // サンダーバード1号が389ktのまま着地点を通り過ぎて地面へ突っ込んでいた。
+  // 排気を下や前へ振り向けられる機体が空中でそれをやるのは実機の垂直着陸機も
+  // 同じで、翼だけで飛ぶ機体（地上でしか開かない）とは分けて考える。
+  const revLever = (state.onGround || model.hasVtol)
     ? THREE.MathUtils.clamp(controls.reverse || 0, 0, 1)
       * AERO_DEFAULTS.reverseFraction
       * THREE.MathUtils.clamp(-vAirBody.z / REVERSE_FADE_MPS, 0, 1)
