@@ -69,7 +69,13 @@ const AP_VTOL_VS_KP = 0.20;      // 昇降率のずれ1m/sあたり、毎秒ど�
 // 接地の硬さが「その瞬間どの位相だったか」で2.2G〜4.0Gに散らばっていた。
 const AP_VTOL_VS_KD = 0.15;
 const AP_VTOL_ACCEL_TAU = 0.25; // 加速度の測り方をならす時定数(秒)。差分そのままは跳ねる
-const AP_VTOL_TRANSITION_AGL_M = 30; // これより高く上がったら、前へ進むエンジンへ切り替え始める
+// これより高く上がったら、前へ進むエンジンへ切り替え始める。
+// 30mだと切り替えの沈み込みで地面に触れるので、余裕を持たせてある。
+const AP_VTOL_TRANSITION_AGL_M = 60;
+// 翼が支えられるようになってから、垂直エンジンを抜ききるまでの秒数
+const AP_VTOL_WEAN_S = 12;
+// 前進切替のあいだに、切り替えた高さからどれだけ上を目指すか(m)
+const AP_VTOL_TRANS_CLIMB_M = 120;
 // **垂直着陸は、いったん空中で止まってから降りる**。以前は滑走路の進入と同じように
 // 「降りながら寄せる」で、対地80mへ向けてまっすぐ降ろしていた——止まる算段が
 // どこにも無いので、進入速度の速い機体は着地点を通り過ぎながら地面に届いていた
@@ -1278,6 +1284,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     if (phase !== 'descent') ap.descentSpeedCapMps = 0; // 降下から出たら取り直す
     // 垂直着陸の進入から出たら、単調に下げていた速度上限を取り直す
     if (phase !== 'vtol_approach') { ap.vtolSpeedCapMps = undefined; ap.vtolAltCapM = undefined; }
+    // 前進切替から出たら、そこで覚えた高さと垂直エンジンの蓋を取り直す
+    if (phase !== 'vtol_transition') { ap.vtolTransAltM = undefined; ap.vtolWean = undefined; }
     if (phase !== 'approach') { ap.apprThr = undefined; ap.apprFlapMax = undefined; }
     ap.phase = phase;
     ap.statusText = text;
@@ -1378,25 +1386,68 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   }
 
   // ---- 垂直離陸：前へ進むエンジンへ切り替えて加速 -------------------------------
+  //
+  // **速度が乗るまで、向きは変えない。高さは垂直エンジンで保つ。**
+  // ここは切り替えた瞬間から目的地の方角へ舵を当てていて、垂直エンジンの出力も
+  // 「速度に比例して手放す」開ループだった。そのせいで、
+  //   (1) ほぼ止まっている機体がいきなりバンクする。翼はまだ効かないので、
+  //       傾くのは垂直エンジンの推力の向きだけ——支えを横へ逃がすことになる
+  //   (2) 支えを失ったぶん沈むが、出力は速度だけで決まっているので戻らない
+  // 実測（サンダーバード1号を、目的地が真後ろになる向きで垂直離陸）で、
+  // 切り替えた13秒に19ktでバンクが-5°→-30°まで入り、迎角-31°、対地41mから
+  // **-8m（地面の下）まで落ちた**。「垂直上昇のあと、旋回はおろか上昇もままならない
+  // 速度で曲がろうとして墜ちる」の正体がこれ。
+  // 離陸の向きのまま、翼が支えられる速さになるまでまっすぐ加速する。旋回は
+  // 上昇の段（climb）に渡してから。
   if (ap.phase === 'vtol_transition') {
     controls.gearDown = false;
     controls.flap = 0;
-    const want = plan ? apBearingTo(state.position.x, state.position.z, tx, tz) : state.headingDeg;
-    ap.targetHeadingDeg = want;
-    controls.roll = apAileronForTrack(state, want, spd.bankMax, spd);
-    controls.yaw = apRudderForCoordination(state);
+    // 翼がどれだけ支えているか（失速速度の1.2倍で1.0）
+    const wing = apClamp(state.airspeed / Math.max(spd.stall * 1.2, 1), 0, 1);
+    ap.targetHeadingDeg = ap.takeoffHeadingDeg;
+    controls.roll = apAileronForBank(state, 0, spd);
+    // 遅いうちは方位を保ち（姿勢制御ノズルが拾う）、速くなったら横滑りを消すほうへ
+    const hold = apClamp(apWrap180(ap.takeoffHeadingDeg - state.headingDeg) * AP_STEER_KP, -1, 1);
+    controls.yaw = hold * (1 - wing) + apRudderForCoordination(state) * wing;
 
     controls.throttle = 1;
-    // 前へ進む速度が育つほど、垂直エンジンの出力を手放していく
-    // （0m/sでは全開、上昇フェーズへ渡す速さに達したら0——実際に検証した
-    // 手動操作の遷移と同じ形）。姿勢は少し機首下げにして加速を助ける。
-    controls.vtolThrottle = apClamp(1 - state.airspeed / Math.max(spd.climb, 1), 0, 1);
-    const want2 = apClamp(-6 * controls.vtolThrottle, -6, 0);
+    // 高さは**そのときの高度を目標にした輪で**保つ。
+    // 「昇降率3m/sぶんの姿勢」を開ループで指示していたので、垂直エンジンを
+    // 抜きはじめて沈んでも、指示ピッチは+1°のまま動かなかった——迎角が足りず
+    // 翼は仕事をせず、そのまま落ちていく（実測で対地114m→-8m、-27m/s）。
+    // 高度のずれから昇降率を出せば、沈んだぶんだけ機首が上がって翼が引き受ける。
+    if (ap.vtolTransAltM === undefined) ap.vtolTransAltM = state.altitudeM;
+    const transAlt = overTerrain(ap.vtolTransAltM + AP_VTOL_TRANS_CLIMB_M);
+    ap.vsCmd = overTerrainVs(apVsForAltitude(state, transAlt, apClimbCap(state, spd), undefined, spd));
+    // **翼が支えられる速さになったら、垂直エンジンを時間をかけて抜く。**
+    // 昇降率の輪は「ずれ」で動くので、垂直エンジンが釣り合わせているかぎり
+    // ずれは0のまま——放っておくと100%のまま速度だけが伸びていき、
+    // 翼はいつまでも仕事をしない（実測で、583ktまで垂直エンジン100%のままだった）。
+    // 上から蓋をして少しずつ下ろすと、そのぶんを翼が引き受けにいく。
+    ap.vtolWean = wing >= 1
+      ? Math.max((ap.vtolWean === undefined ? 1 : ap.vtolWean) - dt / AP_VTOL_WEAN_S, 0)
+      : 1;
+    controls.vtolThrottle = Math.min(
+      apVtolSupport(model, state, controls, ap, spd, ap.vsCmd, dt), ap.vtolWean);
+    // 姿勢は、遅いうちは機首下げ（加速を助ける）、翼が効きだしたら
+    // **「その昇降率を出すための姿勢」**へ移す。
+    // 機首下げのままだと迎角が負のままで、翼はいつまでも揚力を出さない
+    // ——垂直エンジンだけが支え続けることになる。
+    const want2 = -6 * (1 - wing)
+      + apPitchForVs(state, ap.vsCmd, undefined, terrainPitchMax()) * wing;
     controls.pitch = apElevatorForPitch(state, controls, want2, dt, spd, ap);
     ap.targetSpeedMps = spd.climb;
-    ap.vsCmd = state.verticalSpeed;
 
-    if (state.airspeed >= spd.climb || controls.vtolThrottle <= 0.01) {
+    // **渡すのは、翼がもう自分で支えているとき**。速度だけで渡してはいけない。
+    // 上昇速度に届いた瞬間に垂直エンジンを切っていたので、そのときまだ
+    // 93%出していた支えが一度に消えて、そのぶんを落ちていた——実測で、
+    // 渡した直後に対地118mから**-8m（地面の下）**まで7秒で沈み、-23m/sで
+    // 地面をこすった。垂直エンジンの出力が自然に抜けきるまで待てば、
+    // 支えの受け渡しは途切れない。
+    // 速度が出すぎているのに抜けないときのための抜け道も用意しておく。
+    const handOff = controls.vtolThrottle <= 0.05 && state.verticalSpeed > -0.5;
+    if ((state.airspeed >= spd.climb && handOff)
+      || state.airspeed >= spd.climb * 1.6) {
       controls.vtolThrottle = 0;
       say('climb', '上昇');
     }

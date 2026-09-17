@@ -49,7 +49,7 @@
 // さかのぼって数えると4本あったので、5本目の頭から始めている。
 // （00.001＝世界、00.002＝飛行、00.003＝自動操縦、00.004＝エンジンと排気。
 //   それぞれの中身は CHANGELOG.md を参照）
-const APP_VERSION = '00.005.000.003';
+const APP_VERSION = '00.005.000.004';
 
 // 画面に出すときの名前（「v」は付けない。Gitのタグだけ v を付ける）
 function appVersionLabel() { return APP_VERSION; }
