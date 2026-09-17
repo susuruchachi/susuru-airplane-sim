@@ -1,6 +1,8 @@
 // 01-env-state.js — 環境シーン（空・雲・昼夜サイクル）のグローバル状態
 // 番号プレフィックス方式：flight.html 専用。Builder側(index.html)の State とは別の名前空間。
 
+// 保存データの形式番号。**全体のバージョン名（js/00-version.js の APP_VERSION）とは別もの**で、
+// 保存の読み書きの形が変わったときだけ上げる。画面に出す版名は APP_VERSION のほう。
 const ENV_VERSION = 'env-v5';
 
 const EnvState = {
