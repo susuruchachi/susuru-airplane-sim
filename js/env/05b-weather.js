@@ -30,7 +30,11 @@ const DECK_RINGS = 40;
 const DECK_SECTORS = 64;
 const DECK_INNER_R = 300;
 const DECK_OUTER_R = 120000;
-const DECK_PATTERN_M = 26000; // 雲のテクスチャ1タイルぶんの実寸
+// 雲のテクスチャ1タイルぶんの実寸。**近くで見たときに模様が要る**ので、
+// 26kmでは大きすぎた（雲底の数百m下からだと1タイルのごく一部しか視界に入らず、
+// のっぺりした一色の天井になる）。ノイズが細かいところまで持つようになったぶん、
+// タイルを詰めても繰り返しには見えない。
+const DECK_PATTERN_M = 9000;
 
 // 空の霞。霧や雨のときは空ドームまで霞んで見えなくなるはずなので、
 // カメラを囲む球に霧色を塗る。地形より奥（半径9km）に置いて深度テストに任せるので、
@@ -226,39 +230,70 @@ function buildDeckGeometry() {
   return geo;
 }
 
-// 雲の濃淡テクスチャ。継ぎ目なくタイルさせたいので、サイン波の重ね合わせで作る。
+// 継ぎ目なくタイルする値ノイズ。格子に置いた乱数を、端で折り返して引く。
+// （サイン波の重ね合わせでも継ぎ目は出ないが、**山と谷がまるくなる**。
+//   雲底がまんまるに見える原因がそれだった。格子の乱数なら形が偏らない。）
+function deckValueNoise(size, cells, seed) {
+  const g = new Float32Array(cells * cells);
+  let s = seed >>> 0;
+  const rnd = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+  for (let i = 0; i < g.length; i++) g[i] = rnd();
+  const out = new Float32Array(size * size);
+  const fade = (x) => x * x * (3 - 2 * x);
+  for (let j = 0; j < size; j++) {
+    const fy = (j / size) * cells;
+    const jf = Math.floor(fy), j0 = ((jf % cells) + cells) % cells, j1 = (j0 + 1) % cells;
+    const ty = fade(fy - jf);
+    for (let i = 0; i < size; i++) {
+      const fx = (i / size) * cells;
+      const xf = Math.floor(fx), i0 = ((xf % cells) + cells) % cells, i1 = (i0 + 1) % cells;
+      const tx = fade(fx - xf);
+      const top = g[j0 * cells + i0] + (g[j0 * cells + i1] - g[j0 * cells + i0]) * tx;
+      const bot = g[j1 * cells + i0] + (g[j1 * cells + i1] - g[j1 * cells + i0]) * tx;
+      out[j * size + i] = top + (bot - top) * ty;
+    }
+  }
+  return out;
+}
+
+// 雲の濃淡テクスチャ。継ぎ目なくタイルさせたいので、周期の合う格子ノイズを重ねる。
+//
+// **まるい模様にしないこと。** 前はサイン波を6本足していたが、正弦は山も谷も
+// まるいので、雲底がどこを見ても同じ楕円のにじみになっていた
+// （実測：曇りの雲底の400m下から真上を見ると、画面はほぼ一様な灰色で、
+//   見えるのは左下にひとつ、まるいしみだけ）。大きさの違うノイズを
+// 6段重ねる（3・6・12・24・48・96マス）と、大きなうねりの中に細かい
+// ちぎれが入って、雲の底らしい粗さが出る。
 //
 // 模様は「明るさ」に入れ、不透明度はいじらない。
 // 模様を不透明度に入れると、べったり曇っているはずの空にいつも穴が空き、
 // 雲の上に出たとき床が透けて地面が見えてしまう。
 // 空の覆われ具合そのものは material.opacity が受け持つ。
 function buildDeckTexture() {
-  const size = 256;
+  const size = 512;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d');
   const img = ctx.createImageData(size, size);
 
-  const waves = [
-    { fx: 1, fz: 1, a: 1.0, p: 0.0 }, { fx: 2, fz: -1, a: 0.6, p: 1.3 },
-    { fx: -1, fz: 3, a: 0.45, p: 2.7 }, { fx: 3, fz: 2, a: 0.3, p: 0.4 },
-    { fx: 5, fz: -3, a: 0.2, p: 2.1 }, { fx: -4, fz: 5, a: 0.14, p: 1.7 },
-  ];
-  let norm = 0;
-  for (const w of waves) norm += w.a;
+  const acc = new Float32Array(size * size);
+  let amp = 1, norm = 0, cells = 3;
+  for (let o = 0; o < 6; o++) {
+    const n = deckValueNoise(size, cells, 0x9e3779b9 + o * 0x85ebca6b);
+    for (let i = 0; i < acc.length; i++) acc[i] += n[i] * amp;
+    norm += amp; amp *= 0.55; cells *= 2;
+  }
 
-  for (let j = 0; j < size; j++) {
-    for (let i = 0; i < size; i++) {
-      const u = (i / size) * Math.PI * 2, v = (j / size) * Math.PI * 2;
-      let h = 0;
-      for (const w of waves) h += w.a * Math.sin(w.fx * u + w.fz * v + w.p);
-      const t = Math.max(0, Math.min(1, 0.5 + h / (norm * 1.6)));
-      const o = (j * size + i) * 4;
-      // 薄いところほど暗い（雲の底の陰）。白は飛ばしすぎないよう 245 まで。
-      const shade = Math.round(150 + t * 95);
-      img.data[o] = img.data[o + 1] = img.data[o + 2] = shade;
-      img.data[o + 3] = 255;
-    }
+  for (let i = 0; i < acc.length; i++) {
+    // コントラストを上げて、ちぎれた縁を出す（そのままだと全体が中間の灰色）
+    let t = (acc[i] / norm - 0.42) / 0.30;
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    t = t * t * (3 - 2 * t);
+    const o = i * 4;
+    // 薄いところほど暗い（雲の底の陰）。白は飛ばしすぎないよう 245 まで。
+    const shade = Math.round(120 + t * 125);
+    img.data[o] = img.data[o + 1] = img.data[o + 2] = shade;
+    img.data[o + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
   const tex = new THREE.CanvasTexture(canvas);
