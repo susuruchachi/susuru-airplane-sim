@@ -468,37 +468,67 @@ function soundBuildMaster(ctx, dest, volume) {
 
 // --- 衝撃波の音（ソニックブーム）---------------------------------------------
 //
-// 実機の記録に近い形：**立ち上がりはほぼ一瞬**（衝撃波そのものなので）、
-// そこから周波数がすっと下がりながら1秒足らずで消える。**一発だけの使い捨て**
-// なので、エンジンの音のように保持しておく必要はない（stop() を予約すれば
-// 勝手に片付く）。distGain（0〜1）で大きさを、whenSeconds で鳴らす時刻を決める
-// ——「いつ鳴らすか」を決めるほう（soundUpdateBoom）は下にある。
+// 実機の記録に近い形：**立ち上がりの一瞬だけ鋭いクラック**があり、そのすぐ後に
+// **低く長く響く胴鳴り**が膨らんでから沈んでいく——「どおぉぉぉぉ…ん」という
+// 聞こえ方（最初のクラックだけで終わらせると、迫力の無い「パンッ」で終わって
+// しまう）。2層に分けて鳴らす：①一瞬のクラック（`crack*`）と②遅れて膨らみ
+// ゆっくり沈む低い胴鳴り（`body*`）。**一発だけの使い捨て**なので、エンジンの
+// 音のように保持しておく必要はない（stop() を予約すれば勝手に片付く）。
+// distGain（0〜1）で大きさを、whenSeconds で鳴らす時刻を決める——「いつ鳴らすか」
+// を決めるほう（soundUpdateBoom）は下にある。
 const SOUND_BOOM_GAIN = 1.1;
-const SOUND_BOOM_HZ_FROM = 1500;
-const SOUND_BOOM_HZ_TO = 55;
-const SOUND_BOOM_SWEEP_S = 0.30;
-const SOUND_BOOM_TAIL_S = 0.55;
+const SOUND_BOOM_CRACK_HZ_FROM = 1400;
+const SOUND_BOOM_CRACK_HZ_TO = 250;
+const SOUND_BOOM_CRACK_S = 0.12;
+const SOUND_BOOM_BODY_HZ_FROM = 220;   // 「どおぉぉぉ」と開く高さ
+const SOUND_BOOM_BODY_HZ_TO = 38;      // 「…ん」で沈む低さ
+const SOUND_BOOM_BODY_RISE_S = 0.22;   // 膨らむまでの時間
+const SOUND_BOOM_BODY_S = 1.8;         // 胴鳴り全体の長さ
 // 自由視点（世界に立っている観測者）で円錐がちょうど届いたときの、距離ぶんの落ち方の基準。
 const SOUND_BOOM_REF_M = 700;
 
 function soundPlayBoom(ctx, dest, noiseBuf, whenSeconds, distGain) {
   if (!ctx || distGain < 0.004) return null;
-  const src = ctx.createBufferSource();
-  src.buffer = noiseBuf; src.loop = true;
-  const bp = ctx.createBiquadFilter();
-  bp.type = 'lowpass';
-  bp.frequency.setValueAtTime(SOUND_BOOM_HZ_FROM, whenSeconds);
-  bp.frequency.exponentialRampToValueAtTime(SOUND_BOOM_HZ_TO, whenSeconds + SOUND_BOOM_SWEEP_S);
-  bp.Q.value = 0.8;
-  const g = ctx.createGain();
   const peak = SOUND_BOOM_GAIN * distGain;
-  g.gain.setValueAtTime(0.0001, whenSeconds);
-  g.gain.linearRampToValueAtTime(peak, whenSeconds + 0.004);   // 4msでほぼ最大
-  g.gain.exponentialRampToValueAtTime(Math.max(peak * 0.002, 1e-4), whenSeconds + SOUND_BOOM_TAIL_S);
-  src.connect(bp).connect(g).connect(dest);
-  src.start(whenSeconds);
-  src.stop(whenSeconds + SOUND_BOOM_TAIL_S + 0.1);
-  return { src, bp, gain: g };
+
+  // ① 立ち上がりの一瞬だけ鋭いクラック
+  const crackSrc = ctx.createBufferSource();
+  crackSrc.buffer = noiseBuf; crackSrc.loop = true;
+  const crackLp = ctx.createBiquadFilter();
+  crackLp.type = 'lowpass';
+  crackLp.frequency.setValueAtTime(SOUND_BOOM_CRACK_HZ_FROM, whenSeconds);
+  crackLp.frequency.exponentialRampToValueAtTime(SOUND_BOOM_CRACK_HZ_TO, whenSeconds + SOUND_BOOM_CRACK_S);
+  crackLp.Q.value = 0.7;
+  const crackGain = ctx.createGain();
+  crackGain.gain.setValueAtTime(0.0001, whenSeconds);
+  crackGain.gain.linearRampToValueAtTime(peak * 0.9, whenSeconds + 0.004);   // 4msでほぼ最大
+  crackGain.gain.exponentialRampToValueAtTime(Math.max(peak * 0.02, 1e-4),
+    whenSeconds + SOUND_BOOM_CRACK_S + 0.06);
+  crackSrc.connect(crackLp).connect(crackGain).connect(dest);
+  crackSrc.start(whenSeconds);
+  crackSrc.stop(whenSeconds + SOUND_BOOM_CRACK_S + 0.2);
+
+  // ② 遅れて膨らみ、ゆっくり沈む低い胴鳴り（「どおぉぉぉぉ…ん」の本体）
+  const bodySrc = ctx.createBufferSource();
+  bodySrc.buffer = noiseBuf; bodySrc.loop = true;
+  const bodyLp = ctx.createBiquadFilter();
+  bodyLp.type = 'lowpass';
+  bodyLp.frequency.setValueAtTime(SOUND_BOOM_BODY_HZ_FROM, whenSeconds);
+  bodyLp.frequency.exponentialRampToValueAtTime(SOUND_BOOM_BODY_HZ_TO, whenSeconds + SOUND_BOOM_BODY_S);
+  bodyLp.Q.value = 0.9;
+  const bodyGain = ctx.createGain();
+  bodyGain.gain.setValueAtTime(0.0001, whenSeconds);
+  bodyGain.gain.linearRampToValueAtTime(peak, whenSeconds + SOUND_BOOM_BODY_RISE_S);
+  bodyGain.gain.exponentialRampToValueAtTime(Math.max(peak * 0.003, 1e-4),
+    whenSeconds + SOUND_BOOM_BODY_S);
+  bodySrc.connect(bodyLp).connect(bodyGain).connect(dest);
+  bodySrc.start(whenSeconds);
+  bodySrc.stop(whenSeconds + SOUND_BOOM_BODY_S + 0.2);
+
+  return {
+    crack: { src: crackSrc, lp: crackLp, gain: crackGain },
+    body: { src: bodySrc, lp: bodyLp, gain: bodyGain },
+  };
 }
 
 // --- 雨と雷 ------------------------------------------------------------------
@@ -506,7 +536,7 @@ function soundPlayBoom(ctx, dest, noiseBuf, whenSeconds, distGain) {
 // 機体とは無関係に、いつも天候の「今の値」（05b-weather.js の
 // EnvState.weather.current）から鳴らす。雨はサラサラ〜ザーザーという広帯域の
 // 雑音、雪はほぼ無音（実際、雪が降る音はほとんど聞こえない）。
-const SOUND_RAIN_GAIN = 0.9;
+const SOUND_RAIN_GAIN = 0.4;
 const SOUND_RAIN_HZ_FROM = 900;   // 小雨。こもった音
 const SOUND_RAIN_HZ_TO = 4200;    // 土砂降り。シャーというにじんだ高音
 const SOUND_RAIN_Q = 0.5;
@@ -543,47 +573,76 @@ const SOUND_THUNDER_HZ_NEAR = 2600;   // すぐそばの、バリッという高
 const SOUND_THUNDER_HZ_FAR = 45;      // 遠くの、ゴロゴロという低い唸りだけ
 const SOUND_THUNDER_HZ_SPAN_M = 3200;
 
-// 雷鳴を1発ぶん鳴らす。**近いほど鋭い1回のクラック、遠いほど長く低い
-// ゴロゴロ**になる——音の高い成分ほど空気に先に吸われるので、稲妻という
-// 同じ音源が、届く距離によって別の楽器のように変わる（エンジン音の空気の
-// 吸収と同じ考え方。SOUND_AIR_SPAN_M の説明を参照。雷はけた違いに遠くまで
-// 届くので、ここだけ距離の基準を3.2kmに広げてある）。
+// 雷鳴を1発ぶん鳴らす。**「ドン！ドン…ドンドンドン………」と聞こえる、不規則な
+// 連打**にする（前は1〜2回の「ガンッ→ドロローン」で、鋭いクラックが金属的な
+// 「ガン」に、続きがのっぺりした唸りに聞こえた）。1回ごとに短く切った
+// パーカッシブな「ドン」を、詰まった連打・ふつうの間・長い間（…）を
+// ランダムに混ぜながら何発も鳴らし、だんだん小さくしていく。加えて、その下に
+// 低く長く続く「唸りの土台」を1本敷いて、連打が終わったあとも「………」と
+// 転がる余韻を残す。**近いほど「ドン」が多く・詰まって・高めに、遠いほど
+// 少なく・間延びして・こもる**——音の高い成分ほど空気に先に吸われるので、
+// 稲妻という同じ音源が届く距離によって別の楽器のように変わる（エンジン音の
+// 空気の吸収と同じ考え方。SOUND_AIR_SPAN_M の説明を参照。雷はけた違いに
+// 遠くまで届くので、ここだけ距離の基準を3.2kmに広げてある）。
 function soundPlayThunder(ctx, dest, noiseBuf, whenSeconds, distM) {
   if (!ctx) return null;
   const gain0 = soundFalloff(distM, SOUND_THUNDER_REF_M) * SOUND_THUNDER_GAIN;
   if (gain0 < 0.01) return null;
   const cutHz = SOUND_THUNDER_HZ_FAR
     + (SOUND_THUNDER_HZ_NEAR - SOUND_THUNDER_HZ_FAR) * Math.exp(-distM / SOUND_THUNDER_HZ_SPAN_M);
-  const lp = ctx.createBiquadFilter();
-  lp.type = 'lowpass'; lp.frequency.value = cutHz; lp.Q.value = 0.6;
   const out = ctx.createGain(); out.gain.value = gain0;
-  lp.connect(out).connect(dest);
+  out.connect(dest);
 
-  // 遠いほど長く転がる（音源の長さ・地形やほかの雲での反射がぶんぶん重なる
-  // ぶん）。何回かの「ゴロッ」に分けて鳴らし、最初の一発だけ近いときに鋭くする。
-  const totalDur = Math.min(0.6 + distM / 1100, 11);
-  const claps = distM < 1500 ? 2 : (3 + Math.floor(distM / 3800));
+  // 唸りの土台。個々の「ドン」より低く・広く・長く、連打が終わったあとの
+  // 「………」を受け持つ。
+  const bedDur = Math.min(1.2 + distM / 900, 12);
+  const bed = ctx.createBufferSource();
+  bed.buffer = noiseBuf; bed.loop = true;
+  const bedLp = ctx.createBiquadFilter();
+  bedLp.type = 'lowpass'; bedLp.frequency.value = cutHz * 0.4; bedLp.Q.value = 0.5;
+  const bedGain = ctx.createGain();
+  bedGain.gain.setValueAtTime(0.0001, whenSeconds);
+  bedGain.gain.linearRampToValueAtTime(0.5, whenSeconds + 0.25);
+  bedGain.gain.exponentialRampToValueAtTime(0.001, whenSeconds + bedDur);
+  bed.connect(bedLp).connect(bedGain).connect(out);
+  bed.start(whenSeconds);
+  bed.stop(whenSeconds + bedDur + 0.1);
+
+  // 「ドン」の連打。近いほど多く・早口に、遠いほど少なく・間延びする。
+  const donCount = distM < 1200 ? (4 + Math.floor(Math.random() * 3))    // 4〜6発
+    : distM < 5000 ? (3 + Math.floor(Math.random() * 3))                  // 3〜5発
+    : (2 + Math.floor(Math.random() * 2));                                 // 2〜3発
   const nodes = [];
-  for (let i = 0; i < claps; i++) {
-    const t0 = whenSeconds + (i === 0 ? 0 : (0.12 + Math.random() * 0.45) * totalDur * (i / claps));
+  let t = whenSeconds;
+  for (let i = 0; i < donCount; i++) {
+    if (i > 0) {
+      // 間隔を不規則に：詰まった連打（ドンドンドン）と、長い間（…）を両方作る
+      const kind = Math.random();
+      const gap = kind < 0.45 ? (0.05 + Math.random() * 0.09)
+        : kind < 0.8 ? (0.15 + Math.random() * 0.22)
+          : (0.4 + Math.random() * 0.5);
+      t += gap;
+    }
     const src = ctx.createBufferSource();
     src.buffer = noiseBuf; src.loop = true;
-    const bp = ctx.createBiquadFilter();
-    bp.type = 'lowpass';
-    bp.frequency.value = cutHz * (i === 0 ? 1.5 : 0.65);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = cutHz * (0.85 + Math.random() * 0.3);   // どれも低め。「ガン」だけ飛び抜けない
+    lp.Q.value = 0.7;
     const g = ctx.createGain();
-    const peak = i === 0 ? 1.0 : 0.4 + Math.random() * 0.35;
-    const attack = (i === 0 && distM < 2500) ? 0.015 : 0.18;
-    const decay = Math.max(totalDur / claps * 1.3, 0.4);
-    g.gain.setValueAtTime(0.0001, t0);
-    g.gain.linearRampToValueAtTime(peak, t0 + attack);
-    g.gain.exponentialRampToValueAtTime(Math.max(peak * 0.003, 1e-4), t0 + attack + decay);
-    src.connect(bp).connect(g).connect(lp);
-    src.start(t0);
-    src.stop(t0 + attack + decay + 0.1);
-    nodes.push({ src, bp, gain: g });
+    const peak = Math.pow(0.72, i) * (0.85 + Math.random() * 0.3);   // だんだん弱くなる
+    const attack = 0.01 + Math.random() * 0.01;
+    const decay = 0.09 + Math.random() * 0.09;   // 短く切って「ドン」と聞かせる（尾は土台に任せる）
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(peak, t + attack);
+    g.gain.exponentialRampToValueAtTime(Math.max(peak * 0.02, 1e-4), t + attack + decay);
+    src.connect(lp).connect(g).connect(out);
+    src.start(t);
+    src.stop(t + attack + decay + 0.1);
+    nodes.push({ src, lp, gain: g });
   }
-  return { lp, out, claps: nodes, cutHz, totalDur };
+  const totalDur = Math.max(bedDur, t - whenSeconds + 0.3);
+  return { out, bed: { src: bed, lp: bedLp, gain: bedGain }, claps: nodes, cutHz, totalDur };
 }
 
 // --- 生の音（飛行中に鳴らすほう）---------------------------------------------
