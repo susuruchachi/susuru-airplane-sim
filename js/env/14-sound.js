@@ -352,10 +352,93 @@ function buildEngineVoice(ctx, dest, kind, noiseBuf) {
   return voice;
 }
 
-// 距離による音量の落ち方。1/(1+d/基準) ——「倍の距離で半分」より緩く、
-// 近くでは頭打ちになる（目の前で無限に大きくならない）。
+// --- 風切音 ---------------------------------------------------------------
+//
+// エンジンを全部止めても（グライダーやアイドル降下でも）、空気を切って飛んでいる
+// 音は残る。実機のそれは風防・胴体まわりの乱流音で、**強さは動圧（0.5・ρ・v²）に
+// 比例する**——速いほど、そして空気が濃い（低空の）ほど強い。同じ対気速度でも
+// 高空では薄い空気のぶん静かになる、というところまでちゃんと効かせる。
+const SOUND_WIND_REF_MPS = 170;     // この対気速度・海面高度で「1.0」になるよう合わせる基準
+const SOUND_WIND_REF_Q = 0.5 * 1.225 * SOUND_WIND_REF_MPS * SOUND_WIND_REF_MPS;
+const SOUND_WIND_GAIN = 0.62;
+// 動圧の比をそのまま音量に使うと、低速でも唐突に大きくなる（動圧は速さの2乗な
+// ので、比自体はすでに緩やかに立ち上がるが、耳の感じ方に合わせてもう一段
+// 圧縮する）。平方根寄りのべきにすると、離陸滑走のあたりから自然に育つ。
+const SOUND_WIND_GAIN_POW = 0.62;
+const SOUND_WIND_HZ_FROM = 260;     // 遅いときの、こもった風切り
+const SOUND_WIND_HZ_TO = 2600;      // 速いときの、鋭いヒューという音
+const SOUND_WIND_Q = 0.55;          // 帯域の広さ（狭いと笛に近づく。風なので広く保つ）
+
+// **EnvState を見ない**（buildEngineVoice と同じ理由。オフラインで測れるように）。
+function buildWindVoice(ctx, dest, noiseBuf) {
+  const body = ctx.createGain();
+  body.gain.value = 0;
+  const sub = ctx.createBiquadFilter();
+  sub.type = 'highpass';
+  sub.frequency.value = 70;      // 風切音に地響きのような低さは無い
+  sub.Q.value = 0.6;
+  const air = ctx.createBiquadFilter();
+  air.type = 'lowpass';
+  air.frequency.value = SOUND_AIR_NEAR_HZ;
+  const out = ctx.createGain();
+  out.gain.value = 1;
+  body.connect(sub).connect(air).connect(out).connect(dest);
+
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuf; src.loop = true;
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = SOUND_WIND_HZ_FROM;
+  bp.Q.value = SOUND_WIND_Q;
+  src.connect(bp).connect(body);
+
+  const voice = {
+    kind: 'wind', body, sub, air, out, bp, src,
+    doppler: 1, started: false,
+    // qNorm ＝ 動圧 ÷ SOUND_WIND_REF_Q（基準の動圧に対する比）
+    setSpeed(qNorm, when, smooth) {
+      const t = when === undefined ? ctx.currentTime : when;
+      const tau = smooth === undefined ? SOUND_SMOOTH_S : smooth;
+      const p = THREE.MathUtils.clamp(qNorm, 0, 4);
+      const lv = SOUND_WIND_GAIN * Math.pow(p, SOUND_WIND_GAIN_POW);
+      soundRamp(body.gain, lv, t, tau);
+      const hz = (SOUND_WIND_HZ_FROM + (SOUND_WIND_HZ_TO - SOUND_WIND_HZ_FROM) * Math.min(p, 1.6))
+        * voice.doppler;
+      soundRamp(bp.frequency, hz, t, tau);
+    },
+    setDistance(distM, when, smooth) {
+      const t = when === undefined ? ctx.currentTime : when;
+      const tau = smooth === undefined ? SOUND_SMOOTH_S : smooth;
+      const d = Math.max(distM, 0);
+      soundRamp(air.frequency,
+        SOUND_AIR_FAR_HZ + (SOUND_AIR_NEAR_HZ - SOUND_AIR_FAR_HZ) * Math.exp(-d / SOUND_AIR_SPAN_M),
+        t, tau);
+      const g = soundDistanceGain(d);
+      soundRamp(out.gain, g, t, tau);
+      return g;
+    },
+    setDoppler(ratio) {
+      voice.doppler = Math.max(Math.min(ratio, SOUND_DOPPLER_MAX), SOUND_DOPPLER_MIN);
+    },
+    start(when) {
+      if (voice.started) return;
+      voice.started = true;
+      src.start(when === undefined ? ctx.currentTime : when);
+    },
+    stop(when) { src.stop(when === undefined ? ctx.currentTime : when); },
+  };
+  return voice;
+}
+
+// 距離による音量の落ち方の「形」。1/(1+d/基準) ——「倍の距離で半分」より緩く、
+// 近くでは頭打ちになる（目の前で無限に大きくならない）。基準を変えれば、
+// エンジン（数十m）から雷鳴（数km）まで同じ形で使い回せる。
+function soundFalloff(distM, refM) {
+  return refM / (refM + Math.max(distM, 0));
+}
+
 function soundDistanceGain(distM) {
-  return SOUND_REF_M / (SOUND_REF_M + Math.max(distM, 0));
+  return soundFalloff(distM, SOUND_REF_M);
 }
 
 // パラメータをなめらかに動かす。**値を直接代入してはいけない**——
@@ -383,6 +466,126 @@ function soundBuildMaster(ctx, dest, volume) {
   return { gain, limiter, input: gain };
 }
 
+// --- 衝撃波の音（ソニックブーム）---------------------------------------------
+//
+// 実機の記録に近い形：**立ち上がりはほぼ一瞬**（衝撃波そのものなので）、
+// そこから周波数がすっと下がりながら1秒足らずで消える。**一発だけの使い捨て**
+// なので、エンジンの音のように保持しておく必要はない（stop() を予約すれば
+// 勝手に片付く）。distGain（0〜1）で大きさを、whenSeconds で鳴らす時刻を決める
+// ——「いつ鳴らすか」を決めるほう（soundUpdateBoom）は下にある。
+const SOUND_BOOM_GAIN = 1.1;
+const SOUND_BOOM_HZ_FROM = 1500;
+const SOUND_BOOM_HZ_TO = 55;
+const SOUND_BOOM_SWEEP_S = 0.30;
+const SOUND_BOOM_TAIL_S = 0.55;
+// 自由視点（世界に立っている観測者）で円錐がちょうど届いたときの、距離ぶんの落ち方の基準。
+const SOUND_BOOM_REF_M = 700;
+
+function soundPlayBoom(ctx, dest, noiseBuf, whenSeconds, distGain) {
+  if (!ctx || distGain < 0.004) return null;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuf; src.loop = true;
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'lowpass';
+  bp.frequency.setValueAtTime(SOUND_BOOM_HZ_FROM, whenSeconds);
+  bp.frequency.exponentialRampToValueAtTime(SOUND_BOOM_HZ_TO, whenSeconds + SOUND_BOOM_SWEEP_S);
+  bp.Q.value = 0.8;
+  const g = ctx.createGain();
+  const peak = SOUND_BOOM_GAIN * distGain;
+  g.gain.setValueAtTime(0.0001, whenSeconds);
+  g.gain.linearRampToValueAtTime(peak, whenSeconds + 0.004);   // 4msでほぼ最大
+  g.gain.exponentialRampToValueAtTime(Math.max(peak * 0.002, 1e-4), whenSeconds + SOUND_BOOM_TAIL_S);
+  src.connect(bp).connect(g).connect(dest);
+  src.start(whenSeconds);
+  src.stop(whenSeconds + SOUND_BOOM_TAIL_S + 0.1);
+  return { src, bp, gain: g };
+}
+
+// --- 雨と雷 ------------------------------------------------------------------
+//
+// 機体とは無関係に、いつも天候の「今の値」（05b-weather.js の
+// EnvState.weather.current）から鳴らす。雨はサラサラ〜ザーザーという広帯域の
+// 雑音、雪はほぼ無音（実際、雪が降る音はほとんど聞こえない）。
+const SOUND_RAIN_GAIN = 0.9;
+const SOUND_RAIN_HZ_FROM = 900;   // 小雨。こもった音
+const SOUND_RAIN_HZ_TO = 4200;    // 土砂降り。シャーというにじんだ高音
+const SOUND_RAIN_Q = 0.5;
+
+function buildRainVoice(ctx, dest, noiseBuf) {
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuf; src.loop = true;
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = SOUND_RAIN_HZ_FROM;
+  bp.Q.value = SOUND_RAIN_Q;
+  const g = ctx.createGain();
+  g.gain.value = 0;
+  src.connect(bp).connect(g).connect(dest);
+  src.start();
+  return {
+    src, bp, gain: g,
+    // amt ＝ 降水の強さ（0〜1）。雪や、降っていないときは0を渡す。
+    setIntensity(amt, when, smooth) {
+      const t = when === undefined ? ctx.currentTime : when;
+      const tau = smooth === undefined ? 0.6 : smooth;   // 天候の移り変わりに合わせてゆっくり
+      const p = THREE.MathUtils.clamp(amt, 0, 1);
+      soundRamp(g.gain, SOUND_RAIN_GAIN * p, t, tau);
+      soundRamp(bp.frequency, SOUND_RAIN_HZ_FROM + (SOUND_RAIN_HZ_TO - SOUND_RAIN_HZ_FROM) * p, t, tau);
+    },
+  };
+}
+
+const SOUND_THUNDER_MIN_M = 400;
+const SOUND_THUNDER_MAX_M = 11000;
+const SOUND_THUNDER_REF_M = 900;
+const SOUND_THUNDER_GAIN = 2.2;
+const SOUND_THUNDER_HZ_NEAR = 2600;   // すぐそばの、バリッという高い成分
+const SOUND_THUNDER_HZ_FAR = 45;      // 遠くの、ゴロゴロという低い唸りだけ
+const SOUND_THUNDER_HZ_SPAN_M = 3200;
+
+// 雷鳴を1発ぶん鳴らす。**近いほど鋭い1回のクラック、遠いほど長く低い
+// ゴロゴロ**になる——音の高い成分ほど空気に先に吸われるので、稲妻という
+// 同じ音源が、届く距離によって別の楽器のように変わる（エンジン音の空気の
+// 吸収と同じ考え方。SOUND_AIR_SPAN_M の説明を参照。雷はけた違いに遠くまで
+// 届くので、ここだけ距離の基準を3.2kmに広げてある）。
+function soundPlayThunder(ctx, dest, noiseBuf, whenSeconds, distM) {
+  if (!ctx) return null;
+  const gain0 = soundFalloff(distM, SOUND_THUNDER_REF_M) * SOUND_THUNDER_GAIN;
+  if (gain0 < 0.01) return null;
+  const cutHz = SOUND_THUNDER_HZ_FAR
+    + (SOUND_THUNDER_HZ_NEAR - SOUND_THUNDER_HZ_FAR) * Math.exp(-distM / SOUND_THUNDER_HZ_SPAN_M);
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass'; lp.frequency.value = cutHz; lp.Q.value = 0.6;
+  const out = ctx.createGain(); out.gain.value = gain0;
+  lp.connect(out).connect(dest);
+
+  // 遠いほど長く転がる（音源の長さ・地形やほかの雲での反射がぶんぶん重なる
+  // ぶん）。何回かの「ゴロッ」に分けて鳴らし、最初の一発だけ近いときに鋭くする。
+  const totalDur = Math.min(0.6 + distM / 1100, 11);
+  const claps = distM < 1500 ? 2 : (3 + Math.floor(distM / 3800));
+  const nodes = [];
+  for (let i = 0; i < claps; i++) {
+    const t0 = whenSeconds + (i === 0 ? 0 : (0.12 + Math.random() * 0.45) * totalDur * (i / claps));
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuf; src.loop = true;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'lowpass';
+    bp.frequency.value = cutHz * (i === 0 ? 1.5 : 0.65);
+    const g = ctx.createGain();
+    const peak = i === 0 ? 1.0 : 0.4 + Math.random() * 0.35;
+    const attack = (i === 0 && distM < 2500) ? 0.015 : 0.18;
+    const decay = Math.max(totalDur / claps * 1.3, 0.4);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(peak, t0 + attack);
+    g.gain.exponentialRampToValueAtTime(Math.max(peak * 0.003, 1e-4), t0 + attack + decay);
+    src.connect(bp).connect(g).connect(lp);
+    src.start(t0);
+    src.stop(t0 + attack + decay + 0.1);
+    nodes.push({ src, bp, gain: g });
+  }
+  return { lp, out, claps: nodes, cutHz, totalDur };
+}
+
 // --- 生の音（飛行中に鳴らすほう）---------------------------------------------
 
 function soundState() {
@@ -391,6 +594,7 @@ function soundState() {
       ctx: null, master: null, noiseBuf: null,
       enabled: true, volume: SOUND_VOLUME_DEFAULT,
       voices: null, forAircraft: null,
+      wind: null, rain: null, boom: null, prevFlash: undefined,
       blocked: false,
     };
   }
@@ -419,6 +623,11 @@ function soundEnsure() {
   s.master = m.gain;
   s.limiter = m.limiter;
   s.noiseBuf = soundBuildNoiseBuffer(s.ctx);
+  // 風切音と雨は機体の種類に関係ないので、ここで一度だけ組む
+  // （エンジンの音のように機体ごとに作り直す必要がない）。
+  s.wind = buildWindVoice(s.ctx, s.master, s.noiseBuf);
+  s.wind.start();
+  s.rain = buildRainVoice(s.ctx, s.master, s.noiseBuf);
   if (s.ctx.state === 'suspended') s.ctx.resume();
   return s.ctx;
 }
@@ -481,22 +690,130 @@ function soundDetachAircraft() {
 const _sndPos = new THREE.Vector3();
 const _sndToEar = new THREE.Vector3();
 
+// **機体に固定された点音源**（エンジン・風切音）が共通して要る処理。
+// ドップラー（SOUND_DOPPLER_TAU のすぐ上の説明）と、距離ぶんの音量・高音の
+// 減りをまとめて音源へ適用する。エンジンと風切音はどちらもここを通すので、
+// 「耳がどう動いているか」の扱いが2か所でずれる心配がない。
+function soundApplyMotion(voice, worldPos, cam, f, earFollows, dt, now) {
+  const dist = _sndPos.copy(worldPos).sub(cam).length();
+  let raw = 0;
+  if (!earFollows) {
+    _sndToEar.copy(cam).sub(worldPos);
+    const len = _sndToEar.length();
+    if (len > 1e-3) raw = f.state.velocity.dot(_sndToEar) / len;
+  }
+  if (dt <= 1e-4) voice.closing = raw;
+  else {
+    const k = 1 - Math.exp(-dt / SOUND_DOPPLER_TAU);
+    voice.closing = (voice.closing || 0) + (raw - (voice.closing || 0)) * k;
+  }
+  const want = SOUND_SPEED_MPS / Math.max(SOUND_SPEED_MPS - voice.closing, 40);
+  const step = SOUND_DOPPLER_SLEW * Math.max(dt, 1e-3);
+  voice.setDoppler(THREE.MathUtils.clamp(want, voice.doppler - step, voice.doppler + step));
+  voice.setDistance(dist, now);
+  return dist;
+}
+
+const _boomV = new THREE.Vector3();
+
+// **音速をまたいだ瞬間**ではなく、**衝撃波の円錐が実際に耳へ届いた瞬間**に
+// 鳴らす。超音速機の後ろには、進行方向を軸にした円錐状の衝撃波面
+// （半頂角 μ = asin(1/マッハ数)）が引きずられていて、地上のある1点はその
+// 面が通り過ぎたときに初めて「バーン」を聞く——機体が音速を超えた瞬間では
+// ない（実機の記録でも、超音速機が頭上を通過してからしばらくして届く）。
+//
+//   耳が機体に付いている（追従・機体固定・コックピット・周回）… 同乗して
+//     いるので、円錐は最初からずっと耳の位置を含んでいる。音速を超えた
+//     瞬間に1回だけ鳴らす（09b-aircraft-visual.js の衝撃波の見た目と同じ
+//     合図＝machCrossCount）。
+//   耳が世界に置いてある（自由視点）… 実際に「円錐の中に入ったか」を
+//     角度で判定する。実測（直線・等速・水平飛行、観測者は飛行経路の
+//     真下）で、届く時刻は教科書どおりの式
+//       t = 高度 × √(マッハ数²−1) ÷ (マッハ数 × 音速)
+//     とぴたり一致した（CHANGELOG参照）。
+function soundUpdateBoom(f, cam, earFollows, now) {
+  const s = soundState();
+  if (!s.boom) s.boom = { inside: false, cross: 0 };
+  const b = s.boom;
+  const mach = f.state.mach || 0;
+  const cross = f.state.machCrossCount || 0;
+
+  if (earFollows) {
+    if (cross !== b.cross) {
+      b.cross = cross;
+      if (mach >= 1) soundPlayBoom(s.ctx, s.master, s.noiseBuf, now, 1);
+    }
+    b.inside = false;   // 世界固定の判定は、視点を戻したときのために伏せておく
+    return;
+  }
+  b.cross = cross;       // 視点を戻したとき二重に鳴らないよう、ここでも追従させておく
+  if (mach <= 1.001) { b.inside = false; return; }
+
+  const v = f.state.velocity;
+  const speed = v.length();
+  if (speed < 1) return;
+  const acPos = f.aircraft.group.position;
+  const mu = Math.asin(THREE.MathUtils.clamp(1 / mach, -1, 1));
+  _boomV.copy(v).multiplyScalar(1 / speed);             // 進行方向の単位ベクトル
+  _sndToEar.copy(cam).sub(acPos);                        // 機体 → 耳
+  const len = _sndToEar.length();
+  if (len < 1e-3) return;
+  const cosAngle = -_sndToEar.dot(_boomV) / len;         // 後方（−進行方向）との近さ
+  const inside = cosAngle > Math.cos(mu);
+  if (inside && !b.inside) {
+    soundPlayBoom(s.ctx, s.master, s.noiseBuf, now, soundFalloff(len, SOUND_BOOM_REF_M));
+  }
+  b.inside = inside;
+}
+
+// 雨と雷。機体の有無・視点の種類に関係なく、天候の「今の値」だけで決める。
+function soundUpdateWeatherAmbience(now) {
+  const s = soundState();
+  const w = EnvState.weather;
+  if (!w) return;
+
+  if (s.rain && w.current) {
+    const amt = w.current.precipIsSnow > 0.5 ? 0 : (w.current.precipRate || 0);
+    s.rain.setIntensity(amt, now);
+  }
+
+  // 稲光（flash）が立ち上がった瞬間を「新しい雷」とみなし、落ちた場所までの
+  // 距離を決めて、音が届くだけの時間を空けてから鳴らす——
+  // 「ピカッと光ってから何秒でゴロゴロ」が、そのまま距離÷音速で出る。
+  const flash = w.flash || 0;
+  if (s.prevFlash === undefined) s.prevFlash = flash;
+  if (flash > 0.9 && s.prevFlash <= 0.9) {
+    const distM = SOUND_THUNDER_MIN_M
+      + (SOUND_THUNDER_MAX_M - SOUND_THUNDER_MIN_M) * Math.pow(Math.random(), 2);
+    soundPlayThunder(s.ctx, s.master, s.noiseBuf, now + distM / SOUND_SPEED_MPS, distM);
+  }
+  s.prevFlash = flash;
+}
+
 // 毎フレーム。機体の状態から音を更新する（02-env-scene.js の animateEnv から）。
 function updateSound(dt) {
   const s = soundState();
   if (!s.ctx || !s.enabled) return;
+  const now = s.ctx.currentTime;
+  // **雨と雷は機体と無関係。** 天候は「飛ぶ」を押す前から動いている
+  // （updateWeather は環境プレビューの間ずっと呼ばれる）ので、音もそれに
+  // 合わせて機体の有無を問わず更新する。
+  soundUpdateWeatherAmbience(now);
+
   const f = EnvState.flight;
   if (!f || !f.active || !f.aircraft) { soundSilence(); return; }
   // **音を組むのはここ。** 「まだ組んでいないから何もしない」と書くと、
   // 誰も組まないので永久に鳴らない（実際そうなっていた）。機体が変わったときも
   // ここで組み直す。組んだ直後のフレームは値が入っていないので、そのまま続ける。
   if (!s.voices || s.forAircraft !== f.aircraft) soundAttachAircraft(f.aircraft);
-  if (!s.voices || !s.voices.length) return;
+  if (!s.voices) return;
+  // **ここでエンジンが0本でも return してはいけない。** 風切音とソニックブームは
+  // グライダーのようなエンジンの無い機体でも鳴る（音速に近い滑空はまず無いにせよ、
+  // 少なくとも風切音は要る）。エンジンの声が無いだけで下のコードは素通りする。
 
   const cam = EnvState.camera.position;
   // 耳は機体に乗っているか（自由視点だけが世界に置いてある）
   const earFollows = f.cameraMode !== 'free';
-  const now = s.ctx.currentTime;
   const model = f.aircraft.model;
   const q = f.aircraft.group.quaternion;
   const origin = f.aircraft.group.position;
@@ -521,41 +838,28 @@ function updateSound(dt) {
     if (n > 0) v.center.multiplyScalar(1 / n);
     v.world.copy(v.center).applyQuaternion(q).add(origin);
 
-    const dist = _sndPos.copy(v.world).sub(cam).length();
-
-    // **ドップラーは「音源と耳が近づく速さ」で決まる。**
-    // 耳の速さは、カメラの見かけの動きではなく**カメラが何に繋がれているか**で決める
-    // （SOUND_DOPPLER_TAU のすぐ上の説明）。機体に繋がれている視点では耳も一緒に
-    // 飛んでいるので相対速度は0、世界に置いてある視点では耳は止まっている。
-    // どちらにも「指で動かしたぶん」は入らないので、スワイプもズームも効かない。
-    let raw = 0;
-    if (!earFollows) {
-      _sndToEar.copy(cam).sub(v.world);
-      const len = _sndToEar.length();
-      if (len > 1e-3) raw = f.state.velocity.dot(_sndToEar) / len;
-    }
-    // コマ間の差分はどうしても荒れるので、時定数で均す
-    if (dt <= 1e-4) v.closing = raw;
-    else {
-      const k = 1 - Math.exp(-dt / SOUND_DOPPLER_TAU);
-      v.closing = (v.closing || 0) + (raw - (v.closing || 0)) * k;
-    }
-    const want = SOUND_SPEED_MPS / Math.max(SOUND_SPEED_MPS - v.closing, 40);
-    // 変わる速さにも上限を置く。真横を通り過ぎる瞬間は近づく速さが一瞬で
-    // 裏返るので、比だけ見ると階段状に飛ぶ（耳はその段差を「プツッ」と聞く）。
-    const step = SOUND_DOPPLER_SLEW * Math.max(dt, 1e-3);
-    v.setDoppler(THREE.MathUtils.clamp(want, v.doppler - step, v.doppler + step));
-
+    soundApplyMotion(v, v.world, cam, f, earFollows, dt, now);
     v.setPower(lever, ab, now);
-    v.setDistance(dist, now);
   }
+
+  // **風切音。** 機体の中心に固定された、もう1つの点音源として扱う
+  // （ドップラー・距離の計算はエンジンとまったく同じ soundApplyMotion を通す）。
+  if (s.wind) {
+    soundApplyMotion(s.wind, origin, cam, f, earFollows, dt, now);
+    const rho = typeof airDensityAt === 'function' ? airDensityAt(f.state.altitudeM || 0) : FLIGHT_RHO0;
+    const dynQ = 0.5 * rho * (f.state.airspeed || 0) * (f.state.airspeed || 0);
+    s.wind.setSpeed(dynQ / SOUND_WIND_REF_Q, now);
+  }
+
+  soundUpdateBoom(f, cam, earFollows, now);
 }
 
 function soundSilence() {
   const s = soundState();
-  if (!s.ctx || !s.voices) return;
+  if (!s.ctx) return;
   const now = s.ctx.currentTime;
-  for (const v of s.voices) soundRamp(v.body.gain, 0, now, 0.08);
+  if (s.voices) for (const v of s.voices) soundRamp(v.body.gain, 0, now, 0.08);
+  if (s.wind) soundRamp(s.wind.body.gain, 0, now, 0.08);
 }
 
 // 最初の操作で音を起こす。ページのどこを触っても効くように1回だけ仕掛ける。
