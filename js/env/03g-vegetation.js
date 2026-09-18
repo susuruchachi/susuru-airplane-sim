@@ -11,7 +11,12 @@
 // 木を広く薄く撒くと「森」ではなく「点在する棒」に見える。
 // 手前だけを森として成立する密度で埋め、遠景は地表色の森（03c-terrain.js）に任せる。
 const TREE_TILE_SIZE = 400;
-const TREE_ACTIVE_RADIUS = 1200;   // これより遠い木は描かない
+const TREE_ACTIVE_RADIUS_BASE = 1200;   // これより遠い木は描かない
+const TREE_ACTIVE_RADIUS_MIN = TREE_TILE_SIZE;
+function treeActiveRadius() {
+  const scale = typeof envQualityPreset === 'function' ? envQualityPreset().distance : 1;
+  return Math.max(TREE_ACTIVE_RADIUS_BASE * scale, TREE_ACTIVE_RADIUS_MIN);
+}
 const TREE_SPACING_M = 16;         // 候補を置く間隔。実際に生えるかは密度で決まる
 const TREE_RECHECK_DIST = 150;     // カメラがこれだけ動いたらタイルを見直す
 
@@ -209,7 +214,7 @@ function refreshVegetation(immediate) {
   const cam = EnvState.camera.position;
   _treeLastCheck = { x: cam.x, z: cam.z };
 
-  const R = TREE_ACTIVE_RADIUS;
+  const R = treeActiveRadius();
   const i0 = Math.floor((cam.x - R) / TREE_TILE_SIZE), i1 = Math.floor((cam.x + R) / TREE_TILE_SIZE);
   const j0 = Math.floor((cam.z - R) / TREE_TILE_SIZE), j1 = Math.floor((cam.z + R) / TREE_TILE_SIZE);
 

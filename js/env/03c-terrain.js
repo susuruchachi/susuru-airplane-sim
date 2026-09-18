@@ -19,7 +19,15 @@
 // 移り変わりが地形の解像度そのままで出るので、海面側にシェーダーを書かずに済む。
 
 const TERRAIN_TILE_SIZE = 30000;        // 30km角
-const TERRAIN_ACTIVE_RADIUS = 300000;   // この距離までのタイルを実体化する（カメラのfarより少し広く）
+// この距離までのタイルを実体化する（カメラのfarより少し広く）。画質「低」でも
+// 最低8タイルぶん（TERRAIN_ACTIVE_RADIUS_MIN）は残す——0に近づくと、
+// カメラの真下ですら円の外になり、地面が全く無い一瞬ができる。
+const TERRAIN_ACTIVE_RADIUS_BASE = 300000;
+const TERRAIN_ACTIVE_RADIUS_MIN = TERRAIN_TILE_SIZE * 4;
+function terrainActiveRadius() {
+  const scale = typeof envQualityPreset === 'function' ? envQualityPreset().distance : 1;
+  return Math.max(TERRAIN_ACTIVE_RADIUS_BASE * scale, TERRAIN_ACTIVE_RADIUS_MIN);
+}
 
 // カメラからの水平距離でタイルの分割数を決める。近いほど細かい。
 const TERRAIN_LOD_STEPS = [
@@ -337,7 +345,7 @@ function refreshTerrainTiles(immediate) {
   const cam = EnvState.camera.position;
   _terrainLastCheck = { x: cam.x, z: cam.z };
 
-  const R = TERRAIN_ACTIVE_RADIUS;
+  const R = terrainActiveRadius();
   const i0 = Math.floor((cam.x - R) / TERRAIN_TILE_SIZE), i1 = Math.floor((cam.x + R) / TERRAIN_TILE_SIZE);
   const j0 = Math.floor((cam.z - R) / TERRAIN_TILE_SIZE), j1 = Math.floor((cam.z + R) / TERRAIN_TILE_SIZE);
 

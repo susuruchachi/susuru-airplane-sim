@@ -2,7 +2,12 @@
 
 // 600km四方のマップでは、原点まわりの数kmだけに雲を置くと空に浮いた板に見えてしまう。
 // 雲原は「カメラを中心とした一定範囲」として扱い、外に出たクラスタは反対側から出てくる。
-const CLOUD_MAX_CLUSTERS = 90;
+const CLOUD_MAX_CLUSTERS_BASE = 90;
+const CLOUD_MAX_CLUSTERS_MIN = 12;
+function cloudMaxClusters() {
+  const scale = typeof envQualityPreset === 'function' ? envQualityPreset().distance : 1;
+  return Math.max(Math.round(CLOUD_MAX_CLUSTERS_BASE * scale), CLOUD_MAX_CLUSTERS_MIN);
+}
 const CLOUD_FIELD_HALF_SIZE = 30000; // カメラを中心とした60km四方
 
 let _cloudSpriteTexture = null;
@@ -47,12 +52,14 @@ function buildCloudCluster() {
 }
 
 function initClouds() {
-  _cloudSpriteTexture = buildCloudSpriteTexture();
+  // テクスチャは画質によらず同じものを使い回す（rebuildCloudsで何度も作り直さないため）
+  if (!_cloudSpriteTexture) _cloudSpriteTexture = buildCloudSpriteTexture();
   EnvState.cloudGroup = new THREE.Group();
   EnvState.scene.add(EnvState.cloudGroup);
   EnvState.cloudClusters = [];
 
-  for (let i = 0; i < CLOUD_MAX_CLUSTERS; i++) {
+  const maxClusters = cloudMaxClusters();
+  for (let i = 0; i < maxClusters; i++) {
     const cluster = buildCloudCluster();
     const baseX = (Math.random() * 2 - 1) * CLOUD_FIELD_HALF_SIZE;
     const baseZ = (Math.random() * 2 - 1) * CLOUD_FIELD_HALF_SIZE;
@@ -64,11 +71,24 @@ function initClouds() {
   applyCloudCoverage();
 }
 
+// 画質プリセットでクラスタの最大数（CLOUD_MAX_CLUSTERS_BASE）が変わったときに呼ぶ。
+// クラスタはスプライトの塊（ジオメトリ・マテリアル持ち）なので、増減には作り直しが要る
+// （雲量の増減だけなら applyCloudCoverage で足りる。作り直しはそれより重いので、
+// 画質を変えたときだけ呼ぶ）。
+function rebuildClouds() {
+  if (!EnvState.cloudGroup) return;
+  EnvState.cloudGroup.traverse((o) => {
+    if (o.material) o.material.dispose();
+  });
+  EnvState.scene.remove(EnvState.cloudGroup);
+  initClouds();
+}
+
 // 雲量（0〜1）に応じて、あらかじめ用意したクラスタのうち何個を表示するか切り替える
 // （雲量を変えるたびにジオメトリを作り直さずに済む）
 function applyCloudCoverage() {
   const coverage = THREE.MathUtils.clamp(EnvState.env.cloudCoverage, 0, 1);
-  const visibleCount = Math.round(CLOUD_MAX_CLUSTERS * coverage);
+  const visibleCount = Math.round(EnvState.cloudClusters.length * coverage);
   EnvState.cloudClusters.forEach((c, i) => {
     c.group.visible = i < visibleCount;
   });

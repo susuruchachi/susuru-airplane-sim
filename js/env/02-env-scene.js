@@ -66,6 +66,7 @@ function animateEnv() {
   updatePlaceLabels();
   updateMinimap();
   updateEnvWorldReadout();
+  if (typeof updateFpsReadout === 'function') updateFpsReadout();
   if (typeof updateSound === 'function') updateSound(dt);  // 機体の状態から音を合成する
   EnvState.renderer.render(EnvState.scene, EnvState.camera);
 }

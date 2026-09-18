@@ -94,6 +94,7 @@ function setupEnvUI() {
   setupWeatherUI();
   setupFlightPanelUI();
   setupAirportUI();
+  setupPerformanceUI();
 
   btnReset.addEventListener('click', () => {
     EnvState.time.hours = 9;
@@ -111,6 +112,7 @@ function setupEnvUI() {
     if (typeof soundSetVolume === 'function') soundSetVolume(0.7);
     setLabelsVisible(true);
     setTreesVisible(true);
+    if (typeof applyEnvQuality === 'function') applyEnvQuality('high');
     resetSelectedAirport();
     syncEnvUIToState();
   });
@@ -152,6 +154,13 @@ function syncEnvUIToState() {
   document.getElementById('envShowLabels').checked = EnvState.env.labelsVisible !== false;
   document.getElementById('envShowTrees').checked = EnvState.env.treesVisible !== false;
   document.getElementById('envShowRadar').checked = EnvState.env.radarVisible === true;
+
+  const qualityHost = document.getElementById('envQualityButtons');
+  if (qualityHost) {
+    qualityHost.querySelectorAll('button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.tier === EnvState.env.quality);
+    });
+  }
 
   const soundOn = document.getElementById('envSoundOn');
   if (soundOn) soundOn.checked = EnvState.env.soundOn !== false;
@@ -199,6 +208,48 @@ function setupWorldUI() {
   });
 
   setupMinimapUI();
+}
+
+// --- パフォーマンスセクション -------------------------------------------------
+
+// ミニマップのズーム切り替え（03e-minimap.js の setupMinimapUI）と同じ作り：
+// ボタンを並べて置き、押した画質をそのまま適用する
+function setupPerformanceUI() {
+  const host = document.getElementById('envQualityButtons');
+  if (!host) return;
+  for (const tier of ['high', 'medium', 'low']) {
+    const preset = ENV_QUALITY_PRESETS[tier];
+    const btn = document.createElement('button');
+    btn.textContent = preset.label;
+    btn.dataset.tier = tier;
+    btn.className = tier === EnvState.env.quality ? 'active' : '';
+    btn.addEventListener('click', () => {
+      applyEnvQuality(tier);
+      host.querySelectorAll('button').forEach((b) => {
+        b.classList.toggle('active', b.dataset.tier === tier);
+      });
+      onEnvSettingsChanged();
+    });
+    host.appendChild(btn);
+  }
+}
+
+// 実際のコマ数を測って表示する（設定を変えた効果がその場で見えるように）。
+// 毎フレーム書き換えると数字がちらついて読めないので、0.5秒ぶんまとめて出す。
+let _fpsFrameCount = 0;
+let _fpsWindowStart = null;
+function updateFpsReadout() {
+  const el = document.getElementById('envFpsReadout');
+  if (!el) return;
+  const now = performance.now();
+  if (_fpsWindowStart === null) _fpsWindowStart = now;
+  _fpsFrameCount++;
+  const elapsed = now - _fpsWindowStart;
+  if (elapsed >= 500) {
+    el.textContent = Math.round((_fpsFrameCount * 1000) / elapsed) + ' fps';
+    _fpsFrameCount = 0;
+    _fpsWindowStart = now;
+  }
 }
 
 // --- 音セクション -----------------------------------------------------------

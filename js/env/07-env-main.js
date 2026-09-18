@@ -25,6 +25,7 @@ function bootstrapEnv() {
       applyCloudCoverage();
       setLabelsVisible(EnvState.env.labelsVisible !== false);
       setTreesVisible(EnvState.env.treesVisible !== false);
+      if (typeof applyEnvQuality === 'function') applyEnvQuality(EnvState.env.quality || 'high');
     }
 
     focusCameraOnAirport(); // 起動時は空港全体が見える位置から始める

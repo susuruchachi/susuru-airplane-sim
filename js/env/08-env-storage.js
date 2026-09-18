@@ -43,6 +43,7 @@ function collectEnvSnapshot() {
       soundOn: EnvState.env.soundOn,
       soundVolume: EnvState.env.soundVolume,
       windFromWeather: EnvState.env.windFromWeather,
+      quality: EnvState.env.quality,
     },
     weather: {
       presetId: EnvState.weather.presetId,
@@ -92,6 +93,9 @@ function applyEnvSnapshot(data) {
     if (typeof data.env.soundOn === 'boolean') EnvState.env.soundOn = data.env.soundOn;
     if (typeof data.env.soundVolume === 'number') EnvState.env.soundVolume = data.env.soundVolume;
     if (typeof data.env.windFromWeather === 'boolean') EnvState.env.windFromWeather = data.env.windFromWeather;
+    if (typeof data.env.quality === 'string' && ENV_QUALITY_PRESETS[data.env.quality]) {
+      EnvState.env.quality = data.env.quality;
+    }
   }
 
   if (data.weather) {

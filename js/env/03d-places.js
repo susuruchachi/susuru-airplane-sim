@@ -7,7 +7,12 @@
 // 世界には130の都市があるので、地形や空港と同じく **カメラの周りだけ** 建てて、
 // 離れたら片付ける。地名ラベルも近づいてから作る（作った後はキャッシュする）。
 
-const CITY_ACTIVE_RADIUS = 90000;
+const CITY_ACTIVE_RADIUS_BASE = 90000;
+const CITY_ACTIVE_RADIUS_MIN = 20000;
+function cityActiveRadius() {
+  const scale = typeof envQualityPreset === 'function' ? envQualityPreset().distance : 1;
+  return Math.max(CITY_ACTIVE_RADIUS_BASE * scale, CITY_ACTIVE_RADIUS_MIN);
+}
 const CITY_LIGHT_Y = 14;
 
 // 建物の色。地形と同じく、sRGB出力で持ち上がるぶんを見越して暗めに置く。
@@ -69,7 +74,7 @@ function refreshCities() {
   if (!EnvState.builtCities) return; // 地形の初期化のほうが先に走るため
   const cam = EnvState.camera.position;
   for (const city of WORLD_CITIES) {
-    const near = Math.hypot(city.x - cam.x, city.z - cam.z) < CITY_ACTIVE_RADIUS;
+    const near = Math.hypot(city.x - cam.x, city.z - cam.z) < cityActiveRadius();
     const built = EnvState.builtCities.has(city.id);
     if (near && !built) buildCityInstance(city);
     else if (!near && built) disposeCityInstance(city.id);
