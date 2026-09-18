@@ -1075,6 +1075,31 @@ const SMOKE_HOT_FADE_MAX_S = 2.5;
 // 流れる距離は だいたい 速さ ÷ 抵抗 ＝ ノズル半径の7.5倍。
 const SMOKE_JET_SPAN = 12;
 const SMOKE_JET_DRAG = 1.6;        // 毎秒どれだけ速さが落ちるか（e^-1.6）
+// **煙は面を突き抜けない。当たったら横へ広がる。**
+// 下へ吹きつけた噴流は、地面に当たると跳ね返らずに**放射状の壁噴流**に化ける
+// （ホバリング中の機体の下に、外へ広がる白い輪ができるあれ）。
+// 直す前は、粒の中心が面より上にあっても粒は「板」なので、半径のぶんだけ
+// 面の下まで塗られていた——実測（上向きロケット1基のVTOL機を対地6mで
+// ホバリングさせる）で、生きている粒の**51.8%が滑走路の下まではみ出し**、
+// いちばん深いところで**4.5m**潜っていた。半透明の板は深度を書かないので、
+// 滑走路の上にべったり白い円が乗って見える。
+// 面の高さ＝地形（描かれているメッシュの高さ）・海面(0)・湖面のうち、いちばん上。
+const SMOKE_GROUND_SIT = 0.5;      // 粒の大きさに対する、面から浮かせる高さ（板の下端が面にちょうど載る）
+const SMOKE_GROUND_SPREAD = 0.9;   // 下向きの速さのうち、外向きに化ける割合
+const SMOKE_GROUND_RISE = 0.12;    // そのうち、上へ巻き上がるぶん
+// 面を這う煙は、空中の煙より**ずっと遠くまで流れる**。上下に散らばれないぶん
+// 混ざりにくいので、勢いが落ちにくい。空中の抵抗（SMOKE_JET_DRAG=1.6）のままだと
+// 面に当たっても広がったように見えなかった。流れる距離は 速さ÷抵抗 なので、
+// 1.6→0.45 でおよそ3.6倍まで広がる。
+const SMOKE_GROUND_DRAG = 0.45;
+// 面の高さは**置いたときに1回だけ引く**（エンジン1基につき毎フレーム1回）。
+// 粒ごとに毎フレーム引くと高すぎる——実測で2000回6.4ms、60fpsの1コマ(16.7ms)の
+// 4割を食う。そのかわり、面のそばにいる粒だけを少しずつ引き直して、
+// 斜面に降りたときにも面に貼り付くようにする。
+const SMOKE_GROUND_REFRESH = 12;   // 1フレームに引き直す粒の数（上限）
+const SMOKE_GROUND_SCAN = 200;     // そのために見に行く粒の数（上限）
+const SMOKE_GROUND_NEAR = 3;       // 「面のそば」＝粒の大きさの何倍まで
+
 // 夜、煙をどこまで暗くするか。0にすると真っ黒な粒になって、かえって目立つ
 const SMOKE_NIGHT_LIGHT = 0.2;
 // 煙の大きさを決める半径は、**自動のノズルと同じ上限で頭打ちにする**。
@@ -1185,6 +1210,25 @@ function smokeTexture() {
   return _smokeTexture;
 }
 
+// 煙がぶつかる面の高さ。地形・海面・湖面のうち、いちばん上を返す。
+//   地形は **描かれているメッシュの高さ**（terrainSurfaceHeightAt）を使う。
+//   worldHeightAt の値を使うと、格子点の間で数十mずれて煙が宙に浮く。
+//   海は worldHeightAt が海底として負の値を返すので、0（海面）で止める。
+//   湖は地形を彫り込んで作ってあるので、湖面の高さを別に足す。
+function smokeSurfaceHeightAt(x, z) {
+  let h;
+  if (typeof flightGroundHeightAt === 'function') h = flightGroundHeightAt(x, z);
+  else if (typeof terrainSurfaceHeightAt === 'function') h = terrainSurfaceHeightAt(x, z);
+  else if (typeof worldHeightAt === 'function') h = worldHeightAt(x, z);
+  else return -Infinity;               // 世界が無いとき（Builderなど）は面なし
+  if (h < 0) return 0;                 // 海面
+  if (typeof worldLakeAt === 'function') {
+    const lake = worldLakeAt(x, z);
+    if (lake && lake.level > h) return lake.level;
+  }
+  return h;
+}
+
 function buildRocketSmoke(model, meshUnit) {
   const unit = meshUnit > 0 ? meshUnit : aircraftLongestSide(model);
   const emitters = (model.engines || [])
@@ -1214,6 +1258,11 @@ function buildRocketSmoke(model, meshUnit) {
     // **毎フレーム「ノズルからどれだけ離れたか」から出し直す**
     // （毎フレーム少しずつ引くやり方だと、コマ落ちしている機械で一気に抜ける）。
     hot0: new Float32Array(total), odo0: new Float32Array(total), odo: 0,
+    // 粒ごとに覚えておく「ぶつかる面の高さ」。置いたときに1回だけ引く
+    // （毎フレーム全部引くと高すぎる。SMOKE_GROUND_REFRESH の説明を参照）。
+    gy: new Float32Array(total).fill(-Infinity), gyScan: 0,
+    // 面を這っているか（這っている粒は抵抗が小さい）
+    onGnd: new Uint8Array(total),
     cursor: new Int32Array(emitters.length), dist: 0, timer: 0,
     // 前に置いた場所（ワールド）。置いた場所と場所のあいだを埋めるのに使う。
     last: emitters.map(() => null) };
@@ -1256,6 +1305,8 @@ function buildTyreSmoke(model, meshUnit) {
   points.renderOrder = ENV_ORDER.smoke;
   points.visible = false;
   return { points, emitters, age: new Float32Array(total).fill(Infinity),
+    // ロケットの煙と同じく、粒が滑走路の下まではみ出さないように面の高さを覚える
+    gy: new Float32Array(total).fill(-Infinity),
     cursor: new Int32Array(emitters.length), burst: 0, wasOnGround: true, timer: 0 };
 }
 
@@ -1296,8 +1347,13 @@ function updateTyreSmoke(ac, controls, state, dt) {
         ts.cursor[i] = (ts.cursor[i] + 1) % TYRE_SMOKE_PER_WHEEL;
         const spread = em.dia * 0.6;
         pos[slot * 3] = _tyWorld.x + (Math.random() * 2 - 1) * spread;
-        pos[slot * 3 + 1] = _tyWorld.y + em.dia * 0.2;
         pos[slot * 3 + 2] = _tyWorld.z + (Math.random() * 2 - 1) * spread;
+        // 面の高さ。粒は板なので、そのまま置くと滑走路の下まで塗られる
+        // （ロケットの煙と同じ話。SMOKE_GROUND_SIT の説明を参照）。
+        const gy = smokeSurfaceHeightAt(pos[slot * 3], pos[slot * 3 + 2]);
+        ts.gy[slot] = gy;
+        pos[slot * 3 + 1] = Math.max(_tyWorld.y + em.dia * 0.2,
+          gy + em.dia * TYRE_SMOKE_SIZE_FROM * SMOKE_GROUND_SIT);
         ts.age[slot] = 0;
         alpha[slot] = TYRE_SMOKE_ALPHA * hard;
         size[slot] = em.dia * TYRE_SMOKE_SIZE_FROM;
@@ -1317,6 +1373,9 @@ function updateTyreSmoke(ac, controls, state, dt) {
     pos[s * 3 + 1] += TYRE_SMOKE_RISE_MPS * dt;   // ゆっくり立ちのぼる
     const em = ts.emitters[Math.floor(s / TYRE_SMOKE_PER_WHEEL)] || ts.emitters[0];
     size[s] = em.dia * (TYRE_SMOKE_SIZE_FROM + (TYRE_SMOKE_SIZE_TO - TYRE_SMOKE_SIZE_FROM) * t);
+    // 膨らむぶん、滑走路に載せたまま上へふくらませる（下へはみ出させない）
+    const sit = ts.gy[s] + size[s] * SMOKE_GROUND_SIT;
+    if (pos[s * 3 + 1] < sit) pos[s * 3 + 1] = sit;
     live++;
   }
   geo.attributes.position.needsUpdate = true;
@@ -1386,6 +1445,9 @@ function updateRocketSmoke(ac, controls, state, dt) {
       _smJet.copy(em.exhaust).applyQuaternion(ac.group.quaternion)
         .multiplyScalar(em.radius * SMOKE_JET_SPAN * power);
       const jetSpread = em.radius * SMOKE_JET_SPAN * power * 0.18;
+      // ぶつかる面の高さは**このフレームで1回だけ**引く。この1回ぶんの粒は
+      // 数mの範囲にしか置かないので、その中で面の高さは変わらないとみなせる。
+      const gy = smokeSurfaceHeightAt(now.x, now.z);
       // **前に置いた場所から今までの区間に、ばらまく**。同じ1点に何個も重ねても
       // 濃くなるだけで筋は埋まらない——実際、点々に切れた破線にしか見えなかった。
       const from = sm.last[i] || now;
@@ -1398,6 +1460,12 @@ function updateRocketSmoke(ac, controls, state, dt) {
         _smWorld.x += (Math.random() * 2 - 1) * spread;
         _smWorld.y += (Math.random() * 2 - 1) * spread;
         _smWorld.z += (Math.random() * 2 - 1) * spread;
+        sm.gy[slot] = gy;
+        sm.onGnd[slot] = 0;
+        // 出たところが面の下なら（脚を出して滑走路に載っているときなど）、
+        // 置く前に面の上まで上げておく
+        const sit0 = gy + em.radius * SMOKE_SIZE_FROM * SMOKE_GROUND_SIT;
+        if (_smWorld.y < sit0) _smWorld.y = sit0;
         pos[slot * 3] = _smWorld.x; pos[slot * 3 + 1] = _smWorld.y; pos[slot * 3 + 2] = _smWorld.z;
         sm.age[slot] = 0;
         alpha[slot] = SMOKE_ALPHA * power;
@@ -1422,6 +1490,10 @@ function updateRocketSmoke(ac, controls, state, dt) {
   // 止まっているときのために、秒数でも抜く保険を足しておく。
   const fadeM = Math.max(r0 * SMOKE_HOT_FADE_SPAN, stepM * SMOKE_HOT_MIN_PUFFS, 1e-3);
   const drag = Math.exp(-SMOKE_JET_DRAG * dt);
+  const gDrag = Math.exp(-SMOKE_GROUND_DRAG * dt);
+  // 面に当たった粒を外へ広げるときの、中心（＝噴流が当たっているところ）。
+  // ホバリング中はこれが機体の真下になるので、そこから放射状に広がる。
+  const acx = ac.group.position.x, acz = ac.group.position.z;
 
   for (let s = 0; s < sm.age.length; s++) {
     const a = sm.age[s];
@@ -1434,11 +1506,38 @@ function updateRocketSmoke(ac, controls, state, dt) {
     alpha[s] *= Math.pow(1 - dt / life, 1.4);
     const em = sm.emitters[Math.floor(s / SMOKE_PER_ROCKET)] || sm.emitters[0];
     size[s] = em.radius * (SMOKE_SIZE_FROM + (SMOKE_SIZE_TO - SMOKE_SIZE_FROM) * t);
-    // 噴射で押し出されたぶんだけ動かす（抵抗ですぐ止まる）
+    // 噴射で押し出されたぶんだけ動かす。面を這っている粒は抵抗が小さい
+    // （SMOKE_GROUND_DRAG の説明）ので、そのぶん遠くまで流れる。
     const vx = vel[s * 3], vy = vel[s * 3 + 1], vz = vel[s * 3 + 2];
     if (vx || vy || vz) {
+      const k = sm.onGnd[s] ? gDrag : drag;
       pos[s * 3] += vx * dt; pos[s * 3 + 1] += vy * dt; pos[s * 3 + 2] += vz * dt;
-      vel[s * 3] = vx * drag; vel[s * 3 + 1] = vy * drag; vel[s * 3 + 2] = vz * drag;
+      vel[s * 3] = vx * k; vel[s * 3 + 1] = vy * k; vel[s * 3 + 2] = vz * k;
+    }
+    // **面を突き抜けさせない。当たったら横へ広がる。**
+    // 粒は板なので、中心が面の上にあっても半径のぶんは面の下まで塗られる。
+    // 面から「粒の大きさの SMOKE_GROUND_SIT 倍」だけ浮かせて座らせる。
+    // 粒は時間とともに膨らむので、座面も一緒に上がっていく——地面に置いた
+    // 煙が上へふくらんでいく見え方になる。
+    const sit = sm.gy[s] + size[s] * SMOKE_GROUND_SIT;
+    if (pos[s * 3 + 1] < sit) {
+      pos[s * 3 + 1] = sit;
+      const dvy = vel[s * 3 + 1];
+      if (dvy < 0) {
+        // 下向きの勢いを、当たったところから**外向き**へ振り替える。
+        // ほんの少しだけ上へも巻き上げる（壁噴流の外縁が立ち上がるぶん）。
+        let dx = pos[s * 3] - acx, dz = pos[s * 3 + 2] - acz;
+        let d = Math.sqrt(dx * dx + dz * dz);
+        if (d < 1e-3) { const ang = Math.random() * Math.PI * 2; dx = Math.cos(ang); dz = Math.sin(ang); d = 1; }
+        const out = -dvy * SMOKE_GROUND_SPREAD;
+        vel[s * 3] += (dx / d) * out;
+        vel[s * 3 + 2] += (dz / d) * out;
+        vel[s * 3 + 1] = -dvy * SMOKE_GROUND_RISE;
+      }
+      sm.onGnd[s] = 1;
+    } else if (sm.onGnd[s]) {
+      // 膨らんで座面が上がったぶん浮いただけなら、まだ面を這っているとみなす
+      if (pos[s * 3 + 1] > sit + size[s] * SMOKE_GROUND_SIT) sm.onGnd[s] = 0;
     }
     // 炎の照り返しは**ノズルから離れた距離**で抜く（SMOKE_HOT_FADE_SPAN の説明）。
     // 止まっているときのために、経った時間ぶんも足す。
@@ -1448,6 +1547,22 @@ function updateRocketSmoke(ac, controls, state, dt) {
     }
     live++;
   }
+
+  // 面の高さを少しずつ引き直す。置いたときの1回きりだと、横へ広がった粒が
+  // 斜面をたどれない（傾いた地面に降りると、広がった煙だけ宙に浮く）。
+  // 見に行くのは**面のそばにいる粒だけ**。上空の粒は引くだけ無駄なので、
+  // 引かずに飛ばす（飛ばすぶんは足し算1回で済むので、予算を使わない）。
+  if (live > 0) {
+    let spent = 0;
+    for (let k = 0; k < SMOKE_GROUND_SCAN && spent < SMOKE_GROUND_REFRESH; k++) {
+      const s = (sm.gyScan = (sm.gyScan + 1) % sm.age.length);
+      if (!(sm.age[s] < life) || alpha[s] <= 0) continue;
+      if (pos[s * 3 + 1] - sm.gy[s] > size[s] * SMOKE_GROUND_NEAR) continue;
+      sm.gy[s] = smokeSurfaceHeightAt(pos[s * 3], pos[s * 3 + 2]);
+      spent++;
+    }
+  }
+
   geo.attributes.position.needsUpdate = true;
   geo.attributes.aAlpha.needsUpdate = true;
   geo.attributes.aSize.needsUpdate = true;
