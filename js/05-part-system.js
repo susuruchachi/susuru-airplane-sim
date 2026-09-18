@@ -49,6 +49,10 @@ function defaultPropsForType(type) {
         kind: 'nav_red',
         color: LIGHT_KINDS[0].color,
         blink: LIGHT_KINDS[0].blink,
+        // 着陸灯のときだけ意味を持つ（LANDING_BEAM_DEFAULT の説明を参照）
+        beamDownDeg: LANDING_BEAM_DEFAULT.downDeg,
+        beamSpreadDeg: LANDING_BEAM_DEFAULT.spreadDeg,
+        beamRangeM: LANDING_BEAM_DEFAULT.rangeM,
       };
     case 'landing_gear':
       return {
@@ -70,7 +74,9 @@ function createPartGizmoMesh(type, role, corners, props) {
   const mat = new THREE.MeshStandardMaterial({
     color, emissive: color, emissiveIntensity: type === 'light' ? 0.9 : 0.25,
     roughness: 0.4, metalness: 0.2, transparent: true, opacity: 0.92,
-    side: type === 'wing' ? THREE.DoubleSide : THREE.FrontSide,
+    // 着陸灯の円錐は側面だけの筒（openEnded）なので、裏からも見えないと
+    // 「照らす向き」が分からない角度ができる。翼と同じく両面で描く。
+    side: (type === 'wing' || type === 'light') ? THREE.DoubleSide : THREE.FrontSide,
   });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.userData.isPartGizmo = true;
@@ -138,6 +144,14 @@ function updateEngineGizmoShape(part) {
   part.gizmo.geometry = geometryForPart('engine', null, part.props);
 }
 
+// 種類・伏せ角・広がりを変えたとき、ギズモの形を作り直す
+// （着陸灯は円錐、それ以外は玉。エンジンの updateEngineGizmoShape と同じ形）
+function updateLightGizmoShape(part) {
+  if (part.type !== 'light' || !part.gizmo) return;
+  part.gizmo.geometry.dispose();
+  part.gizmo.geometry = geometryForPart('light', null, part.props);
+}
+
 function geometryForPart(type, role, props) {
   switch (type) {
     case 'engine': {
@@ -156,8 +170,20 @@ function geometryForPart(type, role, props) {
       return new THREE.BoxGeometry(1.2, 0.06, 0.35);
     case 'control_surface':
       return new THREE.BoxGeometry(0.4, 0.04, 0.18);
-    case 'light':
-      return new THREE.SphereGeometry(0.07, 12, 12);
+    case 'light': {
+      // 着陸灯だけは**どちらを照らすか**が要るので、向きの見える円錐にする。
+      // 頂点が灯りの位置、底面が照らす先。太さは「広がり」そのままなので、
+      // 広げれば円錐も太くなる。伏せ角ぶん下へ傾けて描くから、ギズモを
+      // 回していなくても実際に照らす向きが分かる（回転はこれに上乗せされる）。
+      if (!props || props.kind !== 'landing') return new THREE.SphereGeometry(0.07, 12, 12);
+      const len = 0.6;
+      const r = Math.max(len * Math.tan(THREE.MathUtils.degToRad(lightBeamSpreadDeg(props))), 0.05);
+      const geo = new THREE.ConeGeometry(r, len, 16, 1, true);
+      geo.rotateX(Math.PI / 2);        // +Y → +Z（頂点が後ろ・底面が前）
+      geo.translate(0, 0, -len / 2);   // 頂点を原点（灯りの位置）へ
+      geo.rotateX(-THREE.MathUtils.degToRad(lightBeamDownDeg(props)));  // 伏せ角ぶん下へ
+      return geo;
+    }
     case 'viewpoint': {
       // 視線の向きが見えるよう、前（-Z）へ尖った円錐にする。
       // エンジンと同じ理由で、メッシュの rotation ではなくジオメトリを回す

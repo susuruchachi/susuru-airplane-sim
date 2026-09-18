@@ -109,6 +109,25 @@ const LIGHT_KINDS = [
   { value: 'landing', label: '着陸灯（白）', color: '#fff6dd', blink: 'steady' },
 ];
 
+// 着陸灯が照らす光の既定値。
+// 伏せ角は「まっすぐ前」から何度下を向くか（実機の着陸灯もこのくらい）。
+// 広がりは半角（＝光の円錐の半分の角度）、届く距離は光の筋の長さの上限。
+// パーツの回転はこれに**上乗せ**される（左右へ振る・さらに下げる、など）。
+// 飛行側で同じ既定値を持っている（js/env/09b-aircraft-visual.js の LANDING_BEAM_*）。
+const LANDING_BEAM_DEFAULT = { downDeg: 11, spreadDeg: 9, rangeM: 600 };
+function lightBeamDownDeg(props) {
+  const v = props && props.beamDownDeg;
+  return (typeof v === 'number' && isFinite(v)) ? v : LANDING_BEAM_DEFAULT.downDeg;
+}
+function lightBeamSpreadDeg(props) {
+  const v = props && props.beamSpreadDeg;
+  return (typeof v === 'number' && v > 0) ? v : LANDING_BEAM_DEFAULT.spreadDeg;
+}
+function lightBeamRangeM(props) {
+  const v = props && props.beamRangeM;
+  return (typeof v === 'number' && v > 0) ? v : LANDING_BEAM_DEFAULT.rangeM;
+}
+
 // 着陸脚の取付位置（機体の前脚／主脚 左右）
 const LANDING_GEAR_POSITIONS = [
   { value: 'nose', label: '前脚（ノーズギア）' },

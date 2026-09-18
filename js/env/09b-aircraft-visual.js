@@ -240,11 +240,16 @@ async function createAircraft(config, cgOverride) {
   // 航行灯。Builderの定義があればその位置に、無ければ翼端と尾に置く。
   const lights = buildAircraftLights(config, model, modelXform, group);
 
-  // 着陸灯が照らす地面。機体の傾きを持ち込みたくないので group の子にしつつ、
-  // 毎フレーム「世界で水平・地面のすぐ上」になるように置き直す（機体と一緒に
-  // 捨てられるので、後始末を別に書かなくて済む）。
-  const landingPool = buildLandingPool();
+  // 着陸灯が照らす地面。**灯り1つにつき板1枚**。板は世界で水平に置きたいので
+  // 機体の傾きを持ち込まず、毎フレーム「地面のすぐ上」に置き直す
+  // （group の子にしておけば、機体と一緒に捨てられて後始末が要らない）。
+  const landingPool = buildLandingPool(lights);
   group.add(landingPool);
+  // 灯りの向きを決める。入れ物の向きを読むので、行列を作ってから。
+  group.updateMatrixWorld(true);
+  for (const l of lights) {
+    if (l.kind === 'landing') resolveLightAim(l, group);
+  }
 
   // 排気と炎（エンジンの種別ごと）。機体座標のまま置けるので group の子。
   // ノズルの太さを抑える基準は、Builderと同じ**メッシュの境界箱**で測る。
@@ -285,7 +290,7 @@ async function createAircraft(config, cgOverride) {
 function buildAircraftLights(config, model, modelParent, bodyParent) {
   const defs = (config.parts || []).filter((p) => p.type === 'light');
   const out = [];
-  const mk = (parent, kind, x, y, z) => {
+  const mk = (parent, kind, x, y, z, part) => {
     const info = LIGHT_KINDS_FALLBACK[kind] || LIGHT_KINDS_FALLBACK.nav_white_tail;
     const mesh = new THREE.Mesh(
       new THREE.SphereGeometry(0.09, 8, 8),
@@ -306,13 +311,29 @@ function buildAircraftLights(config, model, modelParent, bodyParent) {
     glow.position.copy(mesh.position);
     glow.renderOrder = ENV_ORDER.light - 1;
     parent.add(glow);
-    out.push({ mesh, glow, kind, blink: info.blink });
+    const props = (part && part.props) || {};
+    out.push({
+      mesh, glow, kind, blink: info.blink,
+      name: (part && part.name) || kind,
+      // 着陸灯の向きと広がり。**パーツの回転をそのまま向きに使う**
+      // （エンジンの推力と同じ約束。Builderで傾けて付ければ、その向きへ照らす）。
+      aimDeg: (part && part.rotation) ? {
+        x: part.rotation.x || 0, y: part.rotation.y || 0, z: part.rotation.z || 0,
+      } : { x: 0, y: 0, z: 0 },
+      // 伏せ角は負（上を向ける）もありうるので、0より大きいかではなく数かどうかで見る
+      downDeg: (typeof props.beamDownDeg === 'number' && isFinite(props.beamDownDeg))
+        ? props.beamDownDeg : LANDING_BEAM_DOWN_DEG,
+      halfDeg: props.beamSpreadDeg > 0 ? props.beamSpreadDeg : LANDING_BEAM_HALF_DEG,
+      rangeM: props.beamRangeM > 0 ? props.beamRangeM : LANDING_BEAM_RANGE_M,
+      // 向き（灯りの入れ物の座標）。createAircraft がここを埋める
+      aimLocal: null,
+    });
   };
 
   if (defs.length) {
     for (const d of defs) {
       mk(modelParent, (d.props && d.props.kind) || 'nav_white_tail',
-        d.position.x, d.position.y, d.position.z);
+        d.position.x, d.position.y, d.position.z, d);
     }
   } else {
     // **定義が無い機体は、機体の形から置く**。
@@ -397,13 +418,23 @@ function aircraftLightAnchors(model) {
 // 強さを 3.2 から 300 へ上げても夜の滑走路は 1 ピクセルも変わらなかった。
 // そこで「光が当たった地面」を**地面に貼る板**として描く。加算合成なので、
 // 頂点の粗さと関係なく、狙ったところがちゃんと明るくなる。
-const LANDING_POOL_DOWN_RAD = 0.19;     // 伏せ角およそ11°
-const LANDING_POOL_HALF_RAD = 0.16;     // 光の広がり（半角およそ9°）
+//
+// **光は「灯りごとに」出す。** 以前は機体に1枚だけ板を置き、機体の位置から
+// 機首の向きへ、伏せ角11°の決め打ちで照らしていた——灯りをどこに付けても、
+// どちらへ向けても、出る光は同じ場所だった。実測（機首中央・左翼(左へ25°)・
+// 右翼(右へ25°)の3灯を付けて対地60mで飛ばし、各灯から出る光線が地面に
+// 当たる点と、描かれている板の中心を比べて）で、板は**1枚しか出ず**、
+// 翼の灯りの当たる点から**175.7m**ずれていた（機首の灯りでも34.4m）。
+// いまは灯り1つにつき板1枚を、その灯りの**世界での位置と向き**から置く。
+// 向きはパーツの回転そのもの（エンジンの推力と同じ約束）。
+const LANDING_BEAM_DOWN_DEG = 11;       // 既定の伏せ角（実機の着陸灯もこのくらい）
+const LANDING_BEAM_HALF_DEG = 9;        // 既定の広がり（半角）
+const LANDING_BEAM_RANGE_M = 600;       // 既定の届く距離
 const LANDING_POOL_FAR_RAD = 0.011;     // 光が届く下限の角度（これで奥行きが決まる）
-const LANDING_POOL_MAX_M = 600;         // どんなに低くてもここまで（見た目の上限）
 const LANDING_POOL_FADE_FROM_M = 110;   // 対地これより高いと薄れはじめ
 const LANDING_POOL_FADE_TO_M = 210;     // ここまで上がると地面には届かない
 const LANDING_POOL_OPACITY = 0.85;
+const LANDING_POOL_MAX = 8;             // 板の数の上限（灯りを何十個も付けられるので）
 // 地面から浮かせる高さ。舗装は地形の上 1.0m、標示は 1.4m に敷いてある
 // （04b-airport.js の RUNWAY_SURFACE_Y / RUNWAY_MARK_Y）ので、地形の高さ＋60cm
 // では**滑走路の下に潜って一切見えなかった**。標示より上、灯火(2.2m)より下に置く。
@@ -436,8 +467,9 @@ function landingPoolTexture() {
   return _landingPoolTexture;
 }
 
-function buildLandingPool() {
-  // 板は XZ 平面に寝かせる。ジオメトリの +Y が -Z（機首の向き）へ向くので、
+// 灯り1つぶんの板
+function buildLandingPoolMesh() {
+  // 板は XZ 平面に寝かせる。ジオメトリの +Y が -Z（光の向き）へ向くので、
   // テクスチャの v=1（奥）がそのまま前方になる。
   const geo = new THREE.PlaneGeometry(1, 1);
   geo.rotateX(-Math.PI / 2);
@@ -453,56 +485,115 @@ function buildLandingPool() {
   mesh.renderOrder = ENV_ORDER.effect;
   mesh.visible = false;
   mesh.frustumCulled = false;
+  mesh.userData.landingPool = true;
   return mesh;
 }
 
-const _poolFwd = new THREE.Vector3();
-const _poolPos = new THREE.Vector3();
+// 着陸灯の数だけ板を用意する入れ物
+function buildLandingPool(lights) {
+  const group = new THREE.Group();
+  const n = Math.min(lights.filter((l) => l.kind === 'landing').length, LANDING_POOL_MAX);
+  for (let i = 0; i < n; i++) group.add(buildLandingPoolMesh());
+  return group;
+}
 
-// 着陸灯が照らす地面を、機体の前の地面に描く
+// 灯りの向き（灯りの入れ物の座標）を決める。
+//   1) その入れ物の座標での「機首向き」と「機体の上」を出し、
+//   2) 機首向きを伏せ角ぶん下へ傾け、
+//   3) そこへパーツの回転を掛ける。
+// 1) を挟むのは、モデルまるごとの回転（modelTransform）が入っている機体でも
+// 「伏せ角」が機体基準のままになるようにするため。パーツの回転は
+// **Builderの画面で見たとおり**に効かせたいので、入れ物の中で掛ける。
+const _aimFwd = new THREE.Vector3();
+const _aimUp = new THREE.Vector3();
+const _aimRight = new THREE.Vector3();
+const _aimQ = new THREE.Quaternion();
+
+function resolveLightAim(light, group) {
+  const parent = light.mesh.parent || group;
+  parent.getWorldQuaternion(_aimQ).invert();
+  _aimFwd.set(0, 0, -1).applyQuaternion(_aimQ);
+  _aimUp.set(0, 1, 0).applyQuaternion(_aimQ);
+  _aimRight.copy(_aimFwd).cross(_aimUp).normalize();
+  const aim = _aimFwd.clone()
+    .applyAxisAngle(_aimRight, -THREE.MathUtils.degToRad(light.downDeg));
+  const r = light.aimDeg;
+  if (r.x || r.y || r.z) {
+    aim.applyEuler(new THREE.Euler(
+      THREE.MathUtils.degToRad(r.x), THREE.MathUtils.degToRad(r.y),
+      THREE.MathUtils.degToRad(r.z)));
+  }
+  light.aimLocal = aim.normalize();
+}
+
+const _poolDir = new THREE.Vector3();
+const _poolPos = new THREE.Vector3();
+const _poolLight = new THREE.Vector3();
+const _poolQ = new THREE.Quaternion();
+
+// 着陸灯が照らす地面を、灯りごとに描く
 function updateLandingLightPool(ac, controls, state) {
-  const pool = ac.landingPool;
-  if (!pool) return;
-  const hasLanding = ac.lights.some((l) => l.kind === 'landing');
-  if (!hasLanding || !controls.landingLight) { pool.visible = false; return; }
+  const pools = ac.landingPool;
+  if (!pools || !pools.children.length) return;
+  const hide = () => { for (const m of pools.children) m.visible = false; };
+  if (!controls.landingLight) { hide(); return; }
 
   // 明るい昼は、実機でも着陸灯の光は地面に見えない。太陽の強さで薄める。
   const sun = EnvState.sunLight ? EnvState.sunLight.intensity / 1.5 : 1;
   const dark = THREE.MathUtils.clamp(1 - sun * 1.6, 0, 1);
-  if (dark <= 0.01) { pool.visible = false; return; }
+  if (dark <= 0.01) { hide(); return; }
 
-  // 機首の向き（水平成分）
-  _poolFwd.set(0, 0, -1).applyQuaternion(ac.group.quaternion);
-  _poolFwd.y = 0;
-  if (_poolFwd.lengthSq() < 1e-6) { pool.visible = false; return; }
-  _poolFwd.normalize();
+  ac.group.updateMatrixWorld(true);
+  const acGround = typeof flightGroundHeightAt === 'function'
+    ? flightGroundHeightAt(state.position.x, state.position.z) : 0;
 
-  const px = state.position.x, pz = state.position.z;
-  const gh = typeof flightGroundHeightAt === 'function' ? flightGroundHeightAt(px, pz) : 0;
-  // 灯りの高さ。接地していても胴体の下面ぶんは浮いているので、下限を置く。
-  const h = Math.max(state.position.y - gh, 1.5);
-  const near = h / Math.tan(LANDING_POOL_DOWN_RAD + LANDING_POOL_HALF_RAD);
-  const far = Math.min(h / Math.tan(LANDING_POOL_FAR_RAD), LANDING_POOL_MAX_M);
-  if (near >= far) { pool.visible = false; return; }
+  let n = 0;
+  for (const l of ac.lights) {
+    if (l.kind !== 'landing') continue;
+    const pool = pools.children[n];
+    if (!pool) break;
+    n++;
+    pool.visible = false;
+    if (!l.aimLocal) continue;
 
-  // 高く上がるほど地面の光は薄くなる（光が広がりきって、見えなくなる）
-  const fade = 1 - THREE.MathUtils.smoothstep(h, LANDING_POOL_FADE_FROM_M, LANDING_POOL_FADE_TO_M);
-  if (fade <= 0.01) { pool.visible = false; return; }
+    // 灯りの世界での位置と向き（機体の傾きもここに入る）
+    l.mesh.getWorldPosition(_poolLight);
+    (l.mesh.parent || ac.group).getWorldQuaternion(_poolQ);
+    _poolDir.copy(l.aimLocal).applyQuaternion(_poolQ).normalize();
 
-  const mid = (near + far) / 2;
-  const cx = px + _poolFwd.x * mid;
-  const cz = pz + _poolFwd.z * mid;
-  const cy = (typeof flightGroundHeightAt === 'function' ? flightGroundHeightAt(cx, cz) : 0)
-    + LANDING_POOL_LIFT_M;
+    // 灯りの高さ。接地していても胴体の下面ぶんは浮いているので下限を置く。
+    const h = Math.max(_poolLight.y - acGround, 1.5);
+    // 伏せ角は**いまの向きから**取る（機体が頭を下げれば光も近くへ落ちる）。
+    const down = Math.asin(THREE.MathUtils.clamp(-_poolDir.y, -1, 1));
+    const half = THREE.MathUtils.degToRad(l.halfDeg);
+    if (down <= 0) continue;                      // 水平より上を向いている＝地面に落ちない
+    const near = h / Math.tan(down + half);
+    const far = Math.min(h / Math.tan(Math.max(down - half, LANDING_POOL_FAR_RAD)), l.rangeM);
+    if (near >= far) continue;
 
-  pool.visible = true;
-  pool.scale.set(far * Math.tan(LANDING_POOL_HALF_RAD) * 2.2, 1, far - near);
-  _poolPos.set(cx, cy, cz);
-  pool.position.copy(ac.group.worldToLocal(_poolPos));
-  // 板は水平のまま、機首の向きだけに合わせる（機体の傾きは持ち込まない）
-  pool.quaternion.copy(ac.group.quaternion).invert();
-  pool.rotateY(Math.atan2(_poolFwd.x, _poolFwd.z) + Math.PI);
-  pool.material.opacity = LANDING_POOL_OPACITY * dark * fade;
+    // 高く上がるほど地面の光は薄くなる（光が広がりきって、見えなくなる）
+    const fade = 1 - THREE.MathUtils.smoothstep(h, LANDING_POOL_FADE_FROM_M, LANDING_POOL_FADE_TO_M);
+    if (fade <= 0.01) continue;
+
+    // 水平の向き（板はこの向きへ伸ばす）
+    const hx = _poolDir.x, hz = _poolDir.z;
+    const hl = Math.hypot(hx, hz);
+    if (hl < 1e-6) continue;
+    const mid = THREE.MathUtils.clamp((near + far) / 2, near, far);
+    const cx = _poolLight.x + (hx / hl) * mid;
+    const cz = _poolLight.z + (hz / hl) * mid;
+    const cy = (typeof flightGroundHeightAt === 'function' ? flightGroundHeightAt(cx, cz) : 0)
+      + LANDING_POOL_LIFT_M;
+
+    pool.visible = true;
+    pool.scale.set(far * Math.tan(half) * 2.2, 1, far - near);
+    _poolPos.set(cx, cy, cz);
+    pool.position.copy(ac.group.worldToLocal(_poolPos));
+    // 板は水平のまま、その灯りが向いている方位だけに合わせる
+    pool.quaternion.copy(ac.group.quaternion).invert();
+    pool.rotateY(Math.atan2(hx / hl, hz / hl) + Math.PI);
+    pool.material.opacity = LANDING_POOL_OPACITY * dark * fade;
+  }
 }
 
 // --- エンジンの排気と炎 -------------------------------------------------------

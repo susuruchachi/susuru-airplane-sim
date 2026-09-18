@@ -683,6 +683,25 @@ function renderTypeSpecificFields(part) {
         </select>
       </div>
       <div class="hint">種類を選ぶと色と点灯パターンの初期値が自動設定されます（後から個別に変更可）。</div>
+      ${part.props.kind === 'landing' ? `
+      <div class="divider"></div>
+      <div class="subgroup-title">照らす向きと広がり</div>
+      <div class="field">
+        <label>伏せ角（°）</label>
+        <input type="number" id="fBeamDown" step="1" value="${lightBeamDownDeg(part.props)}">
+      </div>
+      <div class="field">
+        <label>広がり・半角（°）</label>
+        <input type="number" id="fBeamSpread" step="1" min="1" max="60" value="${lightBeamSpreadDeg(part.props)}">
+      </div>
+      <div class="field">
+        <label>届く距離（m）</label>
+        <input type="number" id="fBeamRange" step="50" min="20" value="${lightBeamRangeM(part.props)}">
+      </div>
+      <div class="hint">まっすぐ前から何度下を向くかが「伏せ角」です。
+        <b>パーツの回転（Eキー）はこれに上乗せされます</b>——左右へ振りたいときは
+        ギズモでY軸に回してください。円錐のギズモが、実際に照らす向きと広がりを表します。</div>
+      ` : ''}
       <div class="divider"></div>
       <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
     `;
@@ -692,9 +711,24 @@ function renderTypeSpecificFields(part) {
       part.props.color = kindDef.color;
       part.props.blink = kindDef.blink;
       updatePartGizmoColor(part);
+      updateLightGizmoShape(part);   // 着陸灯は円錐、それ以外は玉
       renderInspector();
     });
     document.getElementById('fBlink').addEventListener('change', (e) => { part.props.blink = e.target.value; });
+    if (part.props.kind === 'landing') {
+      const beam = (id, key, min, max) => {
+        document.getElementById(id).addEventListener('change', (e) => {
+          const v = parseFloat(e.target.value);
+          if (!isFinite(v)) { e.target.value = part.props[key]; return; }
+          part.props[key] = Math.min(Math.max(v, min), max);
+          e.target.value = part.props[key];
+          updateLightGizmoShape(part);
+        });
+      };
+      beam('fBeamDown', 'beamDownDeg', -80, 80);
+      beam('fBeamSpread', 'beamSpreadDeg', 1, 60);
+      beam('fBeamRange', 'beamRangeM', 20, 20000);
+    }
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
 
   } else if (part.type === 'landing_gear') {
