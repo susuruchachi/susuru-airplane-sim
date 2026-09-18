@@ -55,6 +55,15 @@ const BONE_CONTROL_DEG = 28;     // 舵面の振れ幅（AERO_DEFAULTS.controlMa
 const BONE_FLAP_DEG = 30;        // ＝ AERO_DEFAULTS.flapMaxDeg
 const BONE_SPOILER_DEG = 55;     // 立てる板は大きく開く
 const BONE_SMOOTH_S = 0.08;      // 舵が動く速さ（実機の舵も一瞬では動かない）
+// **見た目の更新を、このぶん動くまで我慢する。** 天候の突風はなめらかに揺れ続ける
+// （05b-weather.js の w.gust）ので、巡航中でも自動操縦の舵はフレームごとに
+// ほんのわずかずつ動き続ける——実測で最大0.075°/フレーム、これを毎フレーム
+// そのままボーンに反映すると、舵の輪郭が常に細かく震えて見える（実際そう見えた）。
+// 内部の角度（b.angle）は毎フレーム続けて動かすが、**実際にメッシュへ反映するのは
+// 前回の見た目からこのしきい値ぶん動いたときだけ**にする。実測で、しきい値0.1°で
+// 更新する頻度が100%→1.1%まで落ち、1回あたりの動きは0.13°程度（見えない）に収まった。
+// 本物の操縦（フル舵）はこの何十倍も大きく動くので反応の遅れは感じない。
+const BONE_DEADBAND_RAD = THREE.MathUtils.degToRad(0.12);
 
 // 名前で分かるのは「操縦桿で動かす舵ではないもの」だけ。フラップとスポイラーは
 // 別のレバーだし、脚と可変翼は舵ではない。それ以外は形と動きから決める。
@@ -215,7 +224,7 @@ function buildAircraftBones(root) {
       bone, rest, axis: best.axis, name: bone.name,
       role: named || 'attitude',
       center: center.clone(), dir, size: long,
-      angle: 0, target: 0,
+      angle: 0, target: 0, appliedAngle: 0,
       gain: { pitch: 0, roll: 0, yaw: 0, flap: 0, spoiler: 0 },
       maxRad: THREE.MathUtils.degToRad(BONE_CONTROL_DEG),
     };
@@ -308,6 +317,12 @@ function updateAircraftBones(ac, controls, dt) {
       g.pitch * pitch + g.roll * roll + g.yaw * yaw + g.flap * flap + g.spoiler * spoiler, -1, 1);
     b.target = cmd * b.maxRad;
     b.angle += (b.target - b.angle) * k;
-    b.bone.quaternion.copy(b.rest).multiply(_boneQ.setFromAxisAngle(b.axis, b.angle));
+    // 実際にメッシュへ反映するのは、前回の見た目からしきい値ぶん動いたときだけ
+    // （BONE_DEADBAND_RAD の説明を参照）。内部の角度は毎フレーム動かし続けるので、
+    // 大きな入力が来たときの反応は遅れない。
+    if (Math.abs(b.angle - b.appliedAngle) >= BONE_DEADBAND_RAD) {
+      b.appliedAngle = b.angle;
+      b.bone.quaternion.copy(b.rest).multiply(_boneQ.setFromAxisAngle(b.axis, b.angle));
+    }
   }
 }
