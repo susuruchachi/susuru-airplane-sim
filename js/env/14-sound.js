@@ -27,6 +27,34 @@ const SOUND_SPEED_MPS = 340;
 // ドップラーの効きの上限（行き過ぎると音痴になる）
 const SOUND_DOPPLER_MIN = 0.55;
 const SOUND_DOPPLER_MAX = 1.9;
+// **ドップラーは「音源と耳の距離が縮まる速さ」で決まる。**
+//
+// 最初は「機体の速度 − カメラの速度」を視線方向へ落として出していた。式としては
+// 同じものなのだが、カメラの速度を毎フレームの位置の引き算で作っていたので、
+// **スワイプで視点を回しただけで耳が秒速数百mで飛んでいることになり**、
+// 音程がグワグワ揺れた——実測（ジェット機を等速で飛ばしたまま、1秒で半周
+// スワイプ）で、ドップラー比が0.823〜0.974＝**2.91半音**動いていた。
+// 機体の速度は1ノットも変わっていないのに。ジェットで特に目立つのは、
+// ファンのキーンが**純音**だから（雑音には音程が無いので揺れても分からない。
+// ロケットやプロペラで気にならなかったのはそのため）。
+//
+// カメラの速度をやめて機体の速度だけにしてみたら、今度は離れた視点（周回・自由）で
+// **14.05半音**とかえって酷くなった——半周まわるあいだに視線の向きが速度ベクトルを
+// またぐので、近づく成分が+160から-160まで振れてしまう。
+//
+// 答えは定義に戻ること。ドップラーは距離の縮まる速さで決まるのだから、
+// **距離そのものを毎フレーム引き算すればいい**。すると
+//   ・半径を保ったまま視点を回すスワイプ … 距離は1mmも変わらない → 効かない
+//   ・機体に付いた視点                  … 距離は一定 → 効かない
+//   ・止まって見ている横を通過する機体   … 距離が縮んでから伸びる → ちゃんと効く
+// の3つが**式ひとつで**同時に成り立つ。視点の種類で場合分けする必要もない。
+const SOUND_DOPPLER_TAU = 0.25;   // 距離の変化率を均す時定数（コマ間の荒れを取る）
+// ドップラー比が1秒で変われる量。真横を通り過ぎる瞬間に比が裏返るので、
+// これが無いと段差が「プツッ」と聞こえる。
+const SOUND_DOPPLER_SLEW = 1.2;
+// これより速く距離が変わったら「飛んだ」のではなく「置き直された」とみなす。
+// マッハ10でも3,400m/sなので、これを超えるのはワープだけ。
+const SOUND_TELEPORT_MPS = 4000;
 // パラメータを動かすときの追従の速さ（秒）。小さいとプツプツ鳴る。
 const SOUND_SMOOTH_S = 0.05;
 // 雑音のもと。1秒だと繰り返しの周期が耳につくので少し長く取る。
@@ -315,7 +343,6 @@ function soundState() {
       ctx: null, master: null, noiseBuf: null,
       enabled: true, volume: SOUND_VOLUME_DEFAULT,
       voices: null, forAircraft: null,
-      camPrev: null, camVel: new THREE.Vector3(),
       blocked: false,
     };
   }
@@ -404,8 +431,6 @@ function soundDetachAircraft() {
 }
 
 const _sndPos = new THREE.Vector3();
-const _sndToCam = new THREE.Vector3();
-const _sndRel = new THREE.Vector3();
 
 // 毎フレーム。機体の状態から音を更新する（02-env-scene.js の animateEnv から）。
 function updateSound(dt) {
@@ -420,17 +445,6 @@ function updateSound(dt) {
   if (!s.voices || !s.voices.length) return;
 
   const cam = EnvState.camera.position;
-  // カメラの速さ（ドップラーに要る）。追従視点では機体とほぼ同じ速さになるので、
-  // そのぶんドップラーは打ち消される——これは実際そのとおり（同乗していれば
-  // 音の高さは変わらない）。
-  if (s.camPrev && dt > 1e-4) {
-    s.camVel.subVectors(cam, s.camPrev).multiplyScalar(1 / dt);
-  } else {
-    s.camVel.set(0, 0, 0);
-  }
-  if (!s.camPrev) s.camPrev = new THREE.Vector3();
-  s.camPrev.copy(cam);
-
   const now = s.ctx.currentTime;
   const model = f.aircraft.model;
   const q = f.aircraft.group.quaternion;
@@ -458,18 +472,29 @@ function updateSound(dt) {
 
     const dist = _sndPos.copy(v.world).sub(cam).length();
 
-    // ドップラー。音源とカメラの**近づく速さ**（視線方向の相対速度）で決まる。
-    _sndToCam.copy(cam).sub(v.world);
-    const len = _sndToCam.length();
-    if (len > 1e-3) {
-      _sndToCam.multiplyScalar(1 / len);
-      _sndRel.copy(f.state.velocity).sub(s.camVel);
-      // 音源がカメラへ近づく速さ（正なら近づく＝高く聞こえる）
-      const closing = _sndRel.dot(_sndToCam);
-      v.setDoppler(SOUND_SPEED_MPS / Math.max(SOUND_SPEED_MPS - closing, 40));
+    // **ドップラーは「音源と耳の距離が縮まる速さ」で決まる。** 定義どおりに、
+    // 距離そのものの変化率から出す（SOUND_DOPPLER_SLEW のすぐ上の説明を参照）。
+    if (v.prevDist === undefined || dt <= 1e-4) {
+      v.closing = 0;
     } else {
-      v.setDoppler(1);
+      const raw = (v.prevDist - dist) / dt;          // 正なら近づいている
+      // **ワープは速度ではない。** Rで滑走路へ戻す・視点を切り替える・出し直す、
+      // といったときは距離が一瞬で何kmも飛ぶ。そのまま速さとして読むと、
+      // 音速を超えた偽のドップラーが「ヒュウン」と鳴る。どんな機体でも出せない
+      // 速さが出たら、それは飛んだのではなく置き直されたのだと見て、0に戻す。
+      if (Math.abs(raw) > SOUND_TELEPORT_MPS) v.closing = 0;
+      else {
+        // コマ間の差分はどうしても荒れるので、時定数で均す
+        const k = 1 - Math.exp(-dt / SOUND_DOPPLER_TAU);
+        v.closing = (v.closing || 0) + (raw - (v.closing || 0)) * k;
+      }
     }
+    v.prevDist = dist;
+    const want = SOUND_SPEED_MPS / Math.max(SOUND_SPEED_MPS - v.closing, 40);
+    // 変わる速さにも上限を置く。真横を通り過ぎる瞬間は近づく速さが一瞬で
+    // 裏返るので、比だけ見ると階段状に飛ぶ（耳はその段差を「プツッ」と聞く）。
+    const step = SOUND_DOPPLER_SLEW * Math.max(dt, 1e-3);
+    v.setDoppler(THREE.MathUtils.clamp(want, v.doppler - step, v.doppler + step));
 
     v.setPower(lever, ab, now);
     v.setDistance(dist, now);
