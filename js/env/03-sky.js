@@ -130,7 +130,9 @@ function updateSkyColorsForAltitude(dayFactor) {
   const fogColor = nightFog.lerp(dayFog, dayFactor);
 
   // 雨や曇りでは青みが抜けて灰色になる。稲光では一瞬明るくなる。
-  if (typeof weatherApplyFogTint === 'function') weatherApplyFogTint(fogColor);
+  // 昼夜を渡す。曇りの灰色は「昼の色」なので、夜にそのまま混ぜると
+  // 地平線が昼の曇り空と同じ明るさになる（weatherApplyFogTint の説明）。
+  if (typeof weatherApplyFogTint === 'function') weatherApplyFogTint(fogColor, dayFactor);
 
   // 霧の濃さは天候の視程から決まる（快晴200km〜濃霧0.7km）。
   // 高いところほど霞が薄いのは変わらないので、その掛け算は残す。

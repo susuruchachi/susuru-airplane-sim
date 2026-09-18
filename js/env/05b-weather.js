@@ -513,6 +513,9 @@ function applyWeatherToScene(dt) {
   updatePrecipitation(dt, w, 1 - EnvState.weather.aboveDeck);
 }
 
+// 夜、雲が月と星をふさぐぶんの減光（べた曇りでどれだけ落とすか）
+const WEATHER_NIGHT_AMBIENT_CUT = 0.55;
+
 // 天候ぶんの光と霧を、昼夜の計算のあとに掛ける（03-sky.js から呼ばれる）
 function applyWeatherToLighting(dayFactor) {
   const w = EnvState.weather.current;
@@ -520,7 +523,12 @@ function applyWeatherToLighting(dayFactor) {
 
   EnvState.sunLight.intensity *= w.sunFactor;
   EnvState.moonLight.intensity *= w.sunFactor;
-  EnvState.hemiLight.intensity *= w.ambientFactor;
+  // **散乱光の底上げは昼だけ。** 曇ると日射が減り、そのぶん空全体からの散乱光で
+  // 底上げされる——というのは日射があってこその話で、夜には起きない。
+  // 夜はむしろ逆で、雲が月と星をふさぐぶん暗くなる。
+  const lift = 1 + (w.ambientFactor - 1) * dayFactor;
+  const block = 1 - (1 - dayFactor) * w.overcast * WEATHER_NIGHT_AMBIENT_CUT;
+  EnvState.hemiLight.intensity *= lift * block;
 
   // 稲光。空全体が一瞬明るくなる
   if (flash > 0.01) {
@@ -550,10 +558,27 @@ function weatherFogDensity() {
 }
 
 // 霧の色。雨や曇りでは青みが抜けて灰色になる。
-function weatherApplyFogTint(color) {
+//
+// **曇りの灰色は「昼の色」なので、夜にそのまま混ぜてはいけない。**
+// 混ぜていたので、夜の地平線が昼の曇り空と同じ明るい灰色になっていた——実測
+// （深夜1時・対地1,500mから水平線を正面に見て、画面上半分の平均の明るさ）で、
+// 快晴23.8に対して雨67.9・雪76.1・霧105.7。霧色そのものも #08101d → #818991 と、
+// 真っ黒に近い夜の色から昼間の灰色まで振れていた。
+// 雲は自分では光らないので、**曇った夜は晴れた夜より暗い**（月も星も隠れる）。
+// 昼の灰色と夜の灰色を用意して、昼夜でその間を取る。
+const WEATHER_GRAY_DAY = 0x9aa3ab;         // 昼の曇り空（雲の底が日に照らされた色）
+const WEATHER_GRAY_DAY_STORM = 0x50575e;   // 昼の雷雲（分厚くて暗い）
+const WEATHER_GRAY_NIGHT = 0x0c1017;       // 夜の曇り空。晴れた夜(0x0a1220)より少し暗く、青みが無い
+const WEATHER_GRAY_NIGHT_STORM = 0x05070a; // 夜の雷雲。ほとんど真っ暗
+function weatherApplyFogTint(color, dayFactor) {
   const w = EnvState.weather.current;
-  const gray = new THREE.Color(0x9aa3ab).lerp(new THREE.Color(0x50575e), w.storminess * 0.7);
+  const day = dayFactor === undefined ? 1 : THREE.MathUtils.clamp(dayFactor, 0, 1);
+  const gray = new THREE.Color(WEATHER_GRAY_NIGHT)
+    .lerp(new THREE.Color(WEATHER_GRAY_NIGHT_STORM), w.storminess * 0.7)
+    .lerp(new THREE.Color(WEATHER_GRAY_DAY)
+      .lerp(new THREE.Color(WEATHER_GRAY_DAY_STORM), w.storminess * 0.7), day);
   color.lerp(gray, Math.min(w.overcast * 0.85 + w.fogginess * 0.9, 1));
+  // 稲光は夜でも空を明るくする（それが稲光なので、ここは昼夜で変えない）
   if (EnvState.weather.flash > 0.01) {
     color.lerp(new THREE.Color(0xdfe8f2), EnvState.weather.flash * 0.5);
   }
