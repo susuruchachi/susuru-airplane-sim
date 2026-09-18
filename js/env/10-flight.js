@@ -33,6 +33,23 @@ const GEAR_BRAKE_FRICTION = 0.55;  // ブレーキ全踏み
 const GEAR_SIDE_FRICTION = 0.85;   // 横滑りに耐えるタイヤの摩擦
 const GEAR_STEER_MAX_DEG = 32;
 
+// 世界でいちばん高い地面（実測。03b-world.js の worldHeightAt を山脈の中心付近で
+// 探ったところ、いちばん高い山脈「アストラ大山脈」(height:4400) の中心付近で
+// 4382.9mが最大だった）。当たり判定の足切り（accumulateHullForces）で、
+// 「絶対にどこにも地面が届かない高さ」として使う。
+const WORLD_MAX_TERRAIN_M = 4600;
+
+// モデル形状の当たり判定点（js/env/09d-aircraft-hull.js）が地面/山に触れたときの
+// ばね・摩擦。脚と違って「そこに乗る」設計ではないので、柔らかい／硬いの
+// 使い分けはせず、数値的に安定な範囲でいちばん硬いばね1本で受け止める
+// （gearSpringRates の kMax と同じ式を使う）。摩擦は、転がらず擦れる・めり込む
+// 接触として、タイヤのブレーキ全踏み（0.55）よりはっきり高い値にしてある。
+const HULL_CRASH_FRICTION = 0.7;
+// めり込みの深さがこれを超えても、力はここで頭打ちにする（accumulateHullForces
+// 内のコメントを参照）。姿勢が一瞬で変わる・急に判定に入るような場面では
+// めり込みが一気に深くなりうるので、脚と違って頭打ちが要る。
+const HULL_PEN_CAP_M = 1.0;
+
 // 逆噴射は止まりかけでは切る。実機の逆推力装置も止まる前に格納する決まりで、
 // 入れっぱなしにすると機体が後ろへ走り出す（手で引きっぱなしにしても同じ）。
 const REVERSE_FADE_MPS = 2;
@@ -90,6 +107,7 @@ function createFlightState() {
 
     onGround: false,
     contactCount: 0,
+    hullContactCount: 0,   // 脚以外（翼・胴体・尾部）が地面/山に触れた点の数
     crashed: false,
 
     // 読み出し用（HUDと検証が使う）
@@ -729,6 +747,80 @@ function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
   state.onGround = state.contactCount > 0;
 }
 
+// モデル形状の当たり判定点（脚以外）が地面・山に触れていないか見る。
+// hull は 09d-aircraft-hull.js の buildAircraftHull が作る { points, radius }。
+// 呼び出し元が持っていない場合（検証スクリプトの素の物理モデルなど）は
+// 何もしない——脚だけの判定に戻るだけで、今までどおり動く。
+function accumulateHullForces(hull, model, state, groundHeightAt, out) {
+  state.hullContactCount = 0;
+  if (!hull || !hull.points || !hull.points.length) return;
+
+  const q = state.quaternion;
+  const qInv = _fv.qInv.copy(q).invert();
+
+  // 広い当たり判定（機体の外接球）で、明らかに山の届く高さより上にいれば
+  // 26点ぜんぶを調べるまでもない。巡航中はほぼ毎フレームここで抜ける。
+  //
+  // **地表からの高さでは判定できない。** 機体の直下だけが低くても、機首の先や
+  // 翼端は別の(x,z)にあり、そこに崖や山があるかもしれない——26点は互いに
+  // 離れた場所を指しているので、「重心の真下の地面」だけを見て済ませると、
+  // 崖にかすめて突っ込む場面を見逃す。安全に飛ばせるのは、**世界のどこにも
+  // これより高い地面が無い**という絶対高度（海抜）でしか判定できない
+  // （WORLD_MAX_TERRAIN_M の説明を参照）。
+  if (state.position.y - hull.radius > WORLD_MAX_TERRAIN_M) return;
+
+  // 1点あたりの受け止め方は脚と同じ式（数値的に安定な範囲でいちばん硬いばね）。
+  // 脚のような「浅いところは柔らかく」の使い分けはしない——ここに触れること自体が
+  // 異常なので、最初から硬く受け止めて速度を奪う。
+  //
+  // **質量を点の数で割る（gearSpringRates と同じ）。** 割らずに1点あたり
+  // 「機体まるごとの質量ぶん」の硬さを持たせると、複数の点が同時にめり込んだとき
+  // （機体を横倒しにして落とすなど）力がそのまま点数倍になり、1フレームで
+  // 機体が数百m/sで弾き飛ぶ（実測：質量で割らずに横倒しで落としたら、
+  // 0.5秒後に高度727mまで跳ね上がった）。
+  const perPointMass = model.massKg / hull.points.length;
+  const kMax = Math.pow(GEAR_STABLE_WDT / FLIGHT_SUBSTEP, 2) * perPointMass;
+  const rate = { soft: kMax, hard: 0, kMax };
+
+  for (const local of hull.points) {
+    const world = _gv.world.copy(local).applyQuaternion(q).add(state.position);
+    const g = groundHeightAt(world.x, world.z);
+    const pen = g - world.y;
+    if (pen <= 0) continue;
+    state.hullContactCount++;
+    // 力の計算だけ、めり込みの深さを頭打ちにする（当たったこと自体はここより上で
+    // もう数えている）。脚は構造上センチ単位しかめり込まないので kMax·pen が
+    // 際限なく伸びても問題にならないが、この点は機体まるごと・どの姿勢でも
+    // 呼ばれるので、姿勢が一瞬で変わる・急に接地判定に入るような場面では
+    // pen が一気に大きくなりうる。頭打ちせずに1フレームで机上サイズの
+    // めり込みぶんの力を丸ごと掛けると、その場で押し返す力が桁外れになり、
+    // 機体が地面から弾き飛ばされる（実測：頭打ち無しで横倒しのまま落としたら、
+    // 0.5秒後に高度727mまで跳ね上がった）。
+    const penClamped = Math.min(pen, HULL_PEN_CAP_M);
+
+    const r = _gv.r.copy(local);
+    const vel = _gv.vel.crossVectors(state.angularVelocity, r).applyQuaternion(q).add(state.velocity);
+    const vNormal = vel.y;
+    const sp = gearNormalSpring(rate, penClamped);
+    const cDamp = 2 * Math.sqrt(sp.k * perPointMass) * 0.9;
+    let normal = sp.force - cDamp * vNormal;
+    if (normal < 0) normal = 0;
+
+    // 擦れる・めり込む接触として、地面沿いの速度をまるごと摩擦で削る
+    // （脚のような転がりは無い。向きは問わず、その場の速度に逆らう）。
+    const tang = _gv.tmp.copy(vel);
+    tang.y = 0;
+    const fTang = tang.lengthSq() > 1e-9
+      ? tang.normalize().multiplyScalar(-Math.min(HULL_CRASH_FRICTION * normal, tang.length() * model.massKg * 4))
+      : new THREE.Vector3();
+
+    const f = _gv.f.set(0, normal, 0).add(fTang);
+    const fBody = f.applyQuaternion(qInv);
+    out.force.add(fBody);
+    out.torque.add(_gv.tmp.crossVectors(r, fBody));
+  }
+}
+
 // --- 積分 -------------------------------------------------------------------
 
 const _iv = {
@@ -737,7 +829,7 @@ const _iv = {
   fWorld: new THREE.Vector3(),
 };
 
-function flightStep(model, state, controls, windWorld, groundHeightAt, dt) {
+function flightStep(model, state, controls, windWorld, groundHeightAt, dt, hull) {
   const acc = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
 
   // レバーの指示を、エンジンの応答の速さぶん遅らせて実出力にする
@@ -745,6 +837,7 @@ function flightStep(model, state, controls, windWorld, groundHeightAt, dt) {
   accumulateAeroForces(model, state, controls, windWorld, acc);
   accumulateVtolControl(model, state, controls, acc);
   accumulateGroundForces(model, state, controls, groundHeightAt, acc);
+  accumulateHullForces(hull, model, state, groundHeightAt, acc);
 
   // 力（機体）→ワールドに直し、重力を足して加速度にする
   const fWorld = _iv.fWorld.copy(acc.force).applyQuaternion(state.quaternion);
@@ -794,12 +887,15 @@ function refreshFlightReadouts(model, state, groundHeightAt) {
 }
 
 // 1フレームぶん進める。刻みを固定して回すので、フレームレートが変わっても挙動が変わらない。
-function advanceFlight(model, state, controls, windWorld, groundHeightAt, dtFrame) {
+// hull は省略できる（09d-aircraft-hull.js が作る形状ベースの当たり判定点。
+// 検証スクリプトのように素の飛行モデルしか無いところでは渡さなくてよく、
+// そのときは脚だけの判定にこれまでどおり戻る）。
+function advanceFlight(model, state, controls, windWorld, groundHeightAt, dtFrame, hull) {
   let remain = Math.min(dtFrame, FLIGHT_SUBSTEP * FLIGHT_MAX_SUBSTEPS);
   let steps = 0;
   while (remain > 1e-6 && steps < FLIGHT_MAX_SUBSTEPS) {
     const dt = Math.min(FLIGHT_SUBSTEP, remain);
-    flightStep(model, state, controls, windWorld, groundHeightAt, dt);
+    flightStep(model, state, controls, windWorld, groundHeightAt, dt, hull);
     refreshFlightReadouts(model, state, groundHeightAt);
     remain -= dt;
     steps++;

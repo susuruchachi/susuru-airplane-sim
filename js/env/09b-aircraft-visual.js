@@ -251,6 +251,10 @@ async function createAircraft(config, cgOverride) {
   // GLBに舵のボーンが入っていれば拾う。**ここで行列が機体座標**（重心が原点・
   // 機首が-Z）になっているので、この姿勢のまま測ればモーメントの向きがそのまま出る。
   const bones = typeof buildAircraftBones === 'function' ? buildAircraftBones(group, visual, config.modelBoneAxisOverrides) : [];
+  // モデル形状からの当たり判定点（山・地面への激突、翼端・尾部の接触などを見る）。
+  // 脚（model.contacts）とは別物——そちらはばねで支える前提の接地、こちらは
+  // 「触れたらおかしい」場所への衝突を見る（js/env/09d-aircraft-hull.js）。
+  const hull = typeof buildAircraftHull === 'function' ? buildAircraftHull(group, visual, model) : null;
   for (const l of lights) {
     if (l.kind === 'landing') resolveLightAim(l, group);
   }
@@ -277,7 +281,7 @@ async function createAircraft(config, cgOverride) {
 
   return {
     model, group, orient, modelRoot, modelXform, visual, lights, landingPool,
-    plumes, boom, contrail, smoke, tyreSmoke, fx: contrail.group, bones,
+    plumes, boom, contrail, smoke, tyreSmoke, fx: contrail.group, bones, hull,
     source,
     name: config.name || (source === 'builder' ? '機体' : '内蔵の練習機'),
     propeller: visual.userData ? visual.userData.propeller : null,

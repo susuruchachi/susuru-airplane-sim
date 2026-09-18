@@ -40,7 +40,7 @@ for (const f of ['09-aircraft.js', '10-flight.js', '13-autopilot.js']) {
 const {
   buildAircraftModel, defaultAircraftConfig, analyzeAircraftPerformance,
   createFlightState, createFlightControls, advanceFlight, placeAircraftOnGround,
-  settleAircraftOnGround,
+  settleAircraftOnGround, accumulateHullForces,
   airDensityAt, solveLevelTrim, vtolClimbSpeedLimit, accumulateAeroForces, refreshFlightReadouts,
   createAutopilotState, stepAutopilot, apSpeedSchedule, apMakeApproachPlan,
   apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo, apBankMaxFor,
@@ -3705,6 +3705,74 @@ function autopilotFlight(opts) {
     `${st.machCrossCount}`);
 }
 
+// --- モデル形状からの当たり判定（脚以外の接触） -------------------------------
+//
+// 09d-aircraft-hull.js はブラウザ側（THREE.jsのメッシュ）でしか作れないので、
+// ここでは形だけ同じ { points, radius }（points は機体座標のTHREE.Vector3の配列）を
+// 手で作って、10-flight.js 側の物理（accumulateHullForces）だけを確かめる。
+// 実際のGLBからの抽出・脚の除外はPlaywrightで確認済み（README参照）。
+{
+  const out = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
+
+  // 1) 素の外接球チェックだけの動作：明らかに高いところでは何も起きない
+  {
+    const st = createFlightState();
+    st.position.set(0, 200, 0);
+    const hull = { points: [new THREE.Vector3(0, 0, 0)], radius: 5 };
+    out.force.set(0, 0, 0); out.torque.set(0, 0, 0);
+    accumulateHullForces(hull, model, st, flatGround, out);
+    check(st.hullContactCount === 0 && out.force.length() === 0,
+      '地面から離れていれば当たり判定点は何もしない');
+  }
+
+  // 2) 点が地面にめり込んでいれば、押し返す力が立ち上がる
+  {
+    const st = createFlightState();
+    st.position.set(0, 1, 0);   // 重心は地上1m
+    const hull = { points: [new THREE.Vector3(0, -2, 0)], radius: 5 }; // 点は重心の2m下＝地面下1m
+    out.force.set(0, 0, 0); out.torque.set(0, 0, 0);
+    accumulateHullForces(hull, model, st, flatGround, out);
+    check(st.hullContactCount === 1 && out.force.y > 0,
+      'めり込んだ点は押し返す力を出す', `力y=${out.force.y.toFixed(0)}N`);
+  }
+
+  // 3) 「重心の真下」だけでは分からない当たり判定でも拾える（崖・山への激突）。
+  //    重心の真下は平地（高さ0）で重心も宙に浮いているが、機首の先（重心より
+  //    15m前＝ローカルz=-15）の位置には崖（z<-40で高さ800m）がある。
+  {
+    const cliffAt = (x, z) => (z < -40 ? 800 : 0);
+    const st = createFlightState();
+    st.position.set(0, 50, -30);   // 重心の真下（0,-30）は高さ0の平地
+    st.quaternion.identity();       // 機首はローカル-Z＝ワールド-Zのまま
+    const hull = { points: [new THREE.Vector3(0, 0, -15)], radius: 20 }; // 機首の先の点
+    out.force.set(0, 0, 0); out.torque.set(0, 0, 0);
+    accumulateHullForces(hull, model, st, cliffAt, out);
+    check(st.hullContactCount > 0,
+      '重心の真下が平地でも、機首の先が崖に届いていれば当たり判定に出る',
+      `hullContactCount=${st.hullContactCount}`);
+  }
+
+  // 4) 巡航高度（世界のどんな山より高い）では、遠くの点があっても早期に抜ける
+  {
+    const st = createFlightState();
+    st.position.set(0, 12000, 0);
+    const hull = { points: [new THREE.Vector3(0, -30, 0)], radius: 50 };
+    out.force.set(0, 0, 0); out.torque.set(0, 0, 0);
+    accumulateHullForces(hull, model, st, flatGround, out);
+    check(st.hullContactCount === 0, '巡航高度では当たり判定を出さない');
+  }
+
+  // 5) hull を渡さない呼び出し（検証スクリプトの他のテスト・脚だけの機体）は
+  //    今までどおり動く
+  {
+    const st = createFlightState();
+    const c = createFlightControls();
+    placeAircraftOnGround(model, st, 0, 0, 0, flatGround);
+    advanceFlight(model, st, c, noWind, flatGround, 1 / 60);
+    check(st.hullContactCount === 0, 'hullを渡さなければ何も起きない（今までどおり）');
+  }
+}
+
 // --- 計算の速さ ---------------------------------------------------------------
 {
   const st = createFlightState();
@@ -3717,6 +3785,30 @@ function autopilotFlight(opts) {
   const ms = Date.now() - t0;
   note('計算コスト', `1フレーム ${(ms / N).toFixed(3)}ms（60fpsぶん${N}回で${ms}ms）`);
   check(ms / N < 1.0, '1フレームの物理が十分速い', (ms / N).toFixed(3) + 'ms');
+
+  // 当たり判定点（26点）を持たせたときの追加コスト。巡航高度なので広い判定で
+  // ほとんど抜けるはずだが、それでも毎フレーム呼ぶコストは測っておく。
+  const hull = {
+    points: Array.from({ length: 26 }, (_, i) => new THREE.Vector3(
+      Math.sin(i) * 10, Math.cos(i * 1.3) * 3, Math.sin(i * 0.7) * 15)),
+    radius: 20,
+  };
+  const st2 = createFlightState();
+  st2.position.set(0, 1000, 0); st2.velocity.set(0, 0, -60);
+  const t1 = Date.now();
+  for (let i = 0; i < N; i++) advanceFlight(model, st2, c, noWind, flatGround, 1 / 60, hull);
+  const ms2 = Date.now() - t1;
+  note('計算コスト（当たり判定点つき・巡航高度）', `1フレーム ${(ms2 / N).toFixed(3)}ms（差 ${((ms2 - ms) / N).toFixed(4)}ms）`);
+  check(ms2 / N < 1.0, '当たり判定点があっても十分速い（巡航高度）', (ms2 / N).toFixed(3) + 'ms');
+
+  // 低空（毎フレーム26点ぜんぶ調べる）でのコストも測る
+  const st3 = createFlightState();
+  st3.position.set(0, 40, 0); st3.velocity.set(0, 0, -60);
+  const t2 = Date.now();
+  for (let i = 0; i < N; i++) advanceFlight(model, st3, c, noWind, flatGround, 1 / 60, hull);
+  const ms3 = Date.now() - t2;
+  note('計算コスト（当たり判定点つき・低空）', `1フレーム ${(ms3 / N).toFixed(3)}ms（差 ${((ms3 - ms) / N).toFixed(4)}ms）`);
+  check(ms3 / N < 2.0, '当たり判定点があっても十分速い（低空・毎フレーム全点判定）', (ms3 / N).toFixed(3) + 'ms');
 }
 
 console.log(`\n${failures === 0 ? '✅ すべて通過' : `❌ ${failures} 件の失敗`}`);

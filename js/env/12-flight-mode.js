@@ -153,6 +153,10 @@ function applyCgOffset() {
   // 機体を回してある機体だけ見た目が重心からずれる。
   const cgm = ac.model.cgModel;
   ac.modelRoot.position.set(-cgm.x, -cgm.y, -cgm.z);
+  // 当たり判定点（09d-aircraft-hull.js）もCGぶんだけ平行移動する。スライダーの
+  // dragごとに呼ばれるので、メッシュを読み直さず点をそのまま動かすだけで済ませる
+  // （関数の説明を参照）。
+  if (typeof shiftAircraftHull === 'function') shiftAircraftHull(ac.hull, cgm);
 
   // 重心を上下に動かすと車輪までの距離も変わるので、接地しているなら置き直す
   if (f.active && f.state.onGround) {
@@ -281,7 +285,7 @@ function updateFlight(dt) {
   const wind = flightWindVector(_flightWind);
 
   const sinkBefore = f.state.velocity.y;
-  advanceFlight(f.aircraft.model, f.state, f.controls, wind, flightGroundHeightAt, dt);
+  advanceFlight(f.aircraft.model, f.state, f.controls, wind, flightGroundHeightAt, dt, f.aircraft.hull);
 
   // 墜落判定。接地の瞬間の沈下と、機体にかかる上下方向のG（loadFactor）で見る。
   //
@@ -291,9 +295,17 @@ function updateFlight(dt) {
   // 機体にかかる荷重はふつうの1G程度のまま。loadFactor は機体の**上下方向**（重力を
   // 除いた分）だけを見るので、推力の向き（ほぼ真後ろ）はほとんど出てこず、
   // 接地の衝撃（車輪のばねが縮む向き＝上下方向）はちゃんと拾える。
-  if (!f.state.crashed && f.state.onGround) {
-    if (Math.abs(f.state.loadFactor) > FLIGHT_CRASH_G
-        || (sinkBefore < -FLIGHT_CRASH_SINK_MPS && f.state.contactCount > 0)) {
+  //
+  // **脚以外（翼・胴体・尾部・山腹）が触れたときは、Gや沈下率を問わず即座に墜落。**
+  // 脚は触れる前提の場所だからGで見極めが要るが、そこ以外は触れること自体が
+  // 異常なので判定は要らない（山にまっすぐ突っ込んだときは onGround にもならない）。
+  if (!f.state.crashed) {
+    if (f.state.hullContactCount > 0) {
+      f.state.crashed = true;
+      announceFlight('墜落しました — R で滑走路へ戻る');
+    } else if (f.state.onGround
+      && (Math.abs(f.state.loadFactor) > FLIGHT_CRASH_G
+        || (sinkBefore < -FLIGHT_CRASH_SINK_MPS && f.state.contactCount > 0))) {
       f.state.crashed = true;
       announceFlight('墜落しました — R で滑走路へ戻る');
     }
