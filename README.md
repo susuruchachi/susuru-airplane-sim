@@ -26,6 +26,7 @@ Three.js (r128, jsDelivr CDN) + vanilla JS。ビルドツールなし、ロー�
 | `js/02-storage.js` | IndexedDB保存/復元、設定ファイル(.json)のエクスポート/インポート |
 | `js/03-scene-setup.js` | Three.jsシーン初期化、カメラ（透視/平行投影切替）、レンダーループ |
 | `js/04-model-loader.js` | GLB/GLTF読込、原点調整（軸指定で中心合わせ） |
+| `js/env/09c-aircraft-bones.js` | （`flight.html`と共用）GLBのボーンで舵面を動かす。Builder側では候補の骨一覧と回転軸の手動指定に使う |
 | `js/05-part-system.js` | パーツの追加/削除/選択/ミラー、着陸脚の階層構築と展開プレビュー |
 | `js/05b-cg-system.js` | 重心（CG）ギズモ、主翼の空力中心からの自動算出 |
 | `js/05c-wing-corners.js` | 翼の4頂点編集、翼上の位置計算、可動翼面の自動配置 |
@@ -58,7 +59,7 @@ Three.js (r128, jsDelivr CDN) + vanilla JS。ビルドツールなし、ロー�
 | `js/env/08-env-storage.js` | 設定の保存/読込（localStorage・.json） |
 | `js/env/09-aircraft.js` | **機体の飛行モデル**（Builderの部品定義→翼面積・推力・接地点・慣性）。THREE.js非依存 |
 | `js/env/09b-aircraft-visual.js` | 機体の見た目（BuilderのGLBをIndexedDBから／内蔵機）。Builderと同じ親子関係で組む |
-| `js/env/09c-aircraft-bones.js` | GLBのボーンで舵面を動かす（形と動きから、どの舵がどの軸に効くかを測って決める） |
+| `js/env/09c-aircraft-bones.js` | GLBのボーンで舵面を動かす（形と動きから、どの舵がどの軸に効くかを測って決める。`index.html`とも共用） |
 | `js/env/10-flight.js` | **飛行の物理**（翼ごとの空力・剛体・接地）。THREE.js非依存 |
 | `js/env/11-flight-ui.js` | 操縦入力・カメラ・計器（HUD） |
 | `js/env/11b-flight-touch.js` | 画面の上の操縦装置（操縦桿・出力レバー・ボタン） |
@@ -2157,6 +2158,34 @@ Blenderなどで舵にボーンを仕込んだGLBを読み込むと、操縦に�
 - **まだやっていない**：着陸脚の出し入れと可変翼（後退角）のボーンは名前で外して
   いる。脚はヒンジが板の向きから決まらない（棒だから）し、可変翼は見た目だけ
   動かすと物理と食い違うため。
+
+#### 回転軸の手動指定（Builder側）
+
+自動判定（上記の試し回転）が合わないモデルのために、Builderの「機体設定」パネルに
+検出した舵の一覧と、ボーンごとのローカルX/Y/Z軸を選ぶ欄を足した。
+
+- **Builder側 (`index.html`) でも `09c-aircraft-bones.js` を読み込む**ようにし、
+  一覧表示だけに使う軽い関数 (`listBoneAxisCandidates`) を追加した。試し回転で
+  ヒンジ軸・そろい具合・面に垂直な割合を測るところは組み立て本番
+  (`buildAircraftBones`) と完全に同じ処理を共有している（`pickBoneHingeAxis` /
+  `bonePlateInfo` に切り出した）ので、一覧に出る「自動判定：◯軸」は実際に飛行側で
+  使われる軸と必ず一致する。Builder側は世界が小さい（編集シーンそのもの）ので、
+  飛行側だけに要る `localizeSkeletons`（float32精度対策）は呼ばない。
+- 指定は**ボーン名をキーにした軸の上書き** (`State.model.boneAxisOverrides`、
+  保存データでは `modelBoneAxisOverrides`) で、IndexedDB保存・ポータブル設定
+  (.json) の両方に載せて復元できるようにした。軸を指定したボーンは、試し回転で
+  3軸を比べる代わりに**指定した軸だけを測り、ヒンジらしさの下限
+  (`BONE_SCORE_MIN`) も無視してそのまま使う**——「自動では検出できない/違う軸に
+  誤判定される」モデルでも、指定した軸で無理やり動かせる。
+- 実測（サンダーバード1号、13候補中の「エルロン」で確認）：自動判定はX軸
+  （ロールの符号は-1.00）。Y軸へ強制すると `axis=(0,1,0)` に置き換わり、
+  ロールの符号も向きに合わせて自動で+1.00に反転した——モーメント計算は
+  上書き後の`dir`から毎回計算し直すので、軸だけでなく効きの符号・強さも
+  ちゃんと再計算される。存在しないボーン名を指定しても無視されるだけで、
+  他の12枚の検出結果には影響しない。
+- UIの選択は他の設定欄と同じく`State`に直接書き込むだけで、機体を選び直したり
+  ページを再読込したりしても、保存済みの設定を開けば選択したプルダウンの値が
+  そのまま戻る（IndexedDB経由の保存→読込で確認済み）。
 
 ### 音（`js/env/14-sound.js`）
 

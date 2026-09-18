@@ -155,6 +155,93 @@ function boneSkinnedPoint(item, target) {
   return target.applyMatrix4(item.mesh.matrixWorld);
 }
 
+// そのボーンが「舵の板」として相手にできる形かどうかを判定する（頂点数・親子関係・
+// 名前での除外・板らしさ）。一覧表示（Builder）と本番の組み立て（buildAircraftBones）の
+// 両方から使う共通の絞り込み
+function bonePlateInfo(bone, items) {
+  if (items.length < BONE_MIN_VERTS) return null;
+  // 子ボーンを持つ骨は、舵ではなく「枝の付け根」（翼の付け根・脚の親など）
+  if (bone.children.some((o) => o.isBone)) return null;
+  if (boneRoleFromName(bone.name) === 'skip') return null;
+
+  const base = items.map((it) => boneSkinnedPoint(it, new THREE.Vector3()));
+  const center = new THREE.Vector3();
+  for (const q of base) center.add(q);
+  center.multiplyScalar(1 / base.length);
+  const [a1, , a3] = bonePrincipalAxes(base, center);
+  const long = boneSpread(base, center, a1);
+  const thick = boneSpread(base, center, a3);
+  if (long <= 1e-4) return null;
+  if (thick / long > BONE_PLATE_RATIO) return null;   // 板ではない
+  return { base, center, a3, long };
+}
+
+// ボーンを1本ずつ試しに回して、いちばんヒンジらしい軸を選ぶ。
+// forcedAxisIdx（0=X/1=Y/2=Z）を渡すと、その軸しか試さず、ヒンジらしさの
+// 下限（BONE_SCORE_MIN）も無視する——ユーザーが手動で軸を指定した場合に使う
+const BONE_TEST_AXES = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
+function pickBoneHingeAxis(bone, items, base, a3, forcedAxisIdx) {
+  const rest = bone.quaternion.clone();
+  let best = null;
+  for (let ai = 0; ai < 3; ai++) {
+    if (forcedAxisIdx !== undefined && forcedAxisIdx !== null && forcedAxisIdx >= 0 && ai !== forcedAxisIdx) continue;
+    bone.quaternion.copy(rest).multiply(
+      _boneQ.setFromAxisAngle(BONE_TEST_AXES[ai], THREE.MathUtils.degToRad(BONE_TEST_DEG)));
+    bone.updateMatrixWorld(true);
+    const mean = new THREE.Vector3();
+    let total = 0, perp = 0;
+    for (let i = 0; i < items.length; i++) {
+      const d = boneSkinnedPoint(items[i], _boneV2).sub(base[i]);
+      const L = d.length();
+      total += L;
+      perp += Math.abs(d.dot(a3));
+      mean.add(d);
+    }
+    mean.multiplyScalar(1 / items.length);
+    const avg = total / items.length;
+    // そろい具合：板ぜんぶが同じ向きへ動いているか（ねじれだと0に近い）
+    const coherence = mean.length() / Math.max(avg, 1e-9);
+    // 面に垂直な割合：板が自分の面から出る向きに振れているか（面内の滑りは0）
+    const perpRatio = perp / Math.max(total, 1e-9);
+    const score = coherence * perpRatio;
+    const forced = forcedAxisIdx !== undefined && forcedAxisIdx !== null && forcedAxisIdx >= 0;
+    // 同じくらいヒンジらしい軸が2本あることがある（骨の向き次第）。
+    // そのときは**大きく振れるほう**が本物のヒンジ。軸を指定されている場合は
+    // ヒンジらしさを問わず、その軸をそのまま使う
+    if ((score >= BONE_SCORE_MIN || forced) && (!best || avg > best.avg)) {
+      best = { axis: BONE_TEST_AXES[ai].clone(), axisIdx: ai, dir: mean.clone(), avg, score };
+    }
+    bone.quaternion.copy(rest);
+  }
+  bone.updateMatrixWorld(true);
+  return best;
+}
+
+// Builderの設定画面に出す、候補になる骨の一覧（名前・役割・自動判定した軸）。
+// root はBuilderで読み込んだモデルそのもの（世界座標が小さいBuilderのシーン内なので、
+// localizeSkeletonsは不要——それはワールドが広大な飛行側だけの精度対策）
+const BONE_AXIS_NAMES = ['x', 'y', 'z'];
+function listBoneAxisCandidates(root) {
+  if (!root || typeof THREE === 'undefined') return [];
+  const { skinned, clouds } = collectBoneClouds(root);
+  if (!skinned.length) return [];
+  root.updateMatrixWorld(true);
+  const out = [];
+  for (const e of clouds.values()) {
+    const bone = e.bone, items = e.items;
+    const plate = bonePlateInfo(bone, items);
+    if (!plate) continue;
+    const named = boneRoleFromName(bone.name);
+    const best = pickBoneHingeAxis(bone, items, plate.base, plate.a3, -1);
+    out.push({
+      name: bone.name,
+      role: named || 'attitude',
+      autoAxis: best ? BONE_AXIS_NAMES[best.axisIdx] : null,
+    });
+  }
+  return out;
+}
+
 // --- スキニングの精度を守る（これをやらないと輪郭が歪む）---------------------
 //
 // **スキンの計算はワールド座標のまま float32 で行われる。** three.js は
@@ -233,7 +320,9 @@ function localizeSkeletons(visual) {
 // ボーンを1本ずつ試しに回して、ヒンジ軸と振れる向きを決める。
 // root は機体の入れ物（この時点でワールド＝機体座標：重心が原点・機首が-Z）、
 // visual は読み込んだGLBそのもの（localizeSkeletons の基準にする）。
-function buildAircraftBones(root, visual) {
+// overrides は Builder の設定画面で手動指定した軸（{ ボーン名: 'x'|'y'|'z' }）。
+// 指定があれば自動判定を飛ばしてその軸をそのまま使う
+function buildAircraftBones(root, visual, overrides) {
   if (!root || typeof THREE === 'undefined') return [];
   const { skinned, clouds } = collectBoneClouds(root);
   if (!skinned.length) return [];
@@ -242,56 +331,17 @@ function buildAircraftBones(root, visual) {
   const holder = localizeSkeletons(visual || root);
 
   const out = [];
-  const axes = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
   for (const e of clouds.values()) {
     const bone = e.bone, items = e.items;
-    if (items.length < BONE_MIN_VERTS) continue;
-    // 子ボーンを持つ骨は、舵ではなく「枝の付け根」（翼の付け根・脚の親など）
-    if (bone.children.some((o) => o.isBone)) continue;
+    const plate = bonePlateInfo(bone, items);
+    if (!plate) continue;
     const named = boneRoleFromName(bone.name);
-    if (named === 'skip') continue;
-
-    const base = items.map((it) => boneSkinnedPoint(it, new THREE.Vector3()));
-    const center = new THREE.Vector3();
-    for (const q of base) center.add(q);
-    center.multiplyScalar(1 / base.length);
-    const [a1, , a3] = bonePrincipalAxes(base, center);
-    const long = boneSpread(base, center, a1);
-    const thick = boneSpread(base, center, a3);
-    if (long <= 1e-4) continue;
-    if (thick / long > BONE_PLATE_RATIO) continue;   // 板ではない
-
-    // 3つのローカル軸で試し回転して、いちばんヒンジらしい軸を選ぶ
+    const { base, center, a3, long } = plate;
     const rest = bone.quaternion.clone();
-    let best = null;
-    for (let ai = 0; ai < 3; ai++) {
-      bone.quaternion.copy(rest).multiply(
-        _boneQ.setFromAxisAngle(axes[ai], THREE.MathUtils.degToRad(BONE_TEST_DEG)));
-      bone.updateMatrixWorld(true);
-      const mean = new THREE.Vector3();
-      let total = 0, perp = 0;
-      for (let i = 0; i < items.length; i++) {
-        const d = boneSkinnedPoint(items[i], _boneV2).sub(base[i]);
-        const L = d.length();
-        total += L;
-        perp += Math.abs(d.dot(a3));
-        mean.add(d);
-      }
-      mean.multiplyScalar(1 / items.length);
-      const avg = total / items.length;
-      // そろい具合：板ぜんぶが同じ向きへ動いているか（ねじれだと0に近い）
-      const coherence = mean.length() / Math.max(avg, 1e-9);
-      // 面に垂直な割合：板が自分の面から出る向きに振れているか（面内の滑りは0）
-      const perpRatio = perp / Math.max(total, 1e-9);
-      const score = coherence * perpRatio;
-      // 同じくらいヒンジらしい軸が2本あることがある（骨の向き次第）。
-      // そのときは**大きく振れるほう**が本物のヒンジ。
-      if (score >= BONE_SCORE_MIN && (!best || avg > best.avg)) {
-        best = { axis: axes[ai].clone(), dir: mean.clone(), avg, score };
-      }
-      bone.quaternion.copy(rest);
-    }
-    bone.updateMatrixWorld(true);
+
+    const forcedKey = overrides && overrides[bone.name];
+    const forcedAxisIdx = forcedKey === 'x' ? 0 : forcedKey === 'y' ? 1 : forcedKey === 'z' ? 2 : -1;
+    const best = pickBoneHingeAxis(bone, items, base, a3, forcedAxisIdx);
     if (!best || best.dir.lengthSq() < 1e-12) continue;
 
     const dir = best.dir.clone().normalize();   // +BONE_TEST_DEG で板が振れる向き

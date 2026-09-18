@@ -18,6 +18,7 @@ function renderModelSettingsPanel() {
     z: THREE.MathUtils.radToDeg(root.rotation.z),
   };
   const scl = root.scale;
+  const boneCandidates = typeof listBoneAxisCandidates === 'function' ? listBoneAxisCandidates(root) : [];
 
   container.innerHTML = `
     <div class="subgroup-title">原点の調整</div>
@@ -70,6 +71,8 @@ function renderModelSettingsPanel() {
     </div>
     <div class="hint" id="maxSpeedConverted"></div>
 
+    ${boneAxisSectionHtml(boneCandidates)}
+
     ${typeof engineFleetPanelHtml === 'function' ? engineFleetPanelHtml() : ''}
   `;
 
@@ -83,6 +86,15 @@ function renderModelSettingsPanel() {
     document.getElementById('modelSizeReadout').textContent =
       `寸法 X ${s.x.toFixed(1)} / Y ${s.y.toFixed(1)} / Z ${s.z.toFixed(1)}（推定: 左右は${guessedAxis.toUpperCase()}軸）`;
   }
+
+  container.querySelectorAll('.fBoneAxis').forEach((sel) => {
+    const name = sel.dataset.bone;
+    sel.value = State.model.boneAxisOverrides[name] || '';
+    sel.addEventListener('change', () => {
+      if (sel.value) State.model.boneAxisOverrides[name] = sel.value;
+      else delete State.model.boneAxisOverrides[name];
+    });
+  });
 
   document.getElementById('btnCenterModelOnAxis').addEventListener('click', () => {
     // パーツは動かさないため、既に配置済みの場合は相対位置がずれる旨を確認する
@@ -155,6 +167,30 @@ function renderModelSettingsPanel() {
   updateSpeedReadout();
 
   if (typeof bindEngineFleetPanel === 'function') bindEngineFleetPanel();
+}
+
+// GLBのボーンで動く舵（09c-aircraft-bones.js が検出した候補）の、回転軸の手動指定欄。
+// 候補が無い機体（ボーンの無いモデル・内蔵機）では何も出さない
+const BONE_ROLE_LABELS = { flap: 'フラップ', spoiler: 'スポイラー／エアブレーキ', attitude: '姿勢の舵（ピッチ/ロール/ヨー）' };
+const BONE_AXIS_LABELS = { x: 'X軸', y: 'Y軸', z: 'Z軸' };
+function boneAxisSectionHtml(candidates) {
+  if (!candidates || !candidates.length) return '';
+  const rows = candidates.map((c) => `
+    <div class="field">
+      <label>${escapeHtml(c.name)}<span style="color:var(--text-dim);"> ・ ${BONE_ROLE_LABELS[c.role] || c.role}</span></label>
+      <select class="fBoneAxis" data-bone="${escapeHtml(c.name)}">
+        <option value="">自動判定${c.autoAxis ? `（いまは${BONE_AXIS_LABELS[c.autoAxis]}）` : '（決められず）'}</option>
+        <option value="x">X軸に固定</option>
+        <option value="y">Y軸に固定</option>
+        <option value="z">Z軸に固定</option>
+      </select>
+    </div>
+  `).join('');
+  return `
+    <div class="subgroup-title">舵のボーン（回転軸の指定）</div>
+    <div class="hint" style="margin-bottom:8px;">GLBに仕込まれたボーンで動く舵面の一覧です。ふだんは板の形と試し動作から回転軸を自動で決めますが、輪郭が歪む・変な向きに振れるなど自動判定が合わないときは、ここでボーンのローカルX/Y/Z軸を指定して固定できます。</div>
+    ${rows}
+  `;
 }
 
 // 入力された最高速度を、もう片方の単位に目安換算して表示する（音速は高度により変わるため海面高度の目安値を使用）

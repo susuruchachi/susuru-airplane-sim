@@ -250,7 +250,7 @@ async function createAircraft(config, cgOverride) {
 
   // GLBに舵のボーンが入っていれば拾う。**ここで行列が機体座標**（重心が原点・
   // 機首が-Z）になっているので、この姿勢のまま測ればモーメントの向きがそのまま出る。
-  const bones = typeof buildAircraftBones === 'function' ? buildAircraftBones(group, visual) : [];
+  const bones = typeof buildAircraftBones === 'function' ? buildAircraftBones(group, visual, config.modelBoneAxisOverrides) : [];
   for (const l of lights) {
     if (l.kind === 'landing') resolveLightAim(l, group);
   }

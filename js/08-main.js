@@ -122,6 +122,7 @@ function applyConfigDataToCurrentModel(data) {
   if (data.modelMaxSpeedUnit !== undefined) State.model.maxSpeedUnit = data.modelMaxSpeedUnit;
   if (data.modelMeshOffset) applyMeshOffset(data.modelMeshOffset); // 原点を中心に揃えた調整を再現
   else if (data.modelMeshOffsetX) applyMeshOffset({ x: data.modelMeshOffsetX, y: 0, z: 0 }); // 旧データ互換（X方向のみ記録していた頃）
+  State.model.boneAxisOverrides = data.modelBoneAxisOverrides ? { ...data.modelBoneAxisOverrides } : {};
 
   rebuildPartsFromSaved(data.parts || []);
   if (data.cg) {

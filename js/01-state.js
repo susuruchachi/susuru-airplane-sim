@@ -24,6 +24,9 @@ const State = {
     maxSpeedValue: 250,      // 最高速度の数値（単位はmaxSpeedUnitに従う）
     maxSpeedUnit: 'kt',      // 'kt'（ノット） | 'mach'（マッハ）
     meshOffset: { x: 0, y: 0, z: 0 }, // 「原点を中心に揃える」で機体本体をずらした累計量（保存・復元用）
+    // GLBのボーンで動く舵面の回転軸の手動指定。キー＝ボーン名、値＝'x'|'y'|'z'。
+    // 無ければ自動判定（09c-aircraft-bones.jsが試し回転で決める）に任せる
+    boneAxisOverrides: {},
   },
 
   // パーツ定義一覧
