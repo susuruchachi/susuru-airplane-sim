@@ -64,15 +64,6 @@ const BONE_SMOOTH_S = 0.08;      // 舵が動く速さ（実機の舵も一瞬�
 // 更新する頻度が100%→1.1%まで落ち、1回あたりの動きは0.13°程度（見えない）に収まった。
 // 本物の操縦（フル舵）はこの何十倍も大きく動くので反応の遅れは感じない。
 const BONE_DEADBAND_RAD = THREE.MathUtils.degToRad(0.12);
-// **舵面は、たいてい親の翼とぴったり重なって作られている。** サンダーバード1号で
-// 実測すると、エルロンの頂点は100%、スポイラー/フラップも67〜86%が主翼側の頂点と
-// 距離0.01未満——つまりほぼ同じ場所にある。対数深度バッファでは `polygonOffset` が
-// ほとんど効かない（09b-aircraft-visual.js の着陸灯の板でも同じ理由で書いてある）ので、
-// 重なった面はどちらが手前か毎フレーム決まらず、境界がちらついて「輪郭が歪む」ように
-// 見える——舵を動かしていなくても、地上で静止していても起きる（実際に指摘された）。
-// 直すには、舵の板を厚み方向にほんの少し持ち上げて、重なりそのものを無くす。
-const BONE_NUDGE_M = 0.035;
-
 // 名前で分かるのは「操縦桿で動かす舵ではないもの」だけ。フラップとスポイラーは
 // 別のレバーだし、脚と可変翼は舵ではない。それ以外は形と動きから決める。
 const BONE_WORDS = {
@@ -164,15 +155,91 @@ function boneSkinnedPoint(item, target) {
   return target.applyMatrix4(item.mesh.matrixWorld);
 }
 
+// --- スキニングの精度を守る（これをやらないと輪郭が歪む）---------------------
+//
+// **スキンの計算はワールド座標のまま float32 で行われる。** three.js は
+// 「ボーンのワールド行列 × 逆バインド行列」を Float32Array に詰めてシェーダーへ
+// 渡し、頂点をいったんワールド座標へ運んでから戻す。この世界は一辺3000kmあるので
+// 機体のワールド座標は数十万に達する——float32 の刻み幅は座標53,000で約0.006、
+// 60万で0.07になる。実測（シェーダーと同じ float32 で計算し直して比べた）で、
+// 頂点のずれは原点で0、x=53,073で2mm、x=600,000で3.1cm、x=1,400,000で6.4cm。
+// 翼の縁や細い塗り分けの線がはっきり歪み、しかも機体が動くと丸め方が変わるので
+// 輪郭がゆらゆら動いて見える。
+//
+// **ボーンが付いていないメッシュで起きないのはなぜか。** そちらは
+// modelViewMatrix を CPU（倍精度）で「カメラからの相対」に直してから渡すので、
+// 大きな数がシェーダーに入らない。スキンだけが素通りしている。
+//
+// 直し方は、ボーンを機体の入れ物（ワールドに置かれている）から外し、
+// **モデルのローカル座標のままの入れ物**へ移すこと。シェーダーに入る数が
+// 機体の大きさ（数十m）で収まる。機体のワールド位置はこれまでどおり
+// modelViewMatrix 側で掛かるので、見え方は変わらない。
+//
+// 式で書くと、three.js のスキンは
+//   頂点 = メッシュのワールド行列 × 逆バインド × Σ(重み × ボーン行列) × バインド × p
+// で、既定（bindMode='attached'）では逆バインド＝メッシュのワールド行列の逆
+// なので、メッシュ側の行列が打ち消し合う。ボーンをローカルへ移したら、
+// 代わりに**モデルの中でのメッシュの位置**で打ち消すように置き換える
+// （bindMode='detached' にして、バインド行列と逆バインド行列を自分で入れ、
+// そのぶんを逆バインドボーン行列側から抜く）。
+function localizeSkeletons(visual) {
+  const skinned = [];
+  visual.traverse((o) => { if (o.isSkinnedMesh) skinned.push(o); });
+  if (!skinned.length) return null;
+  // 二度掛けると逆バインド行列を二重に直してしまうので、一度やった機体は素通りする
+  if (skinned[0].userData.boneLocalized) return null;
+
+  visual.updateMatrixWorld(true);
+  const invVisual = new THREE.Matrix4().copy(visual.matrixWorld).invert();
+
+  const holder = new THREE.Group();
+  holder.matrixAutoUpdate = false;   // 単位行列のまま動かさない
+
+  // 骨の根（親が骨でないもの）を、元の親の姿勢を写した箱ごと移す
+  const roots = new Set();
+  for (const m of skinned) {
+    for (const b of m.skeleton.bones) {
+      let r = b;
+      while (r && r.parent && r.parent.isBone) r = r.parent;
+      if (r) roots.add(r);
+    }
+  }
+  for (const rb of roots) {
+    const proxy = new THREE.Object3D();
+    proxy.matrixAutoUpdate = false;
+    if (rb.parent) proxy.matrix.multiplyMatrices(invVisual, rb.parent.matrixWorld);
+    holder.add(proxy);
+    proxy.add(rb);
+  }
+
+  for (const m of skinned) {
+    const local = new THREE.Matrix4().multiplyMatrices(invVisual, m.matrixWorld);
+    const localInv = new THREE.Matrix4().copy(local).invert();
+    // 逆バインドボーン行列は**メッシュごとに別物**（GLTFLoaderがメッシュごとに
+    // Skeleton を作っている）ので、ここで書き換えて差し支えない。
+    for (const bi of m.skeleton.boneInverses) bi.multiply(localInv);
+    m.bindMatrix.copy(local);
+    m.bindMatrixInverse.copy(localInv);
+    m.bindMode = 'detached';
+    m.userData.boneLocalized = true;
+    // スキンは境界球をバインドポーズで持っているので、舵を振ると画面外判定が
+    // ずれて消えることがある。枚数は知れているので切らない。
+    m.frustumCulled = false;
+  }
+  holder.updateMatrixWorld(true);
+  return holder;
+}
+
 // ボーンを1本ずつ試しに回して、ヒンジ軸と振れる向きを決める。
-// root は機体の入れ物（この時点でワールド＝機体座標：重心が原点・機首が-Z）。
-function buildAircraftBones(root) {
+// root は機体の入れ物（この時点でワールド＝機体座標：重心が原点・機首が-Z）、
+// visual は読み込んだGLBそのもの（localizeSkeletons の基準にする）。
+function buildAircraftBones(root, visual) {
   if (!root || typeof THREE === 'undefined') return [];
   const { skinned, clouds } = collectBoneClouds(root);
   if (!skinned.length) return [];
-  // スキンは境界球をバインドポーズで持っているので、舵を振ると画面外判定が
-  // ずれて消えることがある。枚数は知れているので切らない。
-  for (const m of skinned) m.frustumCulled = false;
+  // **先に骨をローカルへ移す**（localizeSkeletons の説明を参照）。以降、骨を
+  // 回したあとは root ではなくその骨自身の行列を作り直せばいい。
+  const holder = localizeSkeletons(visual || root);
 
   const out = [];
   const axes = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
@@ -200,7 +267,7 @@ function buildAircraftBones(root) {
     for (let ai = 0; ai < 3; ai++) {
       bone.quaternion.copy(rest).multiply(
         _boneQ.setFromAxisAngle(axes[ai], THREE.MathUtils.degToRad(BONE_TEST_DEG)));
-      root.updateMatrixWorld(true);
+      bone.updateMatrixWorld(true);
       const mean = new THREE.Vector3();
       let total = 0, perp = 0;
       for (let i = 0; i < items.length; i++) {
@@ -224,14 +291,14 @@ function buildAircraftBones(root) {
       }
       bone.quaternion.copy(rest);
     }
-    root.updateMatrixWorld(true);
+    bone.updateMatrixWorld(true);
     if (!best || best.dir.lengthSq() < 1e-12) continue;
 
     const dir = best.dir.clone().normalize();   // +BONE_TEST_DEG で板が振れる向き
     const entry = {
       bone, rest, axis: best.axis, name: bone.name,
       role: named || 'attitude',
-      center: center.clone(), dir, size: long, thicknessAxis: a3.clone(),
+      center: center.clone(), dir, size: long,
       angle: 0, target: 0, appliedAngle: 0,
       gain: { pitch: 0, roll: 0, yaw: 0, flap: 0, spoiler: 0 },
       maxRad: THREE.MathUtils.degToRad(BONE_CONTROL_DEG),
@@ -307,35 +374,6 @@ function buildAircraftBones(root) {
     b.gain.yaw = mix.z;
   }
 
-  // 舵の板を、重なっている親の翼から厚み方向にほんの少し持ち上げる
-  // （BONE_NUDGE_M の説明を参照）。主翼・尾翼側（子ボーンを持つ、動かさない骨）の
-  // 点群からいちばん近いものを探し、そこから遠ざかる向きへ動かす。
-  const parentCenters = [];
-  for (const e of clouds.values()) {
-    if (!e.bone.children.some((o) => o.isBone)) continue;
-    const pts = e.items.slice(0, 200).map((it) => boneSkinnedPoint(it, new THREE.Vector3()));
-    if (!pts.length) continue;
-    const c = new THREE.Vector3();
-    for (const q of pts) c.add(q);
-    c.multiplyScalar(1 / pts.length);
-    parentCenters.push(c);
-  }
-  if (parentCenters.length) {
-    for (const b of kept) {
-      let nearest = null, nearestD = Infinity;
-      for (const c of parentCenters) {
-        const d = b.center.distanceTo(c);
-        if (d < nearestD) { nearestD = d; nearest = c; }
-      }
-      const sign = b.center.clone().sub(nearest).dot(b.thicknessAxis) >= 0 ? 1 : -1;
-      const worldNudge = b.thicknessAxis.clone().multiplyScalar(sign * BONE_NUDGE_M);
-      const parentQ = new THREE.Quaternion();
-      if (b.bone.parent) b.bone.parent.getWorldQuaternion(parentQ);
-      b.bone.position.add(worldNudge.applyQuaternion(parentQ.invert()));
-    }
-    root.updateMatrixWorld(true);
-  }
-
   return kept;
 }
 
@@ -361,6 +399,10 @@ function updateAircraftBones(ac, controls, dt) {
     if (Math.abs(b.angle - b.appliedAngle) >= BONE_DEADBAND_RAD) {
       b.appliedAngle = b.angle;
       b.bone.quaternion.copy(b.rest).multiply(_boneQ.setFromAxisAngle(b.axis, b.angle));
+      // 骨はもう機体の入れ物の中にいない（localizeSkeletons を参照）ので、
+      // レンダラーの `scene.updateMatrixWorld()` は届かない。動かした骨だけ
+      // 自分で作り直す。親（箱）はずっと同じなので、これで足りる。
+      b.bone.updateMatrixWorld(true);
     }
   }
 }
