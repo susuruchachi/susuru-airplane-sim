@@ -64,6 +64,14 @@ const BONE_SMOOTH_S = 0.08;      // 舵が動く速さ（実機の舵も一瞬�
 // 更新する頻度が100%→1.1%まで落ち、1回あたりの動きは0.13°程度（見えない）に収まった。
 // 本物の操縦（フル舵）はこの何十倍も大きく動くので反応の遅れは感じない。
 const BONE_DEADBAND_RAD = THREE.MathUtils.degToRad(0.12);
+// **舵面は、たいてい親の翼とぴったり重なって作られている。** サンダーバード1号で
+// 実測すると、エルロンの頂点は100%、スポイラー/フラップも67〜86%が主翼側の頂点と
+// 距離0.01未満——つまりほぼ同じ場所にある。対数深度バッファでは `polygonOffset` が
+// ほとんど効かない（09b-aircraft-visual.js の着陸灯の板でも同じ理由で書いてある）ので、
+// 重なった面はどちらが手前か毎フレーム決まらず、境界がちらついて「輪郭が歪む」ように
+// 見える——舵を動かしていなくても、地上で静止していても起きる（実際に指摘された）。
+// 直すには、舵の板を厚み方向にほんの少し持ち上げて、重なりそのものを無くす。
+const BONE_NUDGE_M = 0.035;
 
 // 名前で分かるのは「操縦桿で動かす舵ではないもの」だけ。フラップとスポイラーは
 // 別のレバーだし、脚と可変翼は舵ではない。それ以外は形と動きから決める。
@@ -223,7 +231,7 @@ function buildAircraftBones(root) {
     const entry = {
       bone, rest, axis: best.axis, name: bone.name,
       role: named || 'attitude',
-      center: center.clone(), dir, size: long,
+      center: center.clone(), dir, size: long, thicknessAxis: a3.clone(),
       angle: 0, target: 0, appliedAngle: 0,
       gain: { pitch: 0, roll: 0, yaw: 0, flap: 0, spoiler: 0 },
       maxRad: THREE.MathUtils.degToRad(BONE_CONTROL_DEG),
@@ -298,6 +306,36 @@ function buildAircraftBones(root) {
     b.gain.roll = mix.y;
     b.gain.yaw = mix.z;
   }
+
+  // 舵の板を、重なっている親の翼から厚み方向にほんの少し持ち上げる
+  // （BONE_NUDGE_M の説明を参照）。主翼・尾翼側（子ボーンを持つ、動かさない骨）の
+  // 点群からいちばん近いものを探し、そこから遠ざかる向きへ動かす。
+  const parentCenters = [];
+  for (const e of clouds.values()) {
+    if (!e.bone.children.some((o) => o.isBone)) continue;
+    const pts = e.items.slice(0, 200).map((it) => boneSkinnedPoint(it, new THREE.Vector3()));
+    if (!pts.length) continue;
+    const c = new THREE.Vector3();
+    for (const q of pts) c.add(q);
+    c.multiplyScalar(1 / pts.length);
+    parentCenters.push(c);
+  }
+  if (parentCenters.length) {
+    for (const b of kept) {
+      let nearest = null, nearestD = Infinity;
+      for (const c of parentCenters) {
+        const d = b.center.distanceTo(c);
+        if (d < nearestD) { nearestD = d; nearest = c; }
+      }
+      const sign = b.center.clone().sub(nearest).dot(b.thicknessAxis) >= 0 ? 1 : -1;
+      const worldNudge = b.thicknessAxis.clone().multiplyScalar(sign * BONE_NUDGE_M);
+      const parentQ = new THREE.Quaternion();
+      if (b.bone.parent) b.bone.parent.getWorldQuaternion(parentQ);
+      b.bone.position.add(worldNudge.applyQuaternion(parentQ.invert()));
+    }
+    root.updateMatrixWorld(true);
+  }
+
   return kept;
 }
 
