@@ -27,34 +27,34 @@ const SOUND_SPEED_MPS = 340;
 // ドップラーの効きの上限（行き過ぎると音痴になる）
 const SOUND_DOPPLER_MIN = 0.55;
 const SOUND_DOPPLER_MAX = 1.9;
-// **ドップラーは「音源と耳の距離が縮まる速さ」で決まる。**
+// **ドップラーの「耳の速さ」は、カメラの見かけの動きから作ってはいけない。**
 //
-// 最初は「機体の速度 − カメラの速度」を視線方向へ落として出していた。式としては
-// 同じものなのだが、カメラの速度を毎フレームの位置の引き算で作っていたので、
-// **スワイプで視点を回しただけで耳が秒速数百mで飛んでいることになり**、
-// 音程がグワグワ揺れた——実測（ジェット機を等速で飛ばしたまま、1秒で半周
-// スワイプ）で、ドップラー比が0.823〜0.974＝**2.91半音**動いていた。
-// 機体の速度は1ノットも変わっていないのに。ジェットで特に目立つのは、
-// ファンのキーンが**純音**だから（雑音には音程が無いので揺れても分からない。
-// ロケットやプロペラで気にならなかったのはそのため）。
+// 最初は「機体の速度 − カメラの速度」で出していた。式は正しいのだが、カメラの速度を
+// 毎フレームの位置の引き算で作っていたので、**スワイプで視点を回しただけで耳が秒速
+// 数百mで飛んでいることになり**、音程がグワグワ揺れた——実測（ジェット機を等速で
+// 飛ばしたまま1秒で半周スワイプ）で **2.91半音**。機体の速度は1ノットも変わっていない。
+// ジェットで特に目立つのは、ファンのキーンが**純音**だから（雑音には音程が無いので
+// 揺れても分からない。ロケットやプロペラで気にならなかったのはそのため）。
 //
-// カメラの速度をやめて機体の速度だけにしてみたら、今度は離れた視点（周回・自由）で
-// **14.05半音**とかえって酷くなった——半周まわるあいだに視線の向きが速度ベクトルを
-// またぐので、近づく成分が+160から-160まで振れてしまう。
+// ここから2回まわり道をした。
+//   1) カメラの速度をやめて機体の速度だけにした → 離れた視点で **14.05半音**と悪化。
+//      半周まわるあいだに視線の向きが速度ベクトルをまたぐので、近づく成分が
+//      +160から-160まで振れてしまう。
+//   2) 距離そのものの変化率にした → スワイプは0.32半音まで直ったが、
+//      **ズームすると距離が変わるので音程が動いた**（指で寄っただけなのに）。
 //
-// 答えは定義に戻ること。ドップラーは距離の縮まる速さで決まるのだから、
-// **距離そのものを毎フレーム引き算すればいい**。すると
-//   ・半径を保ったまま視点を回すスワイプ … 距離は1mmも変わらない → 効かない
-//   ・機体に付いた視点                  … 距離は一定 → 効かない
-//   ・止まって見ている横を通過する機体   … 距離が縮んでから伸びる → ちゃんと効く
-// の3つが**式ひとつで**同時に成り立つ。視点の種類で場合分けする必要もない。
+// 答えは「**カメラが何に繋がれているか**」を見ること。見かけの動きではなく、
+// 耳が乗っている乗り物の速度を使う——ゲームの音で普通に使われる考え方。
+//   追従・機体固定・コックピット・周回 … カメラは機体に繋がれている（周回も
+//      毎フレーム機体を中心に置き直している）。耳は機体と一緒に飛んでいるので
+//      相対速度は0 → ドップラーは1。同乗していれば自分のエンジンの音程は変わらない。
+//   自由                            … カメラは世界に置いてある。耳は止まっている
+//      ので、機体の速度の視線方向の成分がそのままドップラーになる。
+// どちらにも「指で動かしたぶん」は入らないので、**スワイプもズームも効かない**。
 const SOUND_DOPPLER_TAU = 0.25;   // 距離の変化率を均す時定数（コマ間の荒れを取る）
 // ドップラー比が1秒で変われる量。真横を通り過ぎる瞬間に比が裏返るので、
 // これが無いと段差が「プツッ」と聞こえる。
 const SOUND_DOPPLER_SLEW = 1.2;
-// これより速く距離が変わったら「飛んだ」のではなく「置き直された」とみなす。
-// マッハ10でも3,400m/sなので、これを超えるのはワープだけ。
-const SOUND_TELEPORT_MPS = 4000;
 // パラメータを動かすときの追従の速さ（秒）。小さいとプツプツ鳴る。
 const SOUND_SMOOTH_S = 0.05;
 // 雑音のもと。1秒だと繰り返しの周期が耳につくので少し長く取る。
@@ -103,6 +103,13 @@ function soundBuildNoiseBuffer(ctx) {
 //              倍音が多い鋸波を、基音の4倍あたりで切って使う。
 //   ジェット  … 低い「ゴー」（排気が空気と混ざる雑音。300〜500Hzが山）と、
 //              高い「キーン」（ファンの翼通過音。大型機で1kHz前後＋その倍音）。
+//              **キーンは純音ではない。** 実機のファン音は、翼通過の基音と
+//              その倍音に、同じ高さの狭い帯域の雑音（羽根の間の流れの乱れ）が
+//              乗った「かすれた」音。三角波を1本だけ鳴らすと、それはもう
+//              笛（ピー）であってジェットではない——実測で、山のするどさ
+//              （いちばん高い点÷まわりの中央値）が**8,586倍**だった
+//              （ロケットの広い帯域は2倍）。倍音と狭帯域雑音を足して、
+//              山をなだらかにする。
 //   AB付き    … ジェットに、点いたときだけ**腹に来る低い唸り**を足す。
 //   ロケット  … ほとんど低い雑音。150Hz以下が主で、上のほうに「バチバチ」が乗る。
 const SOUND_ENGINE_LOOK = {
@@ -120,14 +127,20 @@ const SOUND_ENGINE_LOOK = {
     toneFrom: 0, toneTo: 0, toneType: 'sine', toneGain: 0,
     toneCutMul: 4,
     noiseHz: 340, noiseQ: 0.7, noiseGain: 0.75,
-    whineFrom: 700, whineTo: 3000, whineGain: 0.1,
+    // キーン（翼通過の基音・倍音・同じ高さのかすれ）
+    whineFrom: 700, whineTo: 3000,
+    whineGain: 0.016,    // 基音の純音ぶん（小さく。これを上げると笛になる）
+    whineHarm: 0.55,     // 倍音ぶん（基音に対する割合）
+    whineRasp: 0.7,      // 同じ高さの狭い帯域の雑音（かすれ）
+    whineRaspQ: 7,       // 狭いほど音程がはっきりする（広げるとかすれが増える）
     rumbleGain: 0, level: 1.0,
   },
   jet_ab: {
     toneFrom: 0, toneTo: 0, toneType: 'sine', toneGain: 0,
     toneCutMul: 4,
     noiseHz: 300, noiseQ: 0.7, noiseGain: 0.85,
-    whineFrom: 700, whineTo: 3200, whineGain: 0.1,
+    whineFrom: 700, whineTo: 3200,
+    whineGain: 0.016, whineHarm: 0.55, whineRasp: 0.7, whineRaspQ: 7,
     rumbleGain: 0.7, level: 1.0,
   },
   rocket: {
@@ -206,15 +219,37 @@ function buildEngineVoice(ctx, dest, kind, noiseBuf) {
     parts.noise = { src, bp, gain: g };
   }
 
-  // ファンのキーン（ジェット）
+  // ファンのキーン（ジェット）。基音＋倍音＋同じ高さのかすれ（狭帯域の雑音）。
+  // 三角波1本では笛になってしまう（SOUND_ENGINE_LOOK の説明を参照）。
   if (look.whineGain > 0) {
-    const osc = ctx.createOscillator();
-    osc.type = 'triangle';
-    osc.frequency.value = look.whineFrom;
-    const g = ctx.createGain();
-    g.gain.value = look.whineGain;
-    osc.connect(g).connect(body);
-    parts.whine = { osc, gain: g };
+    const oscs = [];
+    const rasps = [];
+    // 基音と、その2倍・3倍。倍音は上へ行くほど弱く。
+    for (let h = 1; h <= 3; h++) {
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = look.whineFrom * h;
+      const g = ctx.createGain();
+      g.gain.value = look.whineGain * (h === 1 ? 1 : Math.pow(look.whineHarm || 0, h - 1));
+      osc.connect(g).connect(body);
+      oscs.push({ osc, gain: g, mul: h, base: g.gain.value });
+    }
+    // かすれ。同じ高さに狭い帯域の雑音を重ねると、純音が「息の混じった音」になる。
+    if (look.whineRasp > 0) {
+      for (let h = 1; h <= 2; h++) {
+        const src = ctx.createBufferSource();
+        src.buffer = noiseBuf; src.loop = true;
+        const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.frequency.value = look.whineFrom * h;
+        bp.Q.value = look.whineRaspQ || 10;
+        const g = ctx.createGain();
+        g.gain.value = look.whineRasp * (h === 1 ? 1 : 0.6);
+        src.connect(bp).connect(g).connect(body);
+        rasps.push({ src, bp, gain: g, mul: h, base: g.gain.value });
+      }
+    }
+    parts.whine = { oscs, rasps };
   }
 
   // 腹に来る低い唸り（AB・ロケット）
@@ -258,8 +293,15 @@ function buildEngineVoice(ctx, dest, kind, noiseBuf) {
       }
       if (parts.whine) {
         const hz = (look.whineFrom + (look.whineTo - look.whineFrom) * p) * voice.doppler;
-        soundRamp(parts.whine.osc.frequency, hz, t, tau);
-        soundRamp(parts.whine.gain.gain, look.whineGain * (0.2 + 0.8 * p), t, tau);
+        const amt = 0.2 + 0.8 * p;
+        for (const o of parts.whine.oscs) {
+          soundRamp(o.osc.frequency, hz * o.mul, t, tau);
+          soundRamp(o.gain.gain, o.base * amt, t, tau);
+        }
+        for (const r of parts.whine.rasps) {
+          soundRamp(r.bp.frequency, hz * r.mul, t, tau);
+          soundRamp(r.gain.gain, r.base * amt, t, tau);
+        }
       }
       if (parts.rumble) {
         // ロケットは出力そのまま、AB付きは点いたぶんだけ
@@ -289,14 +331,20 @@ function buildEngineVoice(ctx, dest, kind, noiseBuf) {
       voice.started = true;
       const t = when === undefined ? ctx.currentTime : when;
       if (parts.tone) parts.tone.osc.start(t);
-      if (parts.whine) parts.whine.osc.start(t);
+      if (parts.whine) {
+        for (const o of parts.whine.oscs) o.osc.start(t);
+        for (const r of parts.whine.rasps) r.src.start(t);
+      }
       if (parts.noise) parts.noise.src.start(t);
       if (parts.rumble) parts.rumble.src.start(t);
     },
     stop(when) {
       const t = when === undefined ? ctx.currentTime : when;
       if (parts.tone) parts.tone.osc.stop(t);
-      if (parts.whine) parts.whine.osc.stop(t);
+      if (parts.whine) {
+        for (const o of parts.whine.oscs) o.osc.stop(t);
+        for (const r of parts.whine.rasps) r.src.stop(t);
+      }
       if (parts.noise) parts.noise.src.stop(t);
       if (parts.rumble) parts.rumble.src.stop(t);
     },
@@ -431,6 +479,7 @@ function soundDetachAircraft() {
 }
 
 const _sndPos = new THREE.Vector3();
+const _sndToEar = new THREE.Vector3();
 
 // 毎フレーム。機体の状態から音を更新する（02-env-scene.js の animateEnv から）。
 function updateSound(dt) {
@@ -445,6 +494,8 @@ function updateSound(dt) {
   if (!s.voices || !s.voices.length) return;
 
   const cam = EnvState.camera.position;
+  // 耳は機体に乗っているか（自由視点だけが世界に置いてある）
+  const earFollows = f.cameraMode !== 'free';
   const now = s.ctx.currentTime;
   const model = f.aircraft.model;
   const q = f.aircraft.group.quaternion;
@@ -472,24 +523,23 @@ function updateSound(dt) {
 
     const dist = _sndPos.copy(v.world).sub(cam).length();
 
-    // **ドップラーは「音源と耳の距離が縮まる速さ」で決まる。** 定義どおりに、
-    // 距離そのものの変化率から出す（SOUND_DOPPLER_SLEW のすぐ上の説明を参照）。
-    if (v.prevDist === undefined || dt <= 1e-4) {
-      v.closing = 0;
-    } else {
-      const raw = (v.prevDist - dist) / dt;          // 正なら近づいている
-      // **ワープは速度ではない。** Rで滑走路へ戻す・視点を切り替える・出し直す、
-      // といったときは距離が一瞬で何kmも飛ぶ。そのまま速さとして読むと、
-      // 音速を超えた偽のドップラーが「ヒュウン」と鳴る。どんな機体でも出せない
-      // 速さが出たら、それは飛んだのではなく置き直されたのだと見て、0に戻す。
-      if (Math.abs(raw) > SOUND_TELEPORT_MPS) v.closing = 0;
-      else {
-        // コマ間の差分はどうしても荒れるので、時定数で均す
-        const k = 1 - Math.exp(-dt / SOUND_DOPPLER_TAU);
-        v.closing = (v.closing || 0) + (raw - (v.closing || 0)) * k;
-      }
+    // **ドップラーは「音源と耳が近づく速さ」で決まる。**
+    // 耳の速さは、カメラの見かけの動きではなく**カメラが何に繋がれているか**で決める
+    // （SOUND_DOPPLER_TAU のすぐ上の説明）。機体に繋がれている視点では耳も一緒に
+    // 飛んでいるので相対速度は0、世界に置いてある視点では耳は止まっている。
+    // どちらにも「指で動かしたぶん」は入らないので、スワイプもズームも効かない。
+    let raw = 0;
+    if (!earFollows) {
+      _sndToEar.copy(cam).sub(v.world);
+      const len = _sndToEar.length();
+      if (len > 1e-3) raw = f.state.velocity.dot(_sndToEar) / len;
     }
-    v.prevDist = dist;
+    // コマ間の差分はどうしても荒れるので、時定数で均す
+    if (dt <= 1e-4) v.closing = raw;
+    else {
+      const k = 1 - Math.exp(-dt / SOUND_DOPPLER_TAU);
+      v.closing = (v.closing || 0) + (raw - (v.closing || 0)) * k;
+    }
     const want = SOUND_SPEED_MPS / Math.max(SOUND_SPEED_MPS - v.closing, 40);
     // 変わる速さにも上限を置く。真横を通り過ぎる瞬間は近づく速さが一瞬で
     // 裏返るので、比だけ見ると階段状に飛ぶ（耳はその段差を「プツッ」と聞く）。
