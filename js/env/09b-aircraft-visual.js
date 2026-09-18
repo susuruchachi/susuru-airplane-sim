@@ -250,6 +250,8 @@ async function createAircraft(config, cgOverride) {
   for (const l of lights) {
     if (l.kind === 'landing') resolveLightAim(l, group);
   }
+  // 湿った空・雨・雪・霧のときに見える、空中の光の筋
+  attachLandingBeams(lights, group);
 
   // 排気と炎（エンジンの種別ごと）。機体座標のまま置けるので group の子。
   // ノズルの太さを抑える基準は、Builderと同じ**メッシュの境界箱**で測る。
@@ -495,6 +497,132 @@ function buildLandingPool(lights) {
   const n = Math.min(lights.filter((l) => l.kind === 'landing').length, LANDING_POOL_MAX);
   for (let i = 0; i < n; i++) group.add(buildLandingPoolMesh());
   return group;
+}
+
+// --- 空中に見える光の筋 -------------------------------------------------------
+//
+// **光の筋は、空気に散らすものがあるときだけ見える。**
+// 晴れて乾いた空では光線は見えない（散らすものが無いので、目に届く光が無い）。
+// 霧・雨・雪・もやの中では、水滴や雪が光を横へ散らすので円錐が浮かび上がる。
+// だから濃さは天気から決める。内訳は
+//   降り（precipRate）… いちばん効く。雪は雨より粒が大きくよく散らすので割増し
+//   霧（fogginess）  … 最大。霧の中の光条はまるごと白い棒になる
+//   湿り（wetness）  … もや。0.5から上でだけ、ほんの少し
+// 形は「側面だけの円錐」を1枚。加算合成なので、輪郭のところで表と裏の2枚を
+// 通って明るくなり、それがそのまま光の筋の縁の明るさになる。
+const LANDING_BEAM_OPACITY = 0.3;       // いちばん濃いとき（霧の中）の濃さ
+const LANDING_BEAM_SNOW_GAIN = 1.35;    // 雪は雨よりよく散らす
+const LANDING_BEAM_HAZE_FROM = 0.5;     // もやが効きはじめる湿り
+const LANDING_BEAM_HAZE_GAIN = 0.35;
+const LANDING_BEAM_PRECIP_GAIN = 0.8;   // 降りの効き（これを下げると、雨と大雨の差が出る）
+const LANDING_BEAM_SEGMENTS = 12;       // 長さ方向の分割（濃さの変化を頂点色で出す）
+// 手前（灯りのすぐそば）は**必ず消しておく**。追従視点やコックピット視点の
+// カメラは灯りのすぐ後ろにいるので、根元まで濃いと画面がまっ白になる。
+const LANDING_BEAM_NEAR_FRAC = 0.1;     // ここまでで立ち上げる（長さに対する割合）
+const LANDING_BEAM_FALL = 1.7;          // 奥へ向かう薄れ方の鋭さ
+// 視程より長い筋は引かない（霧の中では光も同じだけしか届かない）
+const LANDING_BEAM_VIS_FRAC = 0.55;
+const LANDING_BEAM_MIN_AIR = 0.02;      // これ以下の空気では出さない
+
+// 円錐の側面。頂点が原点（灯り）、底面が -Z 側（照らす先）。
+// 濃さは頂点色に入れる（加算合成なので、色が0なら何も足さない＝消えたのと同じ）。
+function buildLandingBeamGeometry() {
+  const geo = new THREE.ConeGeometry(1, 1, 18, LANDING_BEAM_SEGMENTS, true);
+  geo.rotateX(Math.PI / 2);        // +Y → +Z（頂点が後ろ・底面が前）
+  geo.translate(0, 0, -0.5);       // 頂点を原点へ
+  const pos = geo.attributes.position;
+  const col = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const t = THREE.MathUtils.clamp(-pos.getZ(i), 0, 1);   // 0=灯り 1=いちばん先
+    const rise = THREE.MathUtils.smoothstep(t, 0, LANDING_BEAM_NEAR_FRAC);
+    const fall = Math.pow(1 - t, LANDING_BEAM_FALL);
+    const v = rise * fall;
+    col[i * 3] = v; col[i * 3 + 1] = v * 0.985; col[i * 3 + 2] = v * 0.93;  // わずかに暖色
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return geo;
+}
+
+let _landingBeamGeometry = null;
+function buildLandingBeamMesh() {
+  if (!_landingBeamGeometry) _landingBeamGeometry = buildLandingBeamGeometry();
+  const mesh = new THREE.Mesh(_landingBeamGeometry, new THREE.MeshBasicMaterial({
+    color: 0xfff6dd, vertexColors: true, transparent: true, opacity: 0,
+    depthWrite: false, blending: THREE.AdditiveBlending, fog: true,
+    side: THREE.DoubleSide,
+  }));
+  mesh.renderOrder = ENV_ORDER.effect;
+  mesh.visible = false;
+  mesh.frustumCulled = false;
+  mesh.userData.landingBeam = true;
+  return mesh;
+}
+
+// 空気がどれだけ光を散らすか（0〜1）
+function landingBeamAirFactor() {
+  const w = EnvState.weather && EnvState.weather.current;
+  if (!w) return 0;
+  const snow = w.precipIsSnow > 0.5 ? LANDING_BEAM_SNOW_GAIN : 1;
+  const haze = Math.max((w.wetness || 0) - LANDING_BEAM_HAZE_FROM, 0)
+    / (1 - LANDING_BEAM_HAZE_FROM) * LANDING_BEAM_HAZE_GAIN;
+  return THREE.MathUtils.clamp(
+    (w.precipRate || 0) * snow * LANDING_BEAM_PRECIP_GAIN + (w.fogginess || 0) + haze, 0, 1);
+}
+
+const _beamBase = new THREE.Vector3(0, 0, -1);
+const _beamPos = new THREE.Vector3();
+const _beamDir = new THREE.Vector3();
+const _beamQ = new THREE.Quaternion();
+const _beamQ2 = new THREE.Quaternion();
+
+// 灯りごとに、空中の光の筋を1本ずつ用意する。
+// **灯りと同じ入れ物（modelXform）の子にはしない。** そこには機体まるごとの
+// 拡縮が掛かっているので、大きさを実寸(m)で指定したい筋だけが伸び縮みする。
+// 拡縮の無い group の子にして、毎フレーム灯りの位置と向きへ置き直す。
+function attachLandingBeams(lights, group) {
+  let n = 0;
+  for (const l of lights) {
+    if (l.kind !== 'landing' || !l.aimLocal) continue;
+    if (n >= LANDING_POOL_MAX) break;
+    n++;
+    l.beam = buildLandingBeamMesh();
+    group.add(l.beam);
+  }
+}
+
+let _beamDark = 0, _beamAir = 0, _beamVis = Infinity;
+
+function updateLandingBeams(ac, controls, state) {
+  let ready = false;
+  for (const l of ac.lights) {
+    if (!l.beam) continue;
+    if (!controls.landingLight) { l.beam.visible = false; continue; }
+    if (!ready) {
+      ready = true;
+      // 昼は空が明るすぎて、加算合成の筋は見えない（実機でも見えない）
+      const sun = EnvState.sunLight ? EnvState.sunLight.intensity / 1.5 : 1;
+      _beamDark = THREE.MathUtils.clamp(1 - sun * 1.3, 0, 1);
+      _beamAir = landingBeamAirFactor();
+      const w = EnvState.weather && EnvState.weather.current;
+      _beamVis = w && w.visibilityM > 0 ? w.visibilityM * LANDING_BEAM_VIS_FRAC : Infinity;
+      if (_beamAir >= LANDING_BEAM_MIN_AIR && _beamDark > 0.01) ac.group.updateMatrixWorld(true);
+    }
+    if (_beamAir < LANDING_BEAM_MIN_AIR || _beamDark <= 0.01) { l.beam.visible = false; continue; }
+
+    // 灯りの世界での位置と向きを、機体座標（拡縮の無いところ）へ移して置く
+    l.mesh.getWorldPosition(_beamPos);
+    l.beam.position.copy(ac.group.worldToLocal(_beamPos));
+    (l.mesh.parent || ac.group).getWorldQuaternion(_beamQ);
+    ac.group.getWorldQuaternion(_beamQ2).invert();
+    _beamDir.copy(l.aimLocal).applyQuaternion(_beamQ).applyQuaternion(_beamQ2).normalize();
+    l.beam.quaternion.setFromUnitVectors(_beamBase, _beamDir);
+
+    const len = Math.min(l.rangeM, _beamVis);
+    const r = len * Math.tan(THREE.MathUtils.degToRad(l.halfDeg));
+    l.beam.scale.set(r, r, len);
+    l.beam.visible = true;
+    l.beam.material.opacity = LANDING_BEAM_OPACITY * _beamAir * _beamDark;
+  }
 }
 
 // 灯りの向き（灯りの入れ物の座標）を決める。
@@ -1795,6 +1923,7 @@ function updateAircraftVisual(ac, controls, state, dt, elapsed) {
   }
 
   updateLandingLightPool(ac, controls, state);
+  updateLandingBeams(ac, controls, state);
   updateEnginePlumes(ac, controls, state, dt, elapsed);
   updateContrail(ac, controls, state, dt);
   updateRocketSmoke(ac, controls, state, dt);
