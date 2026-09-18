@@ -140,5 +140,7 @@ const EnvState = {
     treesVisible: true,      // 樹木の表示
     radarVisible: false,     // ミニマップに気象レーダー（降水）を重ねるか
     windFromWeather: true,   // 風速を天候に任せるか（風向はいつでも手動）
+    soundOn: true,           // 音を鳴らすか
+    soundVolume: 0.7,        // 音量（0〜1）
   },
 };

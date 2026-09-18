@@ -271,6 +271,21 @@ body.touch-controls #hudHelp { display:none; }
       </label>
     </div>
 
+    <div class="section-title">音</div>
+    <div class="env-group">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="envSoundOn" checked>
+        <span>音を鳴らす</span>
+      </label>
+      <div class="env-row" style="margin-top:8px;">
+        <label>音量</label>
+        <input type="range" id="envSoundVolume" min="0" max="100" step="1" value="70">
+        <span id="envSoundVolumeReadout" class="val">70%</span>
+      </div>
+      <div class="env-note">エンジンの音は機体の設定（種別・基数・出力）から、その場で合成しています。
+        ブラウザの決まりで、画面を一度クリックするまで音は出ません。</div>
+    </div>
+
     <div class="section-title">昼夜サイクル</div>
     <div class="env-group">
       <div class="env-row"><label>時刻</label><span id="envTimeReadout" class="val">09:00</span></div>
@@ -495,6 +510,7 @@ body.touch-controls #hudHelp { display:none; }
 <script src="js/env/11b-flight-touch.js" onerror="_markFailed('js/env/11b-flight-touch.js')"></script>
 <script src="js/env/12-flight-mode.js" onerror="_markFailed('js/env/12-flight-mode.js')"></script>
 <script src="js/env/13-autopilot.js" onerror="_markFailed('js/env/13-autopilot.js')"></script>
+<script src="js/env/14-sound.js" onerror="_markFailed('js/env/14-sound.js')"></script>
 <script src="js/env/06-env-ui.js" onerror="_markFailed('js/env/06-env-ui.js')"></script>
 <script src="js/env/08-env-storage.js" onerror="_markFailed('js/env/08-env-storage.js')"></script>
 <script src="js/env/07-env-main.js" onerror="_markFailed('js/env/07-env-main.js')"></script>

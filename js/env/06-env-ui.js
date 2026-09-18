@@ -105,12 +105,17 @@ function setupEnvUI() {
     EnvState.weather.presetId = 'auto';
     EnvState.weather.manual = { wetness: 0.35, storminess: 0, fogginess: 0 };
     EnvState.env.radarVisible = false;
+    EnvState.env.soundOn = true;
+    EnvState.env.soundVolume = 0.7;
+    if (typeof soundSetEnabled === 'function') soundSetEnabled(true);
+    if (typeof soundSetVolume === 'function') soundSetVolume(0.7);
     setLabelsVisible(true);
     setTreesVisible(true);
     resetSelectedAirport();
     syncEnvUIToState();
   });
 
+  setupSoundUI();
   setupStorageUI();
   syncEnvUIToState();
 }
@@ -147,6 +152,14 @@ function syncEnvUIToState() {
   document.getElementById('envShowLabels').checked = EnvState.env.labelsVisible !== false;
   document.getElementById('envShowTrees').checked = EnvState.env.treesVisible !== false;
   document.getElementById('envShowRadar').checked = EnvState.env.radarVisible === true;
+
+  const soundOn = document.getElementById('envSoundOn');
+  if (soundOn) soundOn.checked = EnvState.env.soundOn !== false;
+  const soundVol = EnvState.env.soundVolume === undefined ? 0.7 : EnvState.env.soundVolume;
+  set('envSoundVolume', Math.round(soundVol * 100));
+  text('envSoundVolumeReadout', Math.round(soundVol * 100) + '%');
+  if (typeof soundSetVolume === 'function') soundSetVolume(soundVol);
+  if (typeof soundSetEnabled === 'function') soundSetEnabled(EnvState.env.soundOn !== false);
 
   syncAirportUIToSelection();
 }
@@ -186,6 +199,29 @@ function setupWorldUI() {
   });
 
   setupMinimapUI();
+}
+
+// --- 音セクション -----------------------------------------------------------
+
+function setupSoundUI() {
+  const on = document.getElementById('envSoundOn');
+  const vol = document.getElementById('envSoundVolume');
+  const out = document.getElementById('envSoundVolumeReadout');
+  if (!on || !vol) return;
+  on.checked = EnvState.env.soundOn !== false;
+  vol.value = Math.round((EnvState.env.soundVolume === undefined ? 0.7 : EnvState.env.soundVolume) * 100);
+  if (out) out.textContent = vol.value + '%';
+  on.addEventListener('change', () => {
+    EnvState.env.soundOn = on.checked;
+    if (typeof soundSetEnabled === 'function') soundSetEnabled(on.checked);
+    onEnvSettingsChanged();
+  });
+  vol.addEventListener('input', () => {
+    EnvState.env.soundVolume = Number(vol.value) / 100;
+    if (out) out.textContent = vol.value + '%';
+    if (typeof soundSetVolume === 'function') soundSetVolume(EnvState.env.soundVolume);
+  });
+  vol.addEventListener('change', onEnvSettingsChanged);
 }
 
 // --- 天候セクション ---------------------------------------------------------

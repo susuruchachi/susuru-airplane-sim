@@ -17,6 +17,7 @@ function bootstrapEnv() {
     initMinimap();
     initFlight();    // 機体の一覧を読む（IndexedDBなので非同期。飛ぶのはボタンを押してから）
     setupEnvUI();
+    if (typeof setupSoundUnlock === 'function') setupSoundUnlock();  // 最初の操作で音を起こす
 
     // 前回この端末で触った設定があれば復元する（無ければ何も起きない）
     if (loadEnvFromStorage()) {
