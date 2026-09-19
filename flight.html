@@ -29,15 +29,36 @@
     background:var(--panel-2);border-bottom:1px solid var(--line);
     height:48px;box-sizing:border-box;flex-wrap:nowrap;overflow:hidden;min-height:0;
   }
-  #topbar .brand{font-weight:600;letter-spacing:.02em;font-size:14px;color:var(--text);white-space:nowrap;}
+  #topbar .brand{font-weight:600;letter-spacing:.02em;font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
   #topbar .brand span{color:var(--accent);}
-  #topbar .sep{width:1px;height:22px;background:var(--line);}
+  #topbar .sep{width:1px;height:22px;background:var(--line);flex-shrink:0;}
   #topbar a.navlink{
     color:var(--text-dim);text-decoration:none;font-size:12.5px;padding:6px 12px;border:1px solid var(--line);
-    border-radius:6px;white-space:nowrap;
+    border-radius:6px;white-space:nowrap;flex-shrink:0;
   }
   #topbar a.navlink:hover{border-color:var(--accent-dim);color:var(--text);}
+  #topbar a.navlink .short{display:none;}
   #topbar .spacer{flex:1 1 auto;min-width:0;}
+  /* メニューの開閉ボタンは、画面がどれだけ狭くても隠れてはいけない
+     （縦画面のスマホで、ブランド名とnavlinkに押し出されて画面外に消えていた）。
+     縮んでいいのは他の要素（ブランド名・navlink）のほうにする。 */
+  #envBtnPanel{flex-shrink:0;}
+
+  /* 幅が狭い画面向けに、ブランドの副題・区切り線・navlinkの説明文を削って、
+     メニューの開閉ボタンが必ず収まる余地を作る。実測（320px幅）でこれが無いと
+     ボタンが画面の外（x=450px超）に押し出されて、押すどころか見えもしなかった。 */
+  @media (max-width:600px){
+    #topbar{gap:6px;padding:0 10px;}
+    #topbar .brand span{display:none;}
+    #topbar .sep{display:none;}
+    #topbar a.navlink{padding:6px 9px;}
+    #topbar a.navlink .full{display:none;}
+    #topbar a.navlink .short{display:inline;}
+  }
+  @media (max-width:360px){
+    #topbar a.navlink{display:none;}
+    #envBtnPanel{padding:6px 9px;font-size:11.5px;}
+  }
 
   #envCenter{grid-column:1;grid-row:2;position:relative;background:#000;overflow:hidden;}
   /* 指の操作はこちらで全部受ける。touch-actionを既定のままにしておくと、
@@ -93,6 +114,16 @@
     #right{grid-column:1;grid-row:3;border-left:none;border-top:1px solid var(--line);}
     /* 狭い画面ではメニューが下の段なので、畳むときは行の高さを0にする */
     body.panel-collapsed #app{grid-template-columns:1fr;grid-template-rows:48px 1fr 0;}
+
+    /* メニューが下段の細い帯（40vh）に収まるぶん、文字・余白を詰めて
+       スクロール量を減らす。文字サイズそのものはこれ以上落とすと読みにくいので
+       ほぼ変えず、上下の余白（padding/margin）を主に削る。 */
+    #right .section-title{padding:10px 12px 6px;}
+    .env-group{padding:0 12px 12px;}
+    .env-row{margin-bottom:5px;}
+    .env-group input[type=number], .env-group select{padding:5px 7px;}
+    #envBtnToggleTime, #envBtnReset, #envBtnToggleAirport, #envBtnFocusAirport,
+    #envBtnFly, #envBtnFlightReset, #envBtnCgReset{padding:7px 9px;margin-top:5px;}
   }
 
   /* ミニマップのズーム切り替え */
@@ -244,7 +275,10 @@ body.touch-controls #hudHelp { display:none; }
   <div id="topbar">
     <div class="brand">FLIGHT SIM <span>ENVIRONMENT</span></div>
     <div class="sep"></div>
-    <a class="navlink" href="index.html">← 機体設定（Builder）に戻る</a>
+    <a class="navlink" href="index.html">
+      <span class="full">← 機体設定（Builder）に戻る</span>
+      <span class="short">← Builder</span>
+    </a>
     <div class="spacer"></div>
     <button type="button" id="envBtnPanel" title="右のメニューを開け閉めする">メニューを閉じる</button>
   </div>
