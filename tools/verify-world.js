@@ -270,6 +270,50 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   summary('山らしい高さの山脈', ok, W.WORLD_RANGES.length);
 }
 
+// --- 山脈が「連なり」になっているか ---
+// 山脈は稜線を1本引いて、そこからの距離で高さを決めている。
+// 稜線の上を端から端まで歩いて、高さが途切れていないかを見る。
+// 稜線を引く前は最高点の6割以上の場所が 29〜108個 の孤立した塊に割れていて、
+// 上空から見ても山脈の背骨がどこにも無かった。
+{
+  let connected = 0, hasSummits = 0, worldPeak = 0, worldPeakName = '';
+  const rows = [];
+  for (const r of W.WORLD_RANGES) {
+    const S = 400, hs = [];
+    let len = 0, prev = null;
+    for (let i = 0; i <= S; i++) {
+      const t = -0.85 + (1.70 * i) / S;
+      const p = W.worldRangeCrestAt(r, t);
+      hs.push(W.worldHeightAt(p.x, p.z));
+      if (prev) len += Math.hypot(p.x - prev.x, p.z - prev.z);
+      prev = p;
+    }
+    const peak = Math.max(...hs);
+    if (peak > worldPeak) { worldPeak = peak; worldPeakName = r.name; }
+
+    // 峠＝稜線が最高点の5割を割る区間。海に出るところは山脈の途切れではないので除く
+    let passes = 0, below = false, summits = 0, up = false;
+    for (const h of hs) {
+      if (h > 0 && h < peak * 0.5) { if (!below) passes++; below = true; } else below = false;
+      if (h > peak * 0.85) { if (!up) summits++; up = true; } else up = false;
+    }
+    rows.push(`${r.name} 峠${passes} 峰${summits}`);
+    // 峠だらけなら「連なり」ではなく、ちぎれた山の列
+    if (passes <= 8) connected++;
+    else check(false, `${r.name} の稜線が途切れていない`, `峠が${passes}ヶ所`);
+    if (summits >= 4) hasSummits++;
+    else check(false, `${r.name} に峰がいくつもある`, `${summits}座`);
+  }
+  summary('稜線がつながっている山脈', connected, W.WORLD_RANGES.length);
+  summary('峰がいくつもある山脈', hasSummits, W.WORLD_RANGES.length);
+  console.log(`[  --  ] 稜線: ${rows.join(' / ')}`);
+  console.log(`[  --  ] 世界の最高地点: ${Math.round(worldPeak)}m（${worldPeakName}）`);
+  // js/env/10-flight.js の WORLD_MAX_TERRAIN_M はこれより高くなければならない。
+  // 低いと、当たり判定の足切りで高い山を素通りする。
+  check(worldPeak < 5000, '最高地点が WORLD_MAX_TERRAIN_M(5000m) を超えない',
+    `${Math.round(worldPeak)}m`);
+}
+
 // --- 気候が世界の中で振れているか（一様だと地表が単調になる）---
 {
   let tLo = 1, tHi = 0, dLo = 1, dHi = 0;

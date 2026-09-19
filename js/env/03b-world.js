@@ -116,6 +116,100 @@ function worldPrepEllipse(e) {
   return e;
 }
 
+// --- 山脈の稜線 -------------------------------------------------------------
+//
+// 山脈は「楕円のなかのリッジノイズ」ではなく、**稜線を1本引いて、そこからの距離**で
+// 高さを決める。前の作り方（中心からの距離で減衰させたドームにノイズを掛ける）だと、
+//
+//   ・尾根が 29〜108個 の孤立した塊に割れて、連なりに見えない
+//     （アストラ大山脈で69個。最高点の60%以上の場所を連結成分で数えた実測）
+//   ・細長く定義しても主軸比が 1.5〜2.2 にしかならず、丸く見える
+//   ・長軸の半分まで来ると mask*mask が 0.36 まで落ちるので、端が高くならない
+//
+// という壊れ方をしていた。上空22kmから見ると、稜線のない雪原にでこぼこが
+// 散らばっているだけで、山脈の背骨がどこにも無かった。
+
+// 長軸方向にこの割合までは高さを落とさない（落とすとドームになる）
+const RANGE_END_FLAT = 0.42;
+// 稜線の芯の太さ（短軸半径に対する割合）。ここだけ下支えする。
+// 山脈ぜんぶに下支えを掛けると、稜線ではなく広い高原になって傾斜がむしろ緩くなる
+// （実際に掛けてみたら最大傾斜が 14〜43% から 10〜28% に下がり、
+//   標高1000m超の陸が 10.6% から 26.2% に増えてしまった）。
+const RANGE_CREST_W = 0.30;
+// 芯の下支えの強さ。稜線の低いところだけを持ち上げ、峰と山腹はノイズのまま残す。
+// 0にすると（＝前の式）またノイズだけになって塊に割れる。
+const RANGE_CREST_CORE = 0.62;
+// 稜線の蛇行の大きさ（短軸半径に対する割合）。まっすぐな棒に見せないためのもの
+const RANGE_BEND = 0.26;
+// リッジノイズのサンプル位置をずらす量（ノイズ1周期に対する割合）。
+// 大きくしすぎると稜線が渦を巻いて山脈に見えなくなる。
+const RANGE_WARP = 1.7;
+
+function worldPrepRange(r) {
+  worldPrepEllipse(r);
+  // 長いほうの軸に稜線を沿わせる
+  r._swap = r.rz > r.rx;
+  r._long = r._swap ? r.rz : r.rx;
+  r._half = r._swap ? r.rx : r.rz;
+  const rand = worldRng('range:' + r.nameLatin);
+  r._phase = rand() * Math.PI * 2;
+  // 片側だけ急にする（沈み込み側が急、という実際の山脈の非対称）。
+  // 1.0 で左右対称、大きいほど片側が切り立つ。
+  r._steep = 1.25 + rand() * 0.55;
+  return r;
+}
+
+// 稜線が長軸の中心線からどれだけ横へずれているか（t は -1〜1）。
+// 2つの正弦を重ねて、周期が読めないようにしている。
+function worldRangeBend(r, t) {
+  return r._half * RANGE_BEND
+    * (Math.sin(t * 2.3 + r._phase) + 0.54 * Math.sin(t * 5.1 + r._phase * 1.7));
+}
+
+// 稜線上の点（t は -1〜1 で、長軸の端から端）。検証で稜線を歩くのに使う。
+function worldRangeCrestAt(r, t) {
+  const u = t * r._long, v = worldRangeBend(r, t);
+  const a = r._swap ? v : u, b = r._swap ? u : v;
+  return { x: r.cx + a * r._cos - b * r._sin, z: r.cz + a * r._sin + b * r._cos };
+}
+
+// その地点における1本の山脈の盛り上がり（0〜r.height）
+function worldRangeHeightAt(x, z, r) {
+  const dx = x - r.cx, dz = z - r.cz;
+  let u = dx * r._cos + dz * r._sin;
+  let v = -dx * r._sin + dz * r._cos;
+  if (r._swap) { const t = u; u = v; v = t; }
+
+  const t = u / r._long;
+  if (t <= -1 || t >= 1) return 0;
+
+  // 長軸方向：中ほどは目いっぱいのまま、両端だけ落とす
+  const along = 1 - worldSmooth01((Math.abs(t) - RANGE_END_FLAT) / (1 - RANGE_END_FLAT));
+  if (along <= 0) return 0;
+
+  let off = (v - worldRangeBend(r, t)) / r._half;
+  off *= off > 0 ? r._steep : 1 / r._steep;
+  off = Math.abs(off);
+  if (off >= 1) return 0;
+  const across = 1 - worldSmooth01((off - r.inner) / (1 - r.inner));
+
+  const mask = along * across;
+
+  // リッジノイズをそのまま使うと、稜線が格子に沿って直角に折れた「碁盤の目」になる。
+  // 値ノイズは格子点の双一次補間なので、|2n-1| が0になる線＝稜線が格子の向きに
+  // 揃ってしまうため。サンプル位置自体を別のノイズでずらして（ドメインワープ）、
+  // 格子の向きを崩す。1点あたり値ノイズ2回ぶんの上乗せで済む。
+  const nx = x * r.freq, nz = z * r.freq;
+  const wx = worldValueNoise(nx * 0.45 + 17.3, nz * 0.45 - 8.1) - 0.5;
+  const wz = worldValueNoise(nx * 0.45 - 31.7, nz * 0.45 + 22.9) - 0.5;
+  const ridged = worldRidgedFbm(nx + wx * RANGE_WARP, nz + wz * RANGE_WARP, 6);
+  // 稜線の芯の低いところだけを持ち上げる。峰（ridgedが1に近い所）は動かないので、
+  // 峰の高さと山腹の起伏はそのままに、連なりだけが切れなくなる。
+  const crest = 1 - worldSmooth01(off / RANGE_CREST_W);
+  const shape = ridged + crest * RANGE_CREST_CORE * (1 - ridged);
+  return mask * mask * r.height * shape;
+}
+
 // ============================================================================
 // 2. 空間インデックス
 // 3,000km四方には都市も空港も数百個ある。高さ関数は1フレームに何万回も呼ばれるので、
@@ -481,10 +575,7 @@ function worldBaseHeightAt(x, z) {
   const ranges = _worldRangeGrid ? _worldRangeGrid.at(x, z) : WORLD_RANGES;
   if (ranges) {
     for (let i = 0; i < ranges.length; i++) {
-      const r = ranges[i];
-      const mask = worldEllipseFalloff(x, z, r);
-      if (mask <= 0) continue;
-      const m = mask * mask * worldRidgedFbm(x * r.freq, z * r.freq, 6) * r.height;
+      const m = worldRangeHeightAt(x, z, ranges[i]);
       if (m > mountain) mountain = m;
     }
   }
@@ -781,9 +872,11 @@ const DELTA_STEP_M = 870;
 const DELTA_MAX_STEPS = 14;          // 遠浅すぎて海に出られないときの打ち切り（約12km）
 const DELTA_SPREAD_RAD = 0.70;       // いちばん外の分流が本流から開く角度
 const DELTA_BRANCH_WIDTH = 0.40;     // 分流の幅（本流の河口幅に対する割合）
+const DELTA_BRANCH_DEPTH = 0.50;     // 分流の深さ（河口の掘り下げに対する割合）
 const DELTA_DRIFT_MAX = 0.30;        // 分流が扇形の向きから曲がってよい角度
 const DELTA_BRANCHES = 3;
 const DELTA_DEPOSIT_H = 4;           // 堆積でできる中州の高さ（海面から）
+const DELTA_DEPOSIT_FLAT = 0.45;     // 扇のこの割合までは高さを落とさない
 
 // 経路探索で使う「なだらかにした地形」。
 // 山地の尾根ノイズは1〜3km規模の小さな窪地をいくらでも作るので、
@@ -1155,7 +1248,11 @@ function worldDepositDeltas(x, z, h) {
     // 半径方向と角度方向の両方を、別のノイズで揺らす。
     const wr = 0.80 + 0.32 * worldValueNoise(x * 0.00035 + 40, z * 0.00035 - 17);
     const wa = 0.72 + 0.46 * worldValueNoise(x * 0.00021 - 63, z * 0.00021 + 88);
-    const fr = 1 - worldSmooth01(dist / (d.reach * wr));
+    // 河口のすぐ先から減らしはじめると、分流が短い（すぐ海に出る）三角州で
+    // 中州が水面まで届かない。ターンオル川は分流が2.6kmしかなく、
+    // 中州が海面下0.2mになっていた。内側 DELTA_DEPOSIT_FLAT までは目いっぱい積もらせる。
+    const fr = 1 - worldSmooth01((dist / (d.reach * wr) - DELTA_DEPOSIT_FLAT)
+      / (1 - DELTA_DEPOSIT_FLAT));
     const edge = d.halfAngle * wa;
     const fa = 1 - worldSmooth01((a - edge * 0.55) / (edge * 0.45));
     const target = DELTA_DEPOSIT_H * fr * fa;
@@ -1290,10 +1387,14 @@ function worldBuildDeltaBranches(r) {
       run += DELTA_STEP_M;
       br.push({
         x, z,
-        // 深さは河口のまま。沖ほど深く掘ると谷の斜面が広がって、
-        // 分流のあいだの中州まで海面下へ削ってしまう（0.03の斜面なので
-        // 10m深くすると333m余分に削れる）。
-        bedH: end.bedH,
+        // 分流は本流より浅い。流れが分かれたぶん運ぶ力が落ちて、沖ほど埋まっていく。
+        //
+        // 深さは中州の広さを直接決める。谷の斜面が0.03なので、川床が12m深いと
+        // 水面まで戻るのに水路の縁から400m要る。分流の間隔が狭いところでは
+        // それが足りず、中州が海面下0.2mに沈んでいた（ターンオル川）。
+        // 沖ほど浅くすると、あいだの中州が河口の近くから顔を出す。
+        bedH: end.bedH + (-RIVER_MOUTH_SEA_DEPTH_M * DELTA_BRANCH_DEPTH - end.bedH)
+          * worldSmooth01(run / (DELTA_STEP_M * 2)),
         // 流れが分かれるぶん、1本の幅は本流より細い。
         // ゆっくり細らせると河口のすぐ先で3本が重なって1本の広い水路になり、
         // 中州が出ないので、最初の3分の1で細りきらせる。
@@ -1440,7 +1541,7 @@ function initWorld() {
   if (_worldReady) return;
 
   WORLD_LANDMASSES.forEach(worldPrepEllipse);
-  WORLD_RANGES.forEach(worldPrepEllipse);
+  WORLD_RANGES.forEach(worldPrepRange);
 
   // 大陸と山脈の空間インデックス（3,000km四方を全部走査しないため）
   _worldLandmassGrid = makeWorldGrid(120000);
@@ -1514,5 +1615,6 @@ if (typeof module !== 'undefined' && module.exports) {
     initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt,
     worldTemperatureAt, worldDrynessAt, worldForestDensity, worldWeatherFieldAt, worldLocalReliefAt,
     worldNearestAirport, worldRegionAt, worldCountryById, worldCityById, worldAirportById,
+    worldRangeCrestAt, worldRangeHeightAt,
   };
 }

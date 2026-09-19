@@ -61,6 +61,10 @@ const TERRAIN_SEA_STOPS = [
   { h: -8, c: 0x5c6a4e }, // 汀線
 ];
 
+// 雪が落ちはじめる傾斜と、岩肌になりきるまでの幅
+const SNOW_BARE_SLOPE = 0.14;
+const SNOW_BARE_SPAN = 0.30;
+
 const TERRAIN_C = {
   beach: 0x6b6247,
   grassCold: 0x35402c,     // 寒帯の草地・ツンドラ
@@ -161,7 +165,17 @@ function terrainColorAt(h, slope, jitter, blotch, urban, temp, dry, out) {
     terrainMix(out, _TC.rock, (t - 0.5) * 1.8);
   } else {
     out[0] = _TC.rock[0]; out[1] = _TC.rock[1]; out[2] = _TC.rock[2];
-    terrainMix(out, _TC.snow, (h - snowLine) / 420);
+    // **雪は標高だけでは決まらない。** 急な面には積もらず岩が出る。
+    // 標高だけで塗ると、雪線から420m上はぜんぶ同じ白になり、稜線も谷も画面上で消える
+    // （山脈に稜線を持たせたあと、アストラ大山脈を上空から撮ったら一面の白い毛布だった。
+    //   地形そのものには尾根が出来ているのに、色が一様だと見えない）。
+    // しきい値を下の「急斜面は岩肌」(0.32)より緩い SNOW_BARE_SLOPE にしてあるのは、
+    // 遠景ほど地形メッシュの法線が均されて傾斜が小さく出るから——雪線より上で
+    // 傾斜0.32を超えるのは頂点間隔312mで38%・1250mで15%しかないが、
+    // 0.14なら78%・59%あるので、遠景でも岩が顔を出す。
+    const t = worldClamp((h - snowLine) / 420, 0, 1);
+    const bare = worldSmooth01((slope - SNOW_BARE_SLOPE) / SNOW_BARE_SPAN);
+    terrainMix(out, _TC.snow, t * (1 - bare * 0.9));
   }
 
   // 陸の急斜面は草木も雪も付かないので岩肌へ寄せる
