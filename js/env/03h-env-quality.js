@@ -36,5 +36,6 @@ function applyEnvQuality(tier) {
   if (typeof refreshVegetation === 'function') refreshVegetation(true);
   if (typeof refreshFarForest === 'function') refreshFarForest();
   if (typeof refreshCities === 'function') refreshCities();
+  if (typeof refreshRoads === 'function') refreshRoads();
   if (typeof rebuildClouds === 'function') rebuildClouds();
 }

@@ -9,6 +9,7 @@ function bootstrapEnv() {
     initSky();
     initTerrain();   // 地形と海。以降の都市・空港はこの高さの上に載る
     initWater();     // 川と湖の水面
+    initRoads();     // 街と街・街と空港を結ぶ道路（地形の上に敷くので地形のあと）
     initPlaces();    // 都市と地名ラベル
     initClouds();
     initWeather();   // 雲・霧・光に効くので、雲のあと・UIの前に用意する

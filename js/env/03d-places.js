@@ -14,6 +14,8 @@ function cityActiveRadius() {
   return Math.max(CITY_ACTIVE_RADIUS_BASE * scale, CITY_ACTIVE_RADIUS_MIN);
 }
 const CITY_LIGHT_Y = 14;
+// 街路の舗装を地形メッシュより少しだけ上に浮かせる（深度バイアスだけだと途切れる）
+const CITY_STREET_LIFT_M = 0.8;
 
 // 建物の色。地形と同じく、sRGB出力で持ち上がるぶんを見越して暗めに置く。
 const CITY_BUILDING_COLORS = [0x43413c, 0x4b4740, 0x3f4247, 0x504a43, 0x3a3d41];
@@ -65,19 +67,44 @@ function initPlaces() {
   EnvState.scene.add(EnvState.cityGroup);
   EnvState.builtCities = new Map();
 
+  // 街路の舗装。街どうしで共有する（都市の出し入れのたびに作り直さない）。
+  EnvState.streetMaterial = new THREE.MeshLambertMaterial({ color: 0x35322e });
+  EnvState.streetMaterial.polygonOffset = true;
+  EnvState.streetMaterial.polygonOffsetFactor = -5;
+  EnvState.streetMaterial.polygonOffsetUnits = -5;
+
   initPlaceLabels();
   refreshCities();
 }
 
-// カメラの周りにあるべき都市を揃える
+// 1フレームに建てる街の数。1都市ぶんの生成に30〜42msかかる（建物3.7万頂点＋
+// 街路7,800頂点）ので、圏内に入った街をその場で全部建てると、街に近づくたびに
+// 100ms超の引っかかりが出る。地形タイルと同じくキューに積んでフレームを分ける。
+const CITY_BUILD_BUDGET = 1;
+let _cityWork = [];
+
+// カメラの周りにあるべき都市を揃える。片付けはその場で、建てるのはキューへ。
 function refreshCities() {
   if (!EnvState.builtCities) return; // 地形の初期化のほうが先に走るため
   const cam = EnvState.camera.position;
+  const R = cityActiveRadius();
+  _cityWork = [];
   for (const city of WORLD_CITIES) {
-    const near = Math.hypot(city.x - cam.x, city.z - cam.z) < cityActiveRadius();
+    const d = Math.hypot(city.x - cam.x, city.z - cam.z);
     const built = EnvState.builtCities.has(city.id);
-    if (near && !built) buildCityInstance(city);
-    else if (!near && built) disposeCityInstance(city.id);
+    if (d < R && !built) _cityWork.push({ city, d });
+    else if (d >= R && built) disposeCityInstance(city.id);
+  }
+  // 近い街から建てる（見ている場所ほど早く出てほしい）
+  _cityWork.sort((a, b) => a.d - b.d);
+}
+
+function updateCities() {
+  let budget = CITY_BUILD_BUDGET;
+  while (budget > 0 && _cityWork.length > 0) {
+    const w = _cityWork.shift();
+    if (!EnvState.builtCities.has(w.city.id)) buildCityInstance(w.city);
+    budget--;
   }
 }
 
@@ -90,6 +117,10 @@ function disposeCityInstance(id) {
   entry.buildings.material.dispose();
   entry.lights.geometry.dispose();
   entry.lights.material.dispose();
+  if (entry.streets) {
+    EnvState.cityGroup.remove(entry.streets);
+    entry.streets.geometry.dispose();   // マテリアルは街で共有しているので dispose しない
+  }
   EnvState.builtCities.delete(id);
 }
 
@@ -98,27 +129,46 @@ function disposeCityInstance(id) {
 function buildCityInstance(city) {
   const rand = placesRng(city.id);
   const radius = city.builtRadiusM;
-  const buildingCount = Math.round(90 + city.size * 430);
+  // 街区に収まるようになったぶん、軒数を増やす。以前（90+size*430＝167〜520軒）は
+  // 半径3.5kmの街に230軒で、上空から見ると点が散らばっているだけだった。
+  const buildingCount = Math.round(240 + city.size * 1100);
 
   const positions = [], normals = [], colors = [];
   const lightPositions = [], lightColors = [];
+
+  const cosA = Math.cos(city.streetAngle), sinA = Math.sin(city.streetAngle);
 
   for (let i = 0; i < buildingCount; i++) {
     // 中心ほど密になるよう、半径方向の分布に偏りを付ける
     const t = Math.pow(rand(), 0.65);
     const ang = rand() * Math.PI * 2;
     const dist = t * radius;
-    const ox = Math.cos(ang) * dist, oz = Math.sin(ang) * dist;
+
+    // 中心に近いほど高層になる
+    const h = (7 + rand() * 22) * (0.6 + city.size * 1.5) * (0.45 + (1 - t) * 1.5);
+    const fw = 11 + rand() * 26, fd = 11 + rand() * 26;
+
+    // **街区の中へ寄せる。** 街路の上に来たものを弾く作りにすると、
+    // 建物の間口（最大37m）ぶんの余白まで要るので街区の半分近くが使えなくなり、
+    // 1都市あたりの建物が230軒から124軒まで減ってしまう。
+    // 弾くのではなく、はみ出したぶんを街区の内側へ押し込む。
+    // 街路の位置の決め方は世界側の worldCityStreetDist と同じ（街路は blockM の倍数）。
+    const clear = CITY_STREET_HALF_W_M + CITY_STREET_CLEAR_M + Math.max(fw, fd) * 0.5;
+    const block = city.blockM;
+    const half = block * 0.5 - clear;
+    if (half <= 0) continue;
+    let u = Math.cos(ang) * dist * cosA + Math.sin(ang) * dist * sinA;
+    let v = -Math.cos(ang) * dist * sinA + Math.sin(ang) * dist * cosA;
+    const cu = (Math.floor(u / block) + 0.5) * block, cv = (Math.floor(v / block) + 0.5) * block;
+    u = cu + worldClamp(u - cu, -half, half);
+    v = cv + worldClamp(v - cv, -half, half);
+    const ox = u * cosA - v * sinA, oz = u * sinA + v * cosA;
 
     // 地形メッシュの上の高さを使う。worldHeightAt の値だと、
     // 地形が格子点の間を三角形で結んでいるぶんだけ建物が浮いたり埋まったりする。
     const ground = terrainSurfaceHeightAt(city.x + ox, city.z + oz);
     if (ground <= 0.5) continue; // 海にはみ出したぶんは建てない
     const localY = ground - city.groundY;
-
-    // 中心に近いほど高層になる
-    const h = (7 + rand() * 22) * (0.6 + city.size * 1.5) * (0.45 + (1 - t) * 1.5);
-    const fw = 11 + rand() * 26, fd = 11 + rand() * 26;
 
     const hex = CITY_BUILDING_COLORS[(rand() * CITY_BUILDING_COLORS.length) | 0];
     const r = ((hex >> 16) & 255) / 255, g = ((hex >> 8) & 255) / 255, b = (hex & 255) / 255;
@@ -144,6 +194,10 @@ function buildCityInstance(city) {
     lightPositions.push(ox, ground - city.groundY + CITY_LIGHT_Y, oz);
     lightColors.push(warm, warm * 0.62, warm * 0.3);
   }
+
+  // 街路の舗装。建物と同じメッシュに混ぜてしまうと、夜に建物だけ発光させる
+  // （updatePlacesForDaylight）ときに舗装まで光ってしまうので、別のメッシュにする。
+  const streets = buildCityStreets(city);
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
@@ -174,7 +228,85 @@ function buildCityInstance(city) {
   lights.updateMatrix();
   EnvState.cityGroup.add(lights);
 
-  EnvState.builtCities.set(city.id, { city, buildings, lights });
+  if (streets) {
+    streets.position.copy(buildings.position);
+    streets.matrixAutoUpdate = false;
+    streets.updateMatrix();
+    EnvState.cityGroup.add(streets);
+  }
+
+  EnvState.builtCities.set(city.id, { city, buildings, lights, streets });
+}
+
+// 街路の舗装。碁盤の目の線を市街地の円で切って、地形の上に帯として敷く。
+//
+// 街路の位置は世界側の worldCityStreetDist と同じ決め方（blockM の倍数）。
+// 建物を建てない判定もそこを見ているので、舗装と建物がずれることはない。
+//
+// 地形は刻まない——街路の幅は14mで、いちばん細かいLODでも地形の頂点間隔は312m。
+// 道路（03i-roads.js）と同じくデカールとして重ねる。
+function buildCityStreets(city) {
+  const R = city.builtRadiusM;
+  const b = city.blockM;
+  const w = CITY_STREET_HALF_W_M;
+  const cosA = Math.cos(city.streetAngle), sinA = Math.sin(city.streetAngle);
+  const kMax = Math.floor(R / b);
+
+  const positions = [], normals = [], indices = [];
+  let vi = 0;
+
+  // 帯を地形なりに置くため、線に沿って刻んで高さを拾う
+  const STEP = 90;
+  // 街路の端をきれいな円で切ると、上空から見て街の輪郭がコンパスで描いた円になる。
+  // 線ごとに長さをばらつかせて、外周をぎざぎざにする。
+  const erand = placesRng('edge:' + city.id);
+  const addStrip = (alongU) => {
+    for (let k = -kMax; k <= kMax; k++) {
+      const off = k * b;
+      // 円で切る。線の中心からの弦の半分
+      const rk = R * (0.80 + 0.20 * erand());
+      const halfChord = Math.sqrt(Math.max(0, rk * rk - off * off))
+        * (0.82 + 0.18 * erand());
+      if (halfChord < STEP) continue;
+      const n = Math.max(2, Math.round((2 * halfChord) / STEP));
+      const first = vi;
+      for (let i = 0; i <= n; i++) {
+        const t = -halfChord + (2 * halfChord * i) / n;
+        // alongU: 線が u 方向に走る（横は v 方向）
+        const u = alongU ? t : off;
+        const v = alongU ? off : t;
+        const ox = u * cosA - v * sinA, oz = u * sinA + v * cosA;
+        // 幅方向の単位ベクトル
+        const px = alongU ? -sinA : cosA, pz = alongU ? cosA : sinA;
+        const y = terrainSurfaceHeightAt(city.x + ox, city.z + oz) - city.groundY + CITY_STREET_LIFT_M;
+        positions.push(ox + px * w, y, oz + pz * w);
+        positions.push(ox - px * w, y, oz - pz * w);
+        normals.push(0, 1, 0, 0, 1, 0);
+        vi += 2;
+      }
+      // **巻き順は向きで入れ替える。** u方向とv方向では「進む向き×幅の向き」の
+      // 手前・奥が逆になるので、同じ順で三角形を張ると片方が裏を向いて
+      // 背面カリングで消える（実際、碁盤の目が一方向の縞にしか見えなかった）。
+      for (let i = 0; i < n; i++) {
+        const a = first + i * 2, c = a + 1, d = a + 2, e = a + 3;
+        if (alongU) indices.push(a, d, c, c, d, e);
+        else indices.push(a, c, d, c, e, d);
+      }
+    }
+  };
+  addStrip(true);
+  addStrip(false);
+  if (!indices.length) return null;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(normals), 3));
+  geo.setIndex(indices.length > 65000
+    ? new THREE.BufferAttribute(new Uint32Array(indices), 1)
+    : new THREE.BufferAttribute(new Uint16Array(indices), 1));
+  geo.computeBoundingSphere();
+
+  return new THREE.Mesh(geo, EnvState.streetMaterial);
 }
 
 // 夜になったら街の灯りを点ける（03-sky.js から dayFactor を受け取る）

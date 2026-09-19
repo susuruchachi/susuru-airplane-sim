@@ -458,7 +458,13 @@ function updateTerrain() {
 //
 // 木も建物も、いちばん細かいLODで描かれる距離でしか見えないので、常にその分割数で計算する。
 function terrainSurfaceHeightAt(x, z) {
-  const seg = TERRAIN_LOD_STEPS[0].segments;
+  return terrainSurfaceHeightAtLod(x, z, TERRAIN_LOD_STEPS[0].segments);
+}
+
+// 分割数を指定できる版。**道路のように何十kmも先まで伸びるもの**は、
+// いちばん細かいLODで高さを取ると、遠くで地形メッシュが粗くなったぶんだけ
+// 浮いたり沈んだりする（尾根と谷で数十m）。その場所のLODに合わせて取る。
+function terrainSurfaceHeightAtLod(x, z, seg) {
   const step = TERRAIN_TILE_SIZE / seg;
   const ox = Math.floor(x / step) * step;
   const oz = Math.floor(z / step) * step;

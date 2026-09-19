@@ -229,6 +229,79 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   summary('中州と分流のある三角州', shaped, delta);
 }
 
+// --- 道路 ---
+// 街と街・街と空港を結ぶ。傾斜と水にコストを付けたA*で引いているので、
+// 「直線で結んだ場合より坂が緩い」ことと「海の上を走っていない」ことを見る。
+{
+  console.log(`\n道路 ${W.WORLD_ROADS.length} 本`);
+
+  function profile(pts) {
+    let maxSlope = 0, climb = 0, len = 0, sea = 0, run = 0, longestSea = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      const d = Math.hypot(b.x - a.x, b.z - a.z);
+      if (d < 1) continue;
+      const ha = W.worldHeightAt(a.x, a.z), hb = W.worldHeightAt(b.x, b.z);
+      const s = Math.abs(hb - ha) / d;
+      if (s > maxSlope) maxSlope = s;
+      if (hb > ha) climb += hb - ha;
+      if (hb <= 0) { sea += d; run += d; if (run > longestSea) longestSea = run; } else run = 0;
+      len += d;
+    }
+    return { maxSlope, climb, len, sea, longestSea };
+  }
+
+  let onLand = 0, gentler = 0, totalLen = 0, straightLen = 0;
+  const slopes = [], straightSlopes = [];
+  for (const r of W.WORLD_ROADS) {
+    const p = profile(r.points);
+    totalLen += p.len;
+    slopes.push(p.maxSlope);
+
+    // 海の上を延々と走る道は「橋」ではなく航路。引いてはいけない
+    if (p.longestSea <= 2600) onLand++;
+    else check(false, `${r.id} が海を渡っていない`, `連続 ${Math.round(p.longestSea)}m`);
+
+    // 同じ端点を直線で結んだ場合と比べる
+    const a = r.points[0], b = r.points[r.points.length - 1];
+    const n = Math.max(2, Math.round(Math.hypot(b.x - a.x, b.z - a.z) / 500));
+    const line = [];
+    for (let i = 0; i <= n; i++) {
+      line.push({ x: a.x + (b.x - a.x) * i / n, z: a.z + (b.z - a.z) * i / n });
+    }
+    const q = profile(line);
+    straightLen += q.len;
+    straightSlopes.push(q.maxSlope);
+    if (p.maxSlope <= q.maxSlope + 0.02) gentler++;
+  }
+  summary('海を渡っていない道路', onLand, W.WORLD_ROADS.length);
+  summary('直線より坂が緩い道路', gentler, W.WORLD_ROADS.length);
+
+  const pct = (v, f) => { const s = v.slice().sort((a, b) => a - b); return s[(s.length * f) | 0]; };
+  console.log(`[  --  ] 最大傾斜の9割点: 探索した道 ${pct(slopes, 0.9).toFixed(2)} / 直線 ${pct(straightSlopes, 0.9).toFixed(2)}`);
+  console.log(`[  --  ] 総延長 ${Math.round(totalLen / 1000).toLocaleString()}km（直線なら ${Math.round(straightLen / 1000).toLocaleString()}km ＝ 遠回り ${((totalLen / straightLen - 1) * 100).toFixed(0)}%）`);
+
+  const kinds = {};
+  for (const r of W.WORLD_ROADS) kinds[r.kind] = (kinds[r.kind] || 0) + 1;
+  console.log(`[  --  ] 内訳: 幹線${kinds.trunk || 0} 空港への支線${kinds.spur || 0}`);
+
+  // 街が道路網につながっているか（島の街はつながらなくてよい）
+  let linked = 0;
+  for (const c of W.WORLD_CITIES) {
+    let hit = false;
+    for (const r of W.WORLD_ROADS) {
+      for (const p of [r.points[0], r.points[r.points.length - 1]]) {
+        if (Math.hypot(p.x - c.x, p.z - c.z) < 800) { hit = true; break; }
+      }
+      if (hit) break;
+    }
+    if (hit) linked++;
+  }
+  console.log(`[  --  ] 道路につながっている都市: ${linked}/${W.WORLD_CITIES.length}`);
+  check(linked >= W.WORLD_CITIES.length * 0.9, '大半の都市が道路でつながっている',
+    `${linked}/${W.WORLD_CITIES.length}`);
+}
+
 // --- 湖 ---
 {
   let deep = 0, clear = 0;

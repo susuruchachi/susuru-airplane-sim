@@ -407,6 +407,27 @@ let _worldDeltaGrid = null;
 const CITY_BUILT_RADIUS_MIN_M = 700;
 const CITY_BUILT_RADIUS_MAX_M = 3800;
 
+// 街路の碁盤の目。街区の一辺と、街路そのものの半幅。
+// 街区を小さくしすぎると、建物1個より街路のほうが太くなって「舗装の海」になる。
+// 建物の間口が11〜37mなので、街区は1辺に数軒が並ぶ大きさにする。
+const CITY_BLOCK_MIN_M = 150;
+const CITY_BLOCK_MAX_M = 230;
+const CITY_STREET_HALF_W_M = 7;
+// 建物を街路から離す余白。0だと建物の角が舗装にかぶって街路が途切れて見える。
+const CITY_STREET_CLEAR_M = 4;
+
+// 街の中心からの相対位置 (ox,oz) が、いちばん近い街路の中心線からどれだけ離れているか。
+// 建物を街路に建てないためと、街路の帯を描くために使う——**同じ式を両方が見る**ので、
+// 建物と舗装がずれない。
+function worldCityStreetDist(city, ox, oz) {
+  const c = Math.cos(city.streetAngle), s = Math.sin(city.streetAngle);
+  const u = ox * c + oz * s, v = -ox * s + oz * c;
+  const b = city.blockM;
+  const du = Math.abs(u - Math.round(u / b) * b);
+  const dv = Math.abs(v - Math.round(v / b) * b);
+  return du < dv ? du : dv;
+}
+
 // 街の下の地形をゆるく均す強さ。1.0だと完全な平面になって不自然なので、
 // 元の起伏を1割残す。空港（完全に平ら）と違い、街は多少の起伏があってよい。
 const CITY_FLATTEN_STRENGTH = 0.90;
@@ -713,8 +734,13 @@ function worldGenerateCities() {
       if (tooClose) continue;
 
       const nm = worldMakePlaceName(country.nameStyle, rand, usedNames);
+      const id = country.id + '-' + nm.nameLatin.toLowerCase().replace(/\s+/g, '');
+      // 街路の向きと街区の大きさは、**街の名前から引いた別の乱数**で決める。
+      // 配置用の rand() をここで消費すると、以降の街の位置がぜんぶずれる
+      // （実際にずらしてしまい、ステンハイムが標高差270mの斜面に乗って検証が落ちた）。
+      const srand = worldRng('street:' + id);
       const city = {
-        id: country.id + '-' + nm.nameLatin.toLowerCase().replace(/\s+/g, ''),
+        id,
         name: nm.name, nameLatin: nm.nameLatin,
         country: country.id,
         x, z, size, capital: isCapital,
@@ -723,6 +749,10 @@ function worldGenerateCities() {
         flatInnerR: builtR * 1.15,
         flatOuterR: builtR * 1.15 * 2.4,
         groundY: 0,
+        // 街路の碁盤の目の向きと街区の大きさ。街ごとに変える。
+        // 全部が同じ向きだと、上空から見たときに世界中の街が同じ判子に見える。
+        streetAngle: srand() * Math.PI * 0.5,
+        blockM: CITY_BLOCK_MIN_M + srand() * (CITY_BLOCK_MAX_M - CITY_BLOCK_MIN_M),
       };
       placed.push(city);
       WORLD_CITIES.push(city);
@@ -1414,6 +1444,249 @@ function worldBuildDeltaBranches(r) {
   return out;
 }
 
+// ============================================================================
+// 道路
+// 街と街、街と空港を結ぶ。
+//
+// 直線で結ぶと山も川も突っ切る。実際の道路は谷を選んで登り坂を避けるので、
+// 傾斜と水にコストを付けた経路探索（A*）で引く。
+// 地形は刻まない——道路の幅は26mで、いちばん細かいLODでも頂点間隔が312mある。
+// 刻んでも再現できないので、地形メッシュの上に帯を敷く（滑走路の路面標識と同じ扱い）。
+// ============================================================================
+
+const WORLD_ROADS = [];
+
+const ROAD_CELL_M = 3500;           // 経路探索の格子
+const ROAD_CORRIDOR_FRAC = 0.40;    // 直線からどれだけ外へ出てよいか（距離に対する割合）
+const ROAD_CORRIDOR_MIN_M = 17500;
+// 傾斜1.0（45°）の道は、平地の何倍の「長さ」とみなすか。
+// 大きいほど遠回りしてでも谷を選ぶ。
+const ROAD_SLOPE_COST = 26;
+// 水の上を通るときの倍率（＝橋）。渡らせないのではなく、なるべく短く渡らせる。
+const ROAD_WATER_COST = 5;
+const ROAD_MAX_LINK_M = 260000;     // これより遠い街どうしは結ばない
+// 橋で渡せる長さの上限。これを超えて海の上を連続するなら、道ではなく航路。
+const ROAD_MAX_SEA_M = 2500;
+const ROAD_HALF_WIDTH_M = 13;
+const ROAD_SPUR_HALF_WIDTH_M = 9;   // 空港へ行く支線は細い
+
+// 2点を結ぶ道の経路を探す。見つからなければ null。
+//
+// 世界ぜんぶを格子にすると3,000km四方ぶんの高さを取ることになるので、
+// 「2点を結ぶ直線のまわりの帯（回廊）」だけを格子にして、そこから出さない。
+// 回廊の幅は距離に比例させる——短い道は大きく迂回しないし、
+// 長い道は山脈をよけるだけの余地が要る。
+function worldRouteRoad(ax, az, bx, bz) {
+  const dx = bx - ax, dz = bz - az;
+  const L = Math.hypot(dx, dz);
+  if (L < ROAD_CELL_M) return null;
+
+  const ux = dx / L, uz = dz / L;      // 進行方向
+  const px = -uz, pz = ux;             // 横方向
+  const halfW = Math.max(ROAD_CORRIDOR_MIN_M, L * ROAD_CORRIDOR_FRAC);
+  const nU = Math.max(2, Math.round(L / ROAD_CELL_M));
+  const nV = Math.max(1, Math.round(halfW / ROAD_CELL_M));
+  const stepU = L / nU, stepV = ROAD_CELL_M;
+  const cols = nU + 1, rows = 2 * nV + 1;
+
+  const at = (i, j) => i * rows + (j + nV);
+  const posX = (i, j) => ax + ux * (i * stepU) + px * (j * stepV);
+  const posZ = (i, j) => az + uz * (i * stepU) + pz * (j * stepV);
+
+  // 高さと「水かどうか」を先に全部取る（A*の中で取ると同じ点を何度も測る）
+  const h = new Float64Array(cols * rows);
+  const wet = new Uint8Array(cols * rows);
+  for (let i = 0; i <= nU; i++) {
+    for (let j = -nV; j <= nV; j++) {
+      const x = posX(i, j), z = posZ(i, j);
+      const k = at(i, j);
+      const hh = worldHeightAt(x, z);
+      h[k] = hh;
+      // 格子の目は3.5kmあるので、幅300mの川は**点で測ると素通りしてしまう**。
+      // 実測で、水の上を通る距離の9割点が直線の501mに対し探索した道は878mと、
+      // 避けるどころか増えていた。格子点のまわりも見て、川を格子1つぶんの
+      // 太さの障害物として扱う。ここは worldWaterSurfaceAt（格子引き）だけなので安い。
+      let w = (hh <= 0 || worldWaterSurfaceAt(x, z) !== null) ? 1 : 0;
+      if (!w) {
+        const o = ROAD_CELL_M * 0.4;
+        w = (worldWaterSurfaceAt(x + o, z) !== null || worldWaterSurfaceAt(x - o, z) !== null
+          || worldWaterSurfaceAt(x, z + o) !== null || worldWaterSurfaceAt(x, z - o) !== null) ? 1 : 0;
+      }
+      wet[k] = w;
+    }
+  }
+
+  // A*。始点は (0,0)、終点は (nU,0)——街の中心そのものは動かせない。
+  const g = new Float64Array(cols * rows).fill(Infinity);
+  const from = new Int32Array(cols * rows).fill(-1);
+  const done = new Uint8Array(cols * rows);
+  const start = at(0, 0), goal = at(nU, 0);
+  g[start] = 0;
+
+  // 開いている点は少ない（せいぜい数千）ので、優先度付きキューではなく
+  // 「未確定のうち f がいちばん小さいもの」を線形に探す。
+  // 格子は 30×25 程度なので、これで十分速い。
+  const open = [start];
+  const fOf = (k) => g[k] + Math.abs(nU - ((k / rows) | 0)) * stepU;
+
+  while (open.length) {
+    let bi = 0;
+    for (let t = 1; t < open.length; t++) if (fOf(open[t]) < fOf(open[bi])) bi = t;
+    const cur = open[bi];
+    open[bi] = open[open.length - 1];
+    open.pop();
+    if (cur === goal) break;
+    if (done[cur]) continue;
+    done[cur] = 1;
+
+    const ci = (cur / rows) | 0, cj = (cur % rows) - nV;
+    for (let di = -1; di <= 1; di++) {
+      for (let dj = -1; dj <= 1; dj++) {
+        if (di === 0 && dj === 0) continue;
+        const ni = ci + di, nj = cj + dj;
+        if (ni < 0 || ni > nU || nj < -nV || nj > nV) continue;
+        const nk = at(ni, nj);
+        if (done[nk]) continue;
+
+        const segX = di * stepU * ux + dj * stepV * px;
+        const segZ = di * stepU * uz + dj * stepV * pz;
+        const seg = Math.hypot(segX, segZ);
+        const slope = Math.abs(h[nk] - h[cur]) / seg;
+        let cost = seg * (1 + slope * ROAD_SLOPE_COST);
+        if (wet[nk] || wet[cur]) cost *= ROAD_WATER_COST;
+
+        const ng = g[cur] + cost;
+        if (ng < g[nk]) { g[nk] = ng; from[nk] = cur; open.push(nk); }
+      }
+    }
+  }
+
+  if (from[goal] < 0 && goal !== start) return null;
+
+  const cells = [];
+  for (let k = goal; k >= 0; k = from[k]) {
+    cells.push(k);
+    if (k === start) break;
+  }
+  cells.reverse();
+  if (cells[0] !== start) return null;
+
+  const raw = cells.map((k) => {
+    const i = (k / rows) | 0, j = (k % rows) - nV;
+    return { x: posX(i, j), z: posZ(i, j) };
+  });
+  // 8方向の折れ線なので角を落とす（川と同じ Chaikin）
+  return worldChaikinPath(raw, 2);
+}
+
+function worldAddRoad(id, ax, az, bx, bz, halfWidth, kind) {
+  const pts = worldRouteRoad(ax, az, bx, bz);
+  if (!pts || pts.length < 2) return null;
+
+  // **海をまたぐ道は引かない。** 全域木は陸か海かを見ずに街を結ぶので、
+  // 島がいくつもある国（セラフィナ諸島など）では海の上に道ができる。
+  // 実測で 156km・117km・111km を海の上で渡る道があった。
+  // 川を渡る橋（世界ぜんぶで18km）は残したいので、連続して水の上にいる距離で切る。
+  let len = 0, run = 0, longestRun = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const d = Math.hypot(b.x - a.x, b.z - a.z);
+    len += d;
+    if (worldHeightAt(b.x, b.z) <= 0) {
+      run += d;
+      if (run > longestRun) longestRun = run;
+    } else run = 0;
+  }
+  if (longestRun > ROAD_MAX_SEA_M) return null;
+
+  const road = { id, points: pts, lengthM: len, halfWidth, kind, longestSeaM: longestRun };
+  WORLD_ROADS.push(road);
+  return road;
+}
+
+function worldGenerateRoads() {
+  WORLD_ROADS.length = 0;
+
+  for (const country of WORLD_COUNTRIES) {
+    const cities = WORLD_CITIES.filter((c) => c.country === country.id);
+    if (cities.length < 2) continue;
+
+    // 1) 最小全域木（プリム法）で、まず国内の街をひとつながりにする＝幹線。
+    //    「近い順に何本か引く」だと孤立した街が残るが、全域木なら必ず全部つながる。
+    const inTree = new Array(cities.length).fill(false);
+    inTree[0] = true;
+    const edges = [];
+    for (let n = 1; n < cities.length; n++) {
+      let bd = Infinity, ba = -1, bb = -1;
+      for (let a = 0; a < cities.length; a++) {
+        if (!inTree[a]) continue;
+        for (let b = 0; b < cities.length; b++) {
+          if (inTree[b]) continue;
+          const d = Math.hypot(cities[a].x - cities[b].x, cities[a].z - cities[b].z);
+          if (d < bd) { bd = d; ba = a; bb = b; }
+        }
+      }
+      if (bb < 0) break;
+      inTree[bb] = true;
+      if (bd <= ROAD_MAX_LINK_M) edges.push([ba, bb]);
+    }
+
+    // 2) 木のままだと必ず行き止まりの枝分かれになって、上空から「網」に見えない。
+    //    近いのに木の上では遠回りになる組を足して、環を作る。
+    const adj = cities.map(() => []);
+    for (const [a, b] of edges) { adj[a].push(b); adj[b].push(a); }
+    const extra = [];
+    for (let a = 0; a < cities.length; a++) {
+      for (let b = a + 1; b < cities.length; b++) {
+        if (adj[a].indexOf(b) >= 0) continue;
+        const d = Math.hypot(cities[a].x - cities[b].x, cities[a].z - cities[b].z);
+        if (d > ROAD_MAX_LINK_M * 0.5) continue;
+        // 木をたどった距離が直線の2.2倍を超えるなら、近道を1本引く価値がある
+        const hops = worldGraphDistance(cities, adj, a, b);
+        if (hops > d * 2.2) extra.push([a, b, d]);
+      }
+    }
+    extra.sort((p, q) => p[2] - q[2]);
+    for (const [a, b] of extra.slice(0, Math.max(1, Math.round(cities.length * 0.25)))) {
+      edges.push([a, b]);
+      adj[a].push(b); adj[b].push(a);
+    }
+
+    for (const [a, b] of edges) {
+      const ca = cities[a], cb = cities[b];
+      worldAddRoad('road-' + ca.id + '-' + cb.id, ca.x, ca.z, cb.x, cb.z,
+        ROAD_HALF_WIDTH_M, 'trunk');
+    }
+  }
+
+  // 3) 空港はどれも街から13〜33km離れているので、親の街から支線を引く
+  for (const a of WORLD_AIRPORTS) {
+    const c = worldCityById(a.city);
+    if (!c) continue;
+    worldAddRoad('road-' + a.id, c.x, c.z, a.x, a.z, ROAD_SPUR_HALF_WIDTH_M, 'spur');
+  }
+}
+
+// 木の上での2点間の距離（辺の長さの合計）。近道を足すかどうかの判断に使う。
+function worldGraphDistance(cities, adj, from, to) {
+  const dist = new Array(cities.length).fill(Infinity);
+  dist[from] = 0;
+  const seen = new Array(cities.length).fill(false);
+  for (;;) {
+    let cur = -1, best = Infinity;
+    for (let i = 0; i < cities.length; i++) {
+      if (!seen[i] && dist[i] < best) { best = dist[i]; cur = i; }
+    }
+    if (cur < 0 || cur === to) break;
+    seen[cur] = true;
+    for (const n of adj[cur]) {
+      const d = dist[cur] + Math.hypot(cities[cur].x - cities[n].x, cities[cur].z - cities[n].z);
+      if (d < dist[n]) dist[n] = d;
+    }
+  }
+  return dist[to];
+}
+
 function worldNearestCountryId(x, z) {
   let best = null, bestD = Infinity;
   for (const c of WORLD_COUNTRIES) {
@@ -1600,6 +1873,10 @@ function initWorld() {
   for (const a of WORLD_AIRPORTS) _worldAirportGrid.insert(a.x, a.z, a.flatOuterR, a);
   _worldAirportsReady = true;
 
+  // 10) 道路。**いちばん最後**に引く。経路は「出来上がった地形」の上で探さないと、
+  //     川の谷も空港の平地も見えないまま山と川を突っ切る道になる。
+  worldGenerateRoads();
+
   _worldReady = true;
 }
 
@@ -1609,12 +1886,14 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     WORLD_SEED, WORLD_SIZE, WORLD_HALF,
     WORLD_LANDMASSES, WORLD_RANGES, WORLD_COUNTRIES, WORLD_CITIES, WORLD_AIRPORTS,
-    WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, worldLakeAt, worldRiverAt, worldWaterSurfaceAt,
+    WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, WORLD_ROADS,
+    worldLakeAt, worldRiverAt, worldWaterSurfaceAt,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
     worldClamp, worldSmooth01, worldValueNoise, worldFbm,
     initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt,
     worldTemperatureAt, worldDrynessAt, worldForestDensity, worldWeatherFieldAt, worldLocalReliefAt,
     worldNearestAirport, worldRegionAt, worldCountryById, worldCityById, worldAirportById,
-    worldRangeCrestAt, worldRangeHeightAt,
+    worldRangeCrestAt, worldRangeHeightAt, worldCityStreetDist,
+    CITY_STREET_HALF_W_M, CITY_STREET_CLEAR_M,
   };
 }

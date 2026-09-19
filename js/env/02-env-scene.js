@@ -61,6 +61,8 @@ function animateEnv() {
   updateTerrain();      // カメラが動いたぶんだけ地形タイルのLODを入れ替える
   updateVegetation();
   updateFarForest();    // 遠くの森（木立の塊）。木より広い範囲を受け持つ
+  updateRoads();        // 道路。間引きがカメラ距離で決まるので近づいたら作り直す
+  updateCities();       // 街は1フレームに1つずつ建てる（1つで30〜42msかかる）
   updateSea(dt);
   updateClouds(dt);
   updateWindsock();
