@@ -1,7 +1,7 @@
 // 01-state.js — アプリ全体のグローバル状態
 // 番号プレフィックス方式：全モジュールはグローバルスコープを共有する
-
-const APP_VERSION = 'v13';
+//
+// 全体のバージョン名（APP_VERSION）は js/00-version.js にある。
 
 const State = {
   // Three.js 中枢
@@ -24,6 +24,9 @@ const State = {
     maxSpeedValue: 250,      // 最高速度の数値（単位はmaxSpeedUnitに従う）
     maxSpeedUnit: 'kt',      // 'kt'（ノット） | 'mach'（マッハ）
     meshOffset: { x: 0, y: 0, z: 0 }, // 「原点を中心に揃える」で機体本体をずらした累計量（保存・復元用）
+    // GLBのボーンで動く舵面の回転軸の手動指定。キー＝ボーン名、値＝'x'|'y'|'z'。
+    // 無ければ自動判定（09c-aircraft-bones.jsが試し回転で決める）に任せる
+    boneAxisOverrides: {},
   },
 
   // パーツ定義一覧
@@ -56,6 +59,7 @@ const PART_TYPE_LABELS = {
   control_surface: '可動翼面',
   light: '航行灯',
   landing_gear: '着陸脚',
+  viewpoint: 'コックピット視点',
 };
 
 const PART_TYPE_COLORS = {
@@ -64,6 +68,7 @@ const PART_TYPE_COLORS = {
   control_surface: '#4fd18b',
   light: '#e0e0ff',
   landing_gear: '#c8ccd2',
+  viewpoint: '#ffd84f',
 };
 
 // 翼パーツの役割（主翼／水平尾翼／垂直尾翼）
@@ -106,6 +111,25 @@ const LIGHT_KINDS = [
   { value: 'strobe', label: 'ストロボ（白）', color: '#ffffff', blink: 'strobe' },
   { value: 'landing', label: '着陸灯（白）', color: '#fff6dd', blink: 'steady' },
 ];
+
+// 着陸灯が照らす光の既定値。
+// 伏せ角は「まっすぐ前」から何度下を向くか（実機の着陸灯もこのくらい）。
+// 広がりは半角（＝光の円錐の半分の角度）、届く距離は光の筋の長さの上限。
+// パーツの回転はこれに**上乗せ**される（左右へ振る・さらに下げる、など）。
+// 飛行側で同じ既定値を持っている（js/env/09b-aircraft-visual.js の LANDING_BEAM_*）。
+const LANDING_BEAM_DEFAULT = { downDeg: 11, spreadDeg: 9, rangeM: 600 };
+function lightBeamDownDeg(props) {
+  const v = props && props.beamDownDeg;
+  return (typeof v === 'number' && isFinite(v)) ? v : LANDING_BEAM_DEFAULT.downDeg;
+}
+function lightBeamSpreadDeg(props) {
+  const v = props && props.beamSpreadDeg;
+  return (typeof v === 'number' && v > 0) ? v : LANDING_BEAM_DEFAULT.spreadDeg;
+}
+function lightBeamRangeM(props) {
+  const v = props && props.beamRangeM;
+  return (typeof v === 'number' && v > 0) ? v : LANDING_BEAM_DEFAULT.rangeM;
+}
 
 // 着陸脚の取付位置（機体の前脚／主脚 左右）
 const LANDING_GEAR_POSITIONS = [

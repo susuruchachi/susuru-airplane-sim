@@ -103,6 +103,7 @@ async function saveCurrentConfig(configName) {
     modelMaxSpeedValue: State.model.maxSpeedValue,
     modelMaxSpeedUnit: State.model.maxSpeedUnit,
     modelMeshOffset: { ...State.model.meshOffset },
+    modelBoneAxisOverrides: { ...State.model.boneAxisOverrides },
   };
   await dbPut(STORE_CONFIGS, record);
   await dbPut(STORE_META, { key: 'lastConfigName', value: configName });
@@ -133,6 +134,7 @@ function buildPortableConfig(configName) {
     modelMaxSpeedValue: State.model.maxSpeedValue,
     modelMaxSpeedUnit: State.model.maxSpeedUnit,
     modelMeshOffset: { ...State.model.meshOffset },
+    modelBoneAxisOverrides: { ...State.model.boneAxisOverrides },
   };
 }
 

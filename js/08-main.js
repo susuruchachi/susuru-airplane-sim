@@ -122,7 +122,7 @@ function applyConfigDataToCurrentModel(data) {
   if (data.modelMaxSpeedUnit !== undefined) State.model.maxSpeedUnit = data.modelMaxSpeedUnit;
   if (data.modelMeshOffset) applyMeshOffset(data.modelMeshOffset); // 原点を中心に揃えた調整を再現
   else if (data.modelMeshOffsetX) applyMeshOffset({ x: data.modelMeshOffsetX, y: 0, z: 0 }); // 旧データ互換（X方向のみ記録していた頃）
-  renderModelSettingsPanel();
+  State.model.boneAxisOverrides = data.modelBoneAxisOverrides ? { ...data.modelBoneAxisOverrides } : {};
 
   rebuildPartsFromSaved(data.parts || []);
   if (data.cg) {
@@ -130,6 +130,9 @@ function applyConfigDataToCurrentModel(data) {
     applyCgToGizmo();
     if (State.cg.selected) updateInspectorNumbersOnly(null, true);
   }
+  // パーツ（エンジンなど）を読み込んだ後に呼ぶ——エンジン出力パネルはState.partsを
+  // 見るので、ここより前で呼ぶとまだ空のまま描画され、エンジンがいてもボタンが出ない。
+  renderModelSettingsPanel();
 }
 
 function formatNow() {
