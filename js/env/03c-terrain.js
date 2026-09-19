@@ -97,7 +97,11 @@ function terrainMix(out, b, t) {
 
 // 標高・傾斜・気候から地表色を決めて out[0..2] に書き込む。
 // 森林限界と雪線は気温から決まるので、北へ行くほど低い標高から岩と雪になる。
-function terrainColorAt(h, slope, jitter, urban, temp, dry, out) {
+//
+// jitter は波長2.4kmのなだらかな明暗（地方ごとの色ムラ）、
+// blotch は波長400mの細かい明暗（森の木立の粗密）。どちらも呼び出し側が
+// ワールド座標から拾って渡す。
+function terrainColorAt(h, slope, jitter, blotch, urban, temp, dry, out) {
   if (h <= 0) {
     const stops = TERRAIN_SEA_STOPS;
     let i = 0;
@@ -131,13 +135,27 @@ function terrainColorAt(h, slope, jitter, urban, temp, dry, out) {
   if (h < 11) {
     out[0] = _TC.beach[0]; out[1] = _TC.beach[1]; out[2] = _TC.beach[2];
     terrainMix(out, lowland, (h - 4) / 7);
-  } else if (h < treeLine * 0.34) {
-    out[0] = lowland[0]; out[1] = lowland[1]; out[2] = lowland[2];
   } else if (h < treeLine) {
+    // **森の色は「実際にそこへ木が生えるか」で決める**（worldForestDensity）。
+    // 以前はここだけ標高の帯（treeLine*0.34〜treeLine）で決めていたので、
+    // 木の生える条件と食い違っていた——低地の温暖湿潤な森は地表が草地の色のまま、
+    // 乾燥地や寒冷地は木が1本も無いのに地表が森の色、という具合に。
+    // 木は手前1.2kmにしか立たないから、その境目が地面の色の段差として見えていた。
     out[0] = lowland[0]; out[1] = lowland[1]; out[2] = lowland[2];
-    terrainMix(out, forest, (h - treeLine * 0.34) / (treeLine * 0.5));
+    const fd = worldForestDensity(h, slope, temp, dry, urban);
+    terrainMix(out, forest, fd);
+    // 森は木立の粗密でまだらに見える。遠景は地表色しか無いので、これが無いと
+    // のっぺりした一色の緑になり、手前の木のある所と地続きに見えない。
+    // 濃い森ほど強く、草地では効かないように密度を掛ける。
+    if (fd > 0) {
+      const b = 1 + (blotch - 0.5) * 0.40 * fd;
+      out[0] *= b; out[1] *= b; out[2] *= b;
+    }
   } else if (h < snowLine) {
-    out[0] = forest[0]; out[1] = forest[1]; out[2] = forest[2];
+    // 森林限界より上は木が無いので、森の色ではなく低地の色から始める。
+    // （ここを forest から始めると、密度が0に落ちきる森林限界のすぐ下＝草地の色と
+    //   段差になる。上と下で同じ色から始めれば、境目は滑らかにつながる）
+    out[0] = lowland[0]; out[1] = lowland[1]; out[2] = lowland[2];
     const t = (h - treeLine) / (snowLine - treeLine);
     terrainMix(out, _TC.alpine, t * 2.2);
     terrainMix(out, _TC.rock, (t - 0.5) * 1.8);
@@ -226,6 +244,7 @@ function buildTerrainTileGeometry(originX, originZ, size, segments) {
       terrainColorAt(
         h, 1 - ny,
         worldValueNoise(wx * 0.00042, wz * 0.00042),
+        worldValueNoise(wx * 0.0025, wz * 0.0025),
         worldUrbanFactorAt(wx, wz),
         sampleClimate(climT, i / n, j / n),
         sampleClimate(climD, i / n, j / n),

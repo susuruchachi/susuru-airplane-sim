@@ -257,6 +257,63 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   check(bins['寒帯'] / land > 0.05, '寒帯がある', pct('寒帯'));
 }
 
+// --- 森の濃さ（地表の色と、実際に生える木の、唯一の出どころ）---
+// 03c-terrain.js（地表色）と 03g-vegetation.js（樹木・木立の塊）が
+// そろって worldForestDensity を見る。ここが壊れると、森のある所と無い所の
+// 境目が地面に色の段差として出る（前はこの2つが別々の式で、平均0.45ずれていた）。
+{
+  const N = 150;
+  let land = 0, forest = 0, sparse = 0, sum = 0, any = 0;
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      const x = -W.WORLD_HALF + (i + 0.5) * (W.WORLD_SIZE / N);
+      const z = -W.WORLD_HALF + (j + 0.5) * (W.WORLD_SIZE / N);
+      const h = W.worldHeightAt(x, z);
+      if (h <= 0) continue;
+      land++;
+      const e = 26;
+      const slope = Math.hypot(
+        (W.worldHeightAt(x + e, z) - h) / e,
+        (W.worldHeightAt(x, z + e) - h) / e
+      );
+      const t = W.worldTemperatureAt(x, z, h);
+      const d = W.worldDrynessAt(x, z, W.worldLandValueAt(x, z));
+      const fd = W.worldForestDensity(h, slope, t, d, W.worldUrbanFactorAt(x, z));
+      sum += fd;
+      if (fd > 0.2) any++;
+      if (fd > 0.5) forest++;
+      else if (fd > 0.05) sparse++;
+    }
+  }
+  const pf = (forest / land) * 100, ps = (sparse / land) * 100, pa = (any / land) * 100;
+  console.log(`[  --  ] 陸の森: 森と呼べる濃さ${pa.toFixed(0)}%（うち濃い森${pf.toFixed(0)}%）`
+    + ` まばら${ps.toFixed(0)}% 平均の濃さ${(sum / land).toFixed(2)}`);
+  check(pa > 15 && pa < 70, '森が陸の一部を占めている（多すぎず少なすぎず）', pa.toFixed(0) + '%');
+  check(sparse > 0, 'まばらな森（濃い森と裸地の間）がある', ps.toFixed(0) + '%');
+
+  // 森林限界をまたぐところで密度が飛ばないこと。
+  // 飛ぶと、地表の色がそこで段差になる（色は密度から作っているため）。
+  let maxJump = 0, jumpAt = 0;
+  for (const temp of [0.15, 0.35, 0.55, 0.8]) {
+    const treeLine = (700 + temp * 3400) * 0.62;
+    let prev = null;
+    for (let h = treeLine - 260; h < treeLine + 60; h += 4) {
+      const fd = W.worldForestDensity(h, 0.05, temp, 0.1, 0);
+      if (prev !== null && Math.abs(fd - prev) > maxJump) { maxJump = Math.abs(fd - prev); jumpAt = h; }
+      prev = fd;
+    }
+  }
+  check(maxJump < 0.06, '森林限界で森の濃さが飛ばない（4mごとの変化）',
+    `最大${maxJump.toFixed(3)}（標高${jumpAt.toFixed(0)}m付近）`);
+
+  // 生えてはいけない所で0になること
+  check(W.worldForestDensity(300, 0.05, 0.5, 0.95, 0) === 0, '砂漠には森が無い');
+  check(W.worldForestDensity(300, 0.05, 0.01, 0.1, 0) === 0, '極寒地には森が無い');
+  check(W.worldForestDensity(300, 0.05, 0.5, 0.1, 1) === 0, '市街地には森が無い');
+  check(W.worldForestDensity(3000, 0.05, 0.5, 0.1, 0) === 0, '森林限界より上には森が無い');
+  check(W.worldForestDensity(300, 1.2, 0.5, 0.1, 0) < 0.05, '切り立った斜面にはほぼ生えない');
+}
+
 // --- 天候（自動モード）---
 // 見え方は js/env/05b-weather.js の deriveWeather が決めるので、そこを直接呼ぶ。
 // 「3,000km飛べば天気が変わる」「どこもかしこも雨」にならない、を確かめる。

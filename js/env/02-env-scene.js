@@ -60,6 +60,7 @@ function animateEnv() {
   updateDayNightCycle(dt);
   updateTerrain();      // カメラが動いたぶんだけ地形タイルのLODを入れ替える
   updateVegetation();
+  updateFarForest();    // 遠くの森（木立の塊）。木より広い範囲を受け持つ
   updateSea(dt);
   updateClouds(dt);
   updateWindsock();

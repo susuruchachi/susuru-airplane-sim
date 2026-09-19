@@ -343,6 +343,40 @@ function worldDrynessAt(x, z, land) {
   return worldClamp(d, 0, 1);
 }
 
+// 森の濃さ（0〜1）。**地表の色と、実際に生える木の、唯一の出どころ。**
+//
+// もともと地表色（03c-terrain.js）と樹木（03g-vegetation.js）が別々の式で
+// 森を決めていて、実測で**平均0.45も食い違っていた**（陸を20,000点サンプルした
+// ときの |色の森混合率 − 木の密度| の平均）。食い違いは両方向に出ていて、
+//   ・標高400m・乾燥0.63の土地 … 地表は森の色100%なのに木は1本も生えない
+//   ・標高40m・温暖湿潤の土地 … 地表は草地の色なのに木は密度0.5で生える
+// 後者がとくに目立つ。手前1.2kmだけ濃い緑の木が立ち、その先は明るい草地の色が
+// のっぺり続くので、**木の出る半径が地面に色の境目として見えてしまう**。
+// 同じ式を両方が見れば、この境目は原理的に出ない。
+//
+// h=標高, slope=傾き, temp=気温(0〜1), dry=乾燥度(0〜1), urban=市街地度(0〜1)
+function worldForestDensity(h, slope, temp, dry, urban) {
+  if (h < 6) return 0;
+  // 森林限界。気温から決まるので、北ほど低い標高で森が終わる
+  const treeLine = (700 + temp * 3400) * 0.62;
+  if (h > treeLine) return 0;
+
+  // 乾燥地には森ができない
+  let d = 1 - worldSmooth01((dry - 0.30) / 0.28);
+  // 寒すぎると育たない
+  d *= worldSmooth01((temp - 0.06) / 0.14);
+  // 低地の草原より、中腹の森林帯がいちばん濃い
+  d *= 0.50 + 0.50 * worldSmooth01((h - treeLine * 0.18) / (treeLine * 0.35));
+  // 森林限界の手前で疎らになる
+  d *= 1 - worldSmooth01((h - treeLine * 0.78) / (treeLine * 0.22));
+  // 急斜面には生えにくい
+  d *= 1 - worldSmooth01((slope - 0.38) / 0.28);
+  // 市街地は伐られている
+  d *= 1 - urban;
+
+  return worldClamp(d, 0, 1);
+}
+
 // 気象の場。位置と「気象の時計」から、湿り具合と荒れ具合を返す。
 //
 // 低気圧が風に乗って流れていくイメージで、時刻に応じて場そのものをずらしている。
@@ -1223,7 +1257,7 @@ if (typeof module !== 'undefined' && module.exports) {
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
     worldClamp, worldSmooth01, worldValueNoise, worldFbm,
     initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt,
-    worldTemperatureAt, worldDrynessAt, worldWeatherFieldAt, worldLocalReliefAt,
+    worldTemperatureAt, worldDrynessAt, worldForestDensity, worldWeatherFieldAt, worldLocalReliefAt,
     worldNearestAirport, worldRegionAt, worldCountryById, worldCityById, worldAirportById,
   };
 }
