@@ -229,6 +229,46 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   summary('中州と分流のある三角州', shaped, delta);
 }
 
+// --- 山の名前と標高 ---
+// 稜線を歩いて峰を拾い、突出度で絞って名前を付けている。
+// 「高い順」に採ると大きな山の肩が上位を占めるので、突出度で選んでいるのが肝。
+{
+  console.log(`\n峰 ${W.WORLD_PEAKS.length} 座`);
+  let named = 0, apart = 0, onGround = 0;
+  const names = new Set();
+  for (const p of W.WORLD_PEAKS) {
+    if (p.nameLatin && !names.has(p.nameLatin)) { named++; names.add(p.nameLatin); }
+    else check(false, `${p.nameLatin} の名前が重複していない`);
+
+    // 標高が実際の地形と合っているか（ラベルの数字が嘘だと意味がない）
+    const h = W.worldHeightAt(p.x, p.z);
+    if (Math.abs(h - p.elevationM) < 1.5) onGround++;
+    else check(false, `${p.nameLatin} の標高が地形と一致`, `札 ${p.elevationM}m / 地形 ${h.toFixed(0)}m`);
+
+    let ok = true;
+    for (const q of W.WORLD_PEAKS) {
+      if (q === p) continue;
+      if (Math.hypot(q.x - p.x, q.z - p.z) < 20000) { ok = false; break; }
+    }
+    if (ok) apart++;
+    else check(false, `${p.nameLatin} が他の峰と離れている`);
+  }
+  summary('名前が一意な峰', named, W.WORLD_PEAKS.length);
+  summary('標高が地形と一致する峰', onGround, W.WORLD_PEAKS.length);
+  summary('他の峰と20km以上離れている峰', apart, W.WORLD_PEAKS.length);
+
+  const top = W.WORLD_PEAKS[0];
+  console.log(`[  --  ] 最高峰: ${top.nameLatin} ${top.elevationM.toLocaleString()}m（${top.range}）`);
+  const es = W.WORLD_PEAKS.map((p) => p.elevationM).sort((a, b) => a - b);
+  console.log(`[  --  ] 峰の標高: 最低${es[0].toLocaleString()}m 中央${es[es.length >> 1].toLocaleString()}m 最高${es[es.length - 1].toLocaleString()}m`);
+
+  // js/env/10-flight.js の WORLD_MAX_TERRAIN_M はこれより高くなければならない。
+  // 低いと、当たり判定の足切りで高い山を素通りする。
+  check(top.elevationM < 5000, '最高峰が WORLD_MAX_TERRAIN_M(5000m) を超えない',
+    `${top.elevationM}m`);
+  check(W.WORLD_PEAKS.length >= 20, '峰が十分な数ある', String(W.WORLD_PEAKS.length));
+}
+
 // --- 道路 ---
 // 街と街・街と空港を結ぶ。傾斜と水にコストを付けたA*で引いているので、
 // 「直線で結んだ場合より坂が緩い」ことと「海の上を走っていない」ことを見る。
@@ -380,11 +420,7 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   summary('稜線がつながっている山脈', connected, W.WORLD_RANGES.length);
   summary('峰がいくつもある山脈', hasSummits, W.WORLD_RANGES.length);
   console.log(`[  --  ] 稜線: ${rows.join(' / ')}`);
-  console.log(`[  --  ] 世界の最高地点: ${Math.round(worldPeak)}m（${worldPeakName}）`);
-  // js/env/10-flight.js の WORLD_MAX_TERRAIN_M はこれより高くなければならない。
-  // 低いと、当たり判定の足切りで高い山を素通りする。
-  check(worldPeak < 5000, '最高地点が WORLD_MAX_TERRAIN_M(5000m) を超えない',
-    `${Math.round(worldPeak)}m`);
+  console.log(`[  --  ] 稜線を歩いた最高点: ${Math.round(worldPeak)}m（${worldPeakName}）`);
 }
 
 // --- 気候が世界の中で振れているか（一様だと地表が単調になる）---

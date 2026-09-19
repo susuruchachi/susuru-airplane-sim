@@ -27,6 +27,7 @@ const LABEL_KINDS = {
   city: { fadeStart: 70000, fadeEnd: 240000, minOpacity: 0, screenPx: 17, fontPx: 40 },
   airport: { fadeStart: 45000, fadeEnd: 160000, minOpacity: 0, screenPx: 16, fontPx: 40 },
   water: { fadeStart: 60000, fadeEnd: 200000, minOpacity: 0, screenPx: 15, fontPx: 38 },
+  peak: { fadeStart: 90000, fadeEnd: 280000, minOpacity: 0, screenPx: 16, fontPx: 38 },
 };
 
 // 都市IDから決まる擬似乱数（世界側と同じ実装を使う）
@@ -393,6 +394,13 @@ function initPlaceLabels() {
 
   for (const ap of WORLD_AIRPORTS) {
     add('airport', ap.id, '#7fd4ff', ap.x, ap.elevationM + 620, ap.z);
+  }
+
+  // 山の名前と標高。**頂のすぐ上に置く**（山脈の札は山脈の中心にあるので別物）。
+  // 標高を併記するのは、飛んでいるときに「この尾根はいくつか」が要るから。
+  for (const peak of WORLD_PEAKS) {
+    add('peak', peak.nameLatin + '  ' + peak.elevationM.toLocaleString() + 'm', '#e6e2d6',
+      peak.x, peak.elevationM + 360, peak.z);
   }
 
   for (const lake of WORLD_LAKES) {

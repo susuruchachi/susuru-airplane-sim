@@ -1445,6 +1445,149 @@ function worldBuildDeltaBranches(r) {
 }
 
 // ============================================================================
+// 山の名前と標高
+//
+// 山脈は稜線を1本持っているので、その上を歩いて「峰」を拾う。
+// ただし稜線の真上がいちばん高いとは限らない（リッジノイズが峰を少し脇へずらす）ので、
+// 候補ごとに山登りで本当の頂へ寄せる。
+//
+// 峰は稜線1本に10〜18座あるが、全部に名前を付けると上空が札だらけになる。
+// **突出度**（その峰から、より高い峰へ向かう途中でいちばん下がるところまでの落差）で
+// 絞る。単に「高い順」だと、大きな山の肩が2位3位を占めて名前が固まってしまう。
+// ============================================================================
+
+const WORLD_PEAKS = [];
+
+const PEAK_WALK_SAMPLES = 300;      // 稜線を何点で歩くか
+// 各点で稜線に直交する向きへ振る幅と刻み。
+// **短軸半径に対する割合にしてはいけない。** アストラ大山脈の短軸半径は210kmもあるので、
+// 割合(0.45)で9点に振ると刻みが23.6kmになり、稜線から5.2km外れた世界最高地点を
+// またいで素通りする（実際に取り逃がして、いちばん高い山に名前が付かなかった）。
+// 峰は稜線のすぐ脇にあるので、絶対値で細かく振る。
+const PEAK_LATERAL_REACH_M = 12000;
+const PEAK_LATERAL_STEP_M = 1500;
+const PEAK_MIN_PROMINENCE_M = 260;  // これ未満の突出度は「肩」とみなして名前を付けない
+const PEAK_MIN_GAP_M = 22000;       // 峰どうしがこれより近ければ低いほうを捨てる
+const PEAK_MAX_PER_RANGE = 6;
+
+// 候補の近くで本当の頂を探す（粗い格子だと尾根の肩を拾ってしまう）
+function worldClimbToSummit(x, z) {
+  let bx = x, bz = z, bh = worldHeightAt(x, z);
+  let step = 1600;
+  for (let pass = 0; pass < 7; pass++) {
+    for (let guard = 0; guard < 40; guard++) {
+      let moved = false;
+      for (let k = 0; k < 8; k++) {
+        const a = (k / 8) * Math.PI * 2;
+        const nx = bx + Math.cos(a) * step, nz = bz + Math.sin(a) * step;
+        const nh = worldHeightAt(nx, nz);
+        if (nh > bh) { bx = nx; bz = nz; bh = nh; moved = true; }
+      }
+      if (!moved) break;
+    }
+    step *= 0.5;
+  }
+  return { x: bx, z: bz, h: bh };
+}
+
+function worldGeneratePeaks() {
+  WORLD_PEAKS.length = 0;
+  const usedNames = new Set();
+
+  for (const range of WORLD_RANGES) {
+    const rand = worldRng('peak:' + range.nameLatin);
+    const country = worldCountryById(worldNearestCountryId(range.cx, range.cz));
+    const style = country ? country.nameStyle : 'vestarian';
+
+    // 1) 稜線を歩いて高さの列を取る。
+    //    **稜線の真上だけを見てはいけない。** リッジノイズが峰を脇へずらすので、
+    //    線の上だけだと最高峰を取り逃がす（実際、世界の最高地点4,708.8mは
+    //    稜線から7.5km外れていて、名前が付かなかった）。
+    //    各点で横方向にも振って、その断面でいちばん高いところを拾う。
+    const pts = [], hs = [];
+    const cosR = Math.cos((range.rot || 0) * Math.PI / 180);
+    const sinR = Math.sin((range.rot || 0) * Math.PI / 180);
+    // 稜線に直交する向き（worldRangeHeightAt の v 方向）
+    const nx = range._swap ? cosR : -sinR;
+    const nz = range._swap ? sinR : cosR;
+    for (let i = 0; i <= PEAK_WALK_SAMPLES; i++) {
+      const t = -0.9 + (1.8 * i) / PEAK_WALK_SAMPLES;
+      const c = worldRangeCrestAt(range, t);
+      let best = { x: c.x, z: c.z }, bh = -Infinity;
+      const kMax = Math.round(PEAK_LATERAL_REACH_M / PEAK_LATERAL_STEP_M);
+      for (let k = -kMax; k <= kMax; k++) {
+        const o = k * PEAK_LATERAL_STEP_M;
+        const x = c.x + nx * o, z = c.z + nz * o;
+        const h = worldHeightAt(x, z);
+        if (h > bh) { bh = h; best = { x, z }; }
+      }
+      pts.push(best);
+      hs.push(bh);
+    }
+
+    // 2) 局所最大を拾う
+    const cands = [];
+    for (let i = 3; i < hs.length - 3; i++) {
+      if (hs[i] < hs[i - 1] || hs[i] < hs[i + 1]) continue;
+      if (hs[i] < hs[i - 3] || hs[i] < hs[i + 3]) continue;
+      cands.push(i);
+    }
+
+    // 3) 突出度：より高い峰へ向かう途中の最低点までの落差。
+    //    左右それぞれで「自分より高いところ」に当たるまで下がった最低点を見て、
+    //    浅いほうを採る（＝どちらか一方でも大きく下がらなければ、それはただの肩）。
+    const scored = cands.map((i) => {
+      let lo = hs[i];
+      for (let j = i - 1; j >= 0; j--) {
+        if (hs[j] > hs[i]) break;
+        if (hs[j] < lo) lo = hs[j];
+      }
+      let lo2 = hs[i];
+      for (let j = i + 1; j < hs.length; j++) {
+        if (hs[j] > hs[i]) break;
+        if (hs[j] < lo2) lo2 = hs[j];
+      }
+      return { i, h: hs[i], prominence: hs[i] - Math.max(lo, lo2) };
+    });
+    scored.sort((a, b) => b.prominence - a.prominence);
+
+    // 4) 突出度が足りるものから、離れている順に採る
+    const taken = [];
+    for (const c of scored) {
+      if (taken.length >= PEAK_MAX_PER_RANGE) break;
+      if (c.prominence < PEAK_MIN_PROMINENCE_M) continue;
+      const p = pts[c.i];
+      let tooClose = false;
+      for (const t of taken) {
+        if (Math.hypot(t.x - p.x, t.z - p.z) < PEAK_MIN_GAP_M) { tooClose = true; break; }
+      }
+      if (tooClose) continue;
+      const top = worldClimbToSummit(p.x, p.z);
+      if (top.h < 400) continue;   // 海際まで下りた稜線の端は山と呼ばない
+      taken.push({ x: top.x, z: top.z, h: top.h, prominence: c.prominence });
+    }
+
+    // 5) 高い順に名前を付ける（いちばん高い山がいちばん良い名前、という気分の問題ではなく、
+    //    生成が決定論的である以上どこかで順序を決めないといけないので、高さで決める）
+    taken.sort((a, b) => b.h - a.h);
+    for (const t of taken) {
+      const nm = worldMakePlaceName(style, rand, usedNames);
+      WORLD_PEAKS.push({
+        id: 'peak-' + range.nameLatin.toLowerCase().replace(/\s+/g, '') + '-'
+          + nm.nameLatin.toLowerCase(),
+        name: nm.name + '山',
+        nameLatin: 'Mt. ' + nm.nameLatin,
+        range: range.nameLatin,
+        x: Math.round(t.x), z: Math.round(t.z),
+        elevationM: Math.round(t.h),
+        prominenceM: Math.round(t.prominence),
+      });
+    }
+  }
+  WORLD_PEAKS.sort((a, b) => b.elevationM - a.elevationM);
+}
+
+// ============================================================================
 // 道路
 // 街と街、街と空港を結ぶ。
 //
@@ -1873,7 +2016,10 @@ function initWorld() {
   for (const a of WORLD_AIRPORTS) _worldAirportGrid.insert(a.x, a.z, a.flatOuterR, a);
   _worldAirportsReady = true;
 
-  // 10) 道路。**いちばん最後**に引く。経路は「出来上がった地形」の上で探さないと、
+  // 10) 山の名前と標高。稜線の上を歩いて峰を拾うので、地形が出来上がってから。
+  worldGeneratePeaks();
+
+  // 11) 道路。**いちばん最後**に引く。経路は「出来上がった地形」の上で探さないと、
   //     川の谷も空港の平地も見えないまま山と川を突っ切る道になる。
   worldGenerateRoads();
 
@@ -1886,7 +2032,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     WORLD_SEED, WORLD_SIZE, WORLD_HALF,
     WORLD_LANDMASSES, WORLD_RANGES, WORLD_COUNTRIES, WORLD_CITIES, WORLD_AIRPORTS,
-    WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, WORLD_ROADS,
+    WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, WORLD_ROADS, WORLD_PEAKS,
     worldLakeAt, worldRiverAt, worldWaterSurfaceAt,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
     worldClamp, worldSmooth01, worldValueNoise, worldFbm,
