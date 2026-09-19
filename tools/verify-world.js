@@ -310,7 +310,16 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
     if (p.longestSea <= 2600) onLand++;
     else check(false, `${r.id} が海を渡っていない`, `連続 ${Math.round(p.longestSea)}m`);
 
-    // 同じ端点を直線で結んだ場合と比べる
+    // 同じ端点を直線で結んだ場合と比べる（下でまとめて統計にする）。
+    //
+    // **1本ずつ「直線より良い」を要求してはいけない。** A* が最小にしているのは
+    // 「距離 + 26×高低差 + 水と空港の割増」の合計であって、最大傾斜でも登りの合計でも
+    // ないので、どちらの尺度でも1本単位では負ける道が必ず出る。
+    // 実際に最大傾斜で見ると3本、登りの合計で見ると13本が直線に負けたが、
+    // どれも「一か所だけ急だが全体では楽」「川をよけたぶん少し登った」という
+    // 正しく選ばれた道だった（road-vestaria-marlton-vestaria-greenis は最大傾斜
+    // 0.46→0.65 だが、登りの合計は 4,869m→4,372m）。
+    // 効いているかどうかは**全体の分布**で見る。
     const a = r.points[0], b = r.points[r.points.length - 1];
     const n = Math.max(2, Math.round(Math.hypot(b.x - a.x, b.z - a.z) / 500));
     const line = [];
@@ -320,13 +329,18 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
     const q = profile(line);
     straightLen += q.len;
     straightSlopes.push(q.maxSlope);
-    if (p.maxSlope <= q.maxSlope + 0.02) gentler++;
+    gentler++;
   }
   summary('海を渡っていない道路', onLand, W.WORLD_ROADS.length);
-  summary('直線より坂が緩い道路', gentler, W.WORLD_ROADS.length);
+  void gentler;
 
   const pct = (v, f) => { const s = v.slice().sort((a, b) => a - b); return s[(s.length * f) | 0]; };
-  console.log(`[  --  ] 最大傾斜の9割点: 探索した道 ${pct(slopes, 0.9).toFixed(2)} / 直線 ${pct(straightSlopes, 0.9).toFixed(2)}`);
+  const p90 = pct(slopes, 0.9), q90 = pct(straightSlopes, 0.9);
+  console.log(`[  --  ] 最大傾斜の9割点: 探索した道 ${p90.toFixed(2)} / 直線 ${q90.toFixed(2)}`);
+  // 経路探索が効いているかは、1本ずつではなく分布で見る。
+  // 効いていなければ（コストの重みを壊したなど）ここが直線に並ぶ。
+  check(p90 < q90 * 0.8, '経路探索で坂が目に見えて緩くなっている',
+    `9割点 ${p90.toFixed(2)} vs 直線 ${q90.toFixed(2)}`);
   console.log(`[  --  ] 総延長 ${Math.round(totalLen / 1000).toLocaleString()}km（直線なら ${Math.round(straightLen / 1000).toLocaleString()}km ＝ 遠回り ${((totalLen / straightLen - 1) * 100).toFixed(0)}%）`);
 
   const kinds = {};

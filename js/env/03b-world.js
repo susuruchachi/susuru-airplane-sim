@@ -729,70 +729,261 @@ function worldLocalReliefAt(x, z, r, samples) {
   return hi - lo;
 }
 
+// ============================================================================
+// 都市と空港の一覧（固定データ）
+//
+// **ここは生成しない。書いてあるとおりに置く。**
+//
+// もともとは地形を見て手続き的に置いていた。置ける場所かどうかを順に試し、
+// 置けたものから順に乱数列から名前を引く作りだったので、**地形をいじると
+// 判定が1つずれるだけで、それ以降の地名が全部ずれた**。
+// 実際、山脈の作り方を変えたときに 130都市のうち38件が別の名前に入れ替わり、
+// 空港は20件消えて14件増えた（イーゼンハイム・NOIS などが世界から消えた）。
+// 地図は覚えて使うものなので、ここは固定データにしてある。
+//
+// 派生する値（市街地の半径・均しの範囲・街路の向き・空港の標高など）は
+// これまでどおり初期化時に計算する。**標高は地形から取り直す**ので、
+// 地形を変えれば空港はその高さに付いてくる。
+//
+// 地形を大きく変えたときは tools/verify-world.js が
+// 「街が海に沈んだ」「滑走路が斜面に乗った」で知らせるので、
+// そのときだけこの表の座標を直すこと。
+// ============================================================================
+
+// 都市の一覧。[id, 名前, ラテン表記, 国, x, z, 規模(0〜1), 首府か]
+const WORLD_CITY_DATA = [
+  ['vestaria-oberfield', 'オーバーフィールド', 'Oberfield', 'vestaria', 83846, -32974, 0.9065, 1],
+  ['vestaria-caldwick', 'カルドウィック', 'Caldwick', 'vestaria', 54288, -251491, 0.303, 0],
+  ['vestaria-aldmere', 'オルドミア', 'Aldmere', 'vestaria', -204929, 245803, 0.7185, 0],
+  ['vestaria-aldis', 'オルドイス', 'Aldis', 'vestaria', -289802, 190550, 0.6234, 0],
+  ['vestaria-aldgate', 'オルドゲート', 'Aldgate', 'vestaria', -57034, -196170, 0.51, 0],
+  ['vestaria-westden', 'ウェストデン', 'Westden', 'vestaria', -252367, 114680, 0.1827, 0],
+  ['vestaria-marlton', 'マールトン', 'Marlton', 'vestaria', 117573, -101294, 0.18, 0],
+  ['vestaria-caldstead', 'カルドステッド', 'Caldstead', 'vestaria', 149092, 44306, 0.2238, 0],
+  ['vestaria-elmbury', 'エルムベリー', 'Elmbury', 'vestaria', -382713, 58661, 0.234, 0],
+  ['vestaria-westton', 'ウェストトン', 'Westton', 'vestaria', -35184, -63690, 0.1819, 0],
+  ['vestaria-halmere', 'ハルミア', 'Halmere', 'vestaria', -115151, -373327, 0.3011, 0],
+  ['vestaria-greenwick', 'グリーンウィック', 'Greenwick', 'vestaria', -61802, 40000, 0.2011, 0],
+  ['vestaria-kernton', 'ケルントン', 'Kernton', 'vestaria', 82869, 143426, 0.6845, 0],
+  ['vestaria-halis', 'ハルイス', 'Halis', 'vestaria', -88683, 156997, 0.4487, 0],
+  ['vestaria-greenis', 'グリーンイス', 'Greenis', 'vestaria', 112546, -176316, 0.3731, 0],
+  ['vestaria-thornford', 'ソーンフォード', 'Thornford', 'vestaria', 12331, 10293, 0.1833, 0],
+  ['vestaria-ravenswick', 'レイヴンズウィック', 'Ravenswick', 'vestaria', -172725, 44730, 0.3568, 0],
+  ['vestaria-elmgate', 'エルムゲート', 'Elmgate', 'vestaria', -414035, 114624, 0.1945, 0],
+  ['vestaria-greenmere', 'グリーンミア', 'Greenmere', 'vestaria', -227237, -96166, 0.4996, 0],
+  ['vestaria-ashgate', 'アッシュゲート', 'Ashgate', 'vestaria', -381321, 184809, 0.3358, 0],
+  ['vestaria-oberford', 'オーバーフォード', 'Oberford', 'vestaria', 61893, 83411, 0.2425, 0],
+  ['vestaria-marlfield', 'マールフィールド', 'Marlfield', 'vestaria', 226609, -128908, 0.1831, 0],
+  ['nordheim-riknes', 'リクネス', 'Riknes', 'nordheim', -221528, -694247, 0.9448, 1],
+  ['nordheim-isenheim', 'イーゼンハイム', 'Isenheim', 'nordheim', -232205, -449579, 0.5125, 0],
+  ['nordheim-skarheim', 'スカルハイム', 'Skarheim', 'nordheim', -44914, -377348, 0.2436, 0],
+  ['nordheim-vinholm', 'ヴィンホルム', 'Vinholm', 'nordheim', -8946, -424996, 0.2048, 0],
+  ['nordheim-valdberg', 'ヴァルドベルグ', 'Valdberg', 'nordheim', -123669, -666888, 0.4716, 0],
+  ['nordheim-vinheim', 'ヴィンハイム', 'Vinheim', 'nordheim', -7080, -583430, 0.2251, 0],
+  ['nordheim-skarvik', 'スカルヴィーク', 'Skarvik', 'nordheim', -42870, -671852, 0.4235, 0],
+  ['nordheim-isennes', 'イーゼンネス', 'Isennes', 'nordheim', -142251, -448672, 0.22, 0],
+  ['nordheim-nordlund', 'ノルドルンド', 'Nordlund', 'nordheim', -342677, -578112, 0.6717, 0],
+  ['nordheim-norddal', 'ノルドダール', 'Norddal', 'nordheim', -72839, -605956, 0.2115, 0],
+  ['nordheim-bjorfjord', 'ビョルフィヨルド', 'Bjorfjord', 'nordheim', -299155, -688704, 0.4622, 0],
+  ['nordheim-rikberg', 'リクベルグ', 'Rikberg', 'nordheim', 53782, -494078, 0.1802, 0],
+  ['borealis-stendal', 'ステンダール', 'Stendal', 'borealis', 431327, -951698, 0.8812, 1],
+  ['borealis-rikheim', 'リクハイム', 'Rikheim', 'borealis', 120793, -1127775, 0.5445, 0],
+  ['borealis-svaldal', 'スヴァルダール', 'Svaldal', 'borealis', 366320, -1185504, 0.5163, 0],
+  ['borealis-bjorlund', 'ビョルルンド', 'Bjorlund', 'borealis', 233927, -1090802, 0.208, 0],
+  ['borealis-isendal', 'イーゼンダール', 'Isendal', 'borealis', 73050, -1048624, 0.1911, 0],
+  ['borealis-grimfjord', 'グリムフィヨルド', 'Grimfjord', 'borealis', 432089, -1104266, 0.2216, 0],
+  ['borealis-bjorvik', 'ビョルヴィーク', 'Bjorvik', 'borealis', 115139, -976782, 0.585, 0],
+  ['borealis-fjorholm', 'フィヨルホルム', 'Fjorholm', 'borealis', 400330, -884895, 0.2223, 0],
+  ['astra-dranara', 'ドランアラ', 'Dranara', 'astra', -733954, -183482, 0.8713, 1],
+  ['astra-castica', 'カストイカ', 'Castica', 'astra', -992721, 18833, 0.4863, 0],
+  ['astra-praetica', 'プラエトイカ', 'Praetica', 'astra', -1091172, 173223, 0.5155, 0],
+  ['astra-magnica', 'マグンイカ', 'Magnica', 'astra', -958275, 82660, 0.4188, 0],
+  ['astra-tarnor', 'ターンオル', 'Tarnor', 'astra', -1056693, -221886, 0.22, 0],
+  ['astra-aquilessa', 'アクィルエッサ', 'Aquilessa', 'astra', -1032033, -337252, 0.3902, 0],
+  ['astra-dranent', 'ドランエント', 'Dranent', 'astra', -1127808, 29702, 0.5048, 0],
+  ['astra-magnessa', 'マグンエッサ', 'Magnessa', 'astra', -914592, 45147, 0.1846, 0],
+  ['astra-voltica', 'ヴォルトイカ', 'Voltica', 'astra', -1167599, 117597, 0.1981, 0],
+  ['astra-casturn', 'カストウルン', 'Casturn', 'astra', -750442, -47438, 0.2662, 0],
+  ['astra-corvanum', 'コルヴアヌム', 'Corvanum', 'astra', -1179056, 207966, 0.3024, 0],
+  ['astra-tarnurn', 'ターンウルン', 'Tarnurn', 'astra', -847440, 19667, 0.3253, 0],
+  ['astra-tarnossa', 'ターンオッサ', 'Tarnossa', 'astra', -809320, -101826, 0.3406, 0],
+  ['astra-vespurn', 'ヴェスプウルン', 'Vespurn', 'astra', -1110129, -34831, 0.206, 0],
+  ['astra-tarnica', 'ターンイカ', 'Tarnica', 'astra', -838392, -299511, 0.2351, 0],
+  ['astra-severica', 'セヴェルイカ', 'Severica', 'astra', -1059137, 41990, 0.2786, 0],
+  ['astra-praetor', 'プラエトオル', 'Praetor', 'astra', -1107323, -100351, 0.3748, 0],
+  ['astra-severara', 'セヴェルアラ', 'Severara', 'astra', -1140966, -220502, 0.5071, 0],
+  ['kaldis-tarabad', 'タルアバード', 'Tarabad', 'kaldis', 630274, -135736, 0.8708, 1],
+  ['kaldis-zahur', 'ザーウル', 'Zahur', 'kaldis', 650340, -263662, 0.195, 0],
+  ['kaldis-nevabad', 'ネヴアバード', 'Nevabad', 'kaldis', 770564, -90469, 0.7232, 0],
+  ['kaldis-taran', 'タルアン', 'Taran', 'kaldis', 892831, -331746, 0.636, 0],
+  ['kaldis-kalrin', 'カルリン', 'Kalrin', 'kaldis', 799105, -445727, 0.3709, 0],
+  ['kaldis-nevan', 'ネヴアン', 'Nevan', 'kaldis', 703467, -533278, 0.2332, 0],
+  ['kaldis-yazrin', 'ヤズリン', 'Yazrin', 'kaldis', 920371, -219780, 0.5941, 0],
+  ['kaldis-yazur', 'ヤズウル', 'Yazur', 'kaldis', 939897, -147790, 0.3106, 0],
+  ['kaldis-basiya', 'バスイヤ', 'Basiya', 'kaldis', 646057, -503740, 0.3065, 0],
+  ['kaldis-sabik', 'サブイク', 'Sabik', 'kaldis', 825249, -170443, 0.2219, 0],
+  ['kaldis-yazkand', 'ヤズカンド', 'Yazkand', 'kaldis', 620878, -363750, 0.3946, 0],
+  ['kaldis-mirik', 'ミルイク', 'Mirik', 'kaldis', 968893, -276067, 0.2985, 0],
+  ['kaldis-basad', 'バスアド', 'Basad', 'kaldis', 835410, -18794, 0.4121, 0],
+  ['kaldis-zahrin', 'ザーリン', 'Zahrin', 'kaldis', 713645, -22625, 0.4509, 0],
+  ['oriens-yukiryu', 'ユキリュウ', 'Yukiryu', 'oriens', 953582, -735684, 0.983, 1],
+  ['oriens-hoshimi', 'ホシミ', 'Hoshimi', 'oriens', 1120346, -828315, 0.5095, 0],
+  ['oriens-mizugawa', 'ミズガワ', 'Mizugawa', 'oriens', 867649, -934000, 0.4684, 0],
+  ['oriens-mizuno', 'ミズノ', 'Mizuno', 'oriens', 1130158, -920204, 0.394, 0],
+  ['oriens-kurono', 'クロノ', 'Kurono', 'oriens', 1012659, -961147, 0.4977, 0],
+  ['oriens-kaimi', 'カイミ', 'Kaimi', 'oriens', 1022910, -642613, 0.3819, 0],
+  ['oriens-akika', 'アキカ', 'Akika', 'oriens', 1157409, -724137, 0.4736, 0],
+  ['oriens-kazeno', 'カゼノ', 'Kazeno', 'oriens', 844551, -764773, 0.4336, 0],
+  ['oriens-akiha', 'アキハ', 'Akiha', 'oriens', 927177, -1026540, 0.456, 0],
+  ['oriens-sento', 'セント', 'Sento', 'oriens', 927174, -911904, 0.2193, 0],
+  ['meridia-corino', 'コルイーノ', 'Corino', 'meridia', -273399, 460790, 0.9344, 1],
+  ['meridia-bellamar', 'ベラマール', 'Bellamar', 'meridia', -323132, 631457, 0.597, 0],
+  ['meridia-veria', 'ヴェルイア', 'Veria', 'meridia', -67106, 466885, 0.2286, 0],
+  ['meridia-monteino', 'モンテイーノ', 'Monteino', 'meridia', -163826, 541362, 0.6878, 0],
+  ['meridia-valmar', 'ヴァルマール', 'Valmar', 'meridia', -90094, 575918, 0.5797, 0],
+  ['meridia-porverde', 'ポルヴェルデ', 'Porverde', 'meridia', 6109, 563682, 0.4702, 0],
+  ['meridia-porora', 'ポルオラ', 'Porora', 'meridia', -295889, 536493, 0.4847, 0],
+  ['meridia-solante', 'ソルアンテ', 'Solante', 'meridia', -277178, 821739, 0.5416, 0],
+  ['meridia-corverde', 'コルヴェルデ', 'Corverde', 'meridia', -5227, 413173, 0.2182, 0],
+  ['meridia-miramar', 'ミラマール', 'Miramar', 'meridia', 74327, 700356, 0.3421, 0],
+  ['meridia-verino', 'ヴェルイーノ', 'Verino', 'meridia', -314375, 751889, 0.1845, 0],
+  ['meridia-vermar', 'ヴェルマール', 'Vermar', 'meridia', -372850, 557173, 0.2503, 0],
+  ['meridia-corella', 'コルエラ', 'Corella', 'meridia', -190942, 833687, 0.3878, 0],
+  ['meridia-serino', 'セルイーノ', 'Serino', 'meridia', -218641, 734293, 0.1801, 0],
+  ['meridia-corora', 'コルオラ', 'Corora', 'meridia', -392398, 676736, 0.2418, 0],
+  ['meridia-calanova', 'カラノヴァ', 'Calanova', 'meridia', -137328, 807021, 0.1906, 0],
+  ['meridia-bellaverde', 'ベラヴェルデ', 'Bellaverde', 'meridia', 73764, 470796, 0.2372, 0],
+  ['meridia-coria', 'コルイア', 'Coria', 'meridia', -126096, 675292, 0.2506, 0],
+  ['thalassia-solella', 'ソルエラ', 'Solella', 'thalassia', -1044737, 641691, 0.8645, 1],
+  ['thalassia-lumiante', 'ルミアンテ', 'Lumiante', 'thalassia', -969242, 726133, 0.3759, 0],
+  ['thalassia-monteante', 'モンテアンテ', 'Monteante', 'thalassia', -874891, 871081, 0.3482, 0],
+  ['thalassia-calaana', 'カラアナ', 'Calaana', 'thalassia', -1171852, 925268, 0.5619, 0],
+  ['thalassia-poria', 'ポルイア', 'Poria', 'thalassia', -706617, 772982, 0.7188, 0],
+  ['thalassia-rioora', 'リオオラ', 'Rioora', 'thalassia', -986265, 881715, 0.3192, 0],
+  ['thalassia-calaora', 'カラオラ', 'Calaora', 'thalassia', -971998, 655975, 0.3415, 0],
+  ['thalassia-monteana', 'モンテアナ', 'Monteana', 'thalassia', -799189, 661268, 0.2228, 0],
+  ['thalassia-valana', 'ヴァルアナ', 'Valana', 'thalassia', -746335, 861034, 0.6107, 0],
+  ['thalassia-rioverde', 'リオヴェルデ', 'Rioverde', 'thalassia', -1041371, 766254, 0.3616, 0],
+  ['thalassia-monteverde', 'モンテヴェルデ', 'Monteverde', 'thalassia', -883605, 634517, 0.25, 0],
+  ['serafina-vahava', 'ヴァハヴァ', 'Vahava', 'serafina', 992338, 823879, 0.8612, 1],
+  ['serafina-morotau', 'モロタウ', 'Morotau', 'serafina', 633680, 907836, 0.1938, 0],
+  ['serafina-paluva', 'パルヴァ', 'Paluva', 'serafina', 964408, 952699, 0.3924, 0],
+  ['serafina-moromay', 'モロマイ', 'Moromay', 'serafina', 758931, 762568, 0.1865, 0],
+  ['serafina-coramay', 'コーラマイ', 'Coramay', 'serafina', 713135, 698126, 0.4589, 0],
+  ['serafina-tanina', 'タニナ', 'Tanina', 'serafina', 757466, 629837, 0.1808, 0],
+  ['serafina-taniva', 'タニヴァ', 'Taniva', 'serafina', 686502, 764034, 0.2094, 0],
+  ['serafina-vahaika', 'ヴァハイカ', 'Vahaika', 'serafina', 1030082, 885835, 0.1997, 0],
+  ['serafina-lagumay', 'ラグマイ', 'Lagumay', 'serafina', 931738, 861346, 0.1891, 0],
+  ['xanadu-morolis', 'モロリス', 'Morolis', 'xanadu', 936745, 1038585, 0.9412, 1],
+  ['xanadu-marina', 'マリナ', 'Marina', 'xanadu', 1300530, 978838, 0.4605, 0],
+  ['xanadu-palupeni', 'パルペニ', 'Palupeni', 'xanadu', 1132065, 913133, 0.5001, 0],
+  ['xanadu-vahalis', 'ヴァハリス', 'Vahalis', 'xanadu', 1032117, 1029862, 0.2364, 0],
+  ['xanadu-palutau', 'パルタウ', 'Palutau', 'xanadu', 1180200, 847932, 0.2734, 0],
+  ['xanadu-anuaroa', 'アヌアロア', 'Anuaroa', 'xanadu', 1221232, 1116220, 0.5298, 0],
+  ['xanadu-palulis', 'パルリス', 'Palulis', 'xanadu', 928053, 790023, 0.3688, 0],
+  ['xanadu-vahatau', 'ヴァハタウ', 'Vahatau', 'xanadu', 1063064, 1102244, 0.2017, 0],
+];
+
+// 空港の一覧。[コード, 親の街のid, x, z, 滑走路の長さ, 幅, 方位]
+const WORLD_AIRPORT_DATA = [
+  ['VEOB', 'vestaria-oberfield', 51664, -26631, 3100, 60, 249],
+  ['VECA', 'vestaria-caldwick', 72613, -254761, 2300, 30, 212],
+  ['VEAL', 'vestaria-aldmere', -209875, 228066, 3100, 45, 241],
+  ['VELD', 'vestaria-aldis', -302707, 178585, 3200, 45, 165],
+  ['VEDG', 'vestaria-aldgate', -78949, -179418, 2800, 45, 131],
+  ['VEHA', 'vestaria-halmere', -128412, -374522, 2400, 30, 235],
+  ['VEKE', 'vestaria-kernton', 74505, 118380, 3300, 45, 159],
+  ['VELI', 'vestaria-halis', -107267, 162746, 2600, 30, 204],
+  ['VEGR', 'vestaria-greenis', 112827, -229225, 2400, 30, 176],
+  ['VERA', 'vestaria-ravenswick', -149116, 43253, 2500, 30, 116],
+  ['VERE', 'vestaria-greenmere', -204335, -85095, 2800, 45, 219],
+  ['VEAS', 'vestaria-ashgate', -372072, 167634, 2400, 30, 218],
+  ['NORI', 'nordheim-riknes', -256501, -665669, 3100, 60, 120],
+  ['NOIS', 'nordheim-isenheim', -218457, -426813, 2700, 45, 67],
+  ['NOVA', 'nordheim-valdberg', -140832, -661351, 2800, 45, 151],
+  ['NOSK', 'nordheim-skarvik', -34081, -684225, 2800, 30, 83],
+  ['NONO', 'nordheim-nordlund', -365573, -567848, 2900, 45, 354],
+  ['NOBJ', 'nordheim-bjorfjord', -292313, -665325, 2800, 45, 333],
+  ['BOST', 'borealis-stendal', 437263, -924091, 3600, 60, 325],
+  ['BORI', 'borealis-rikheim', 137539, -1132916, 2900, 45, 284],
+  ['BOSV', 'borealis-svaldal', 338135, -1179344, 2700, 45, 148],
+  ['BOBJ', 'borealis-bjorvik', 122038, -958296, 2800, 45, 198],
+  ['ASDR', 'astra-dranara', -753850, -171819, 3300, 60, 301],
+  ['ASCA', 'astra-castica', -1009429, 19242, 3000, 45, 57],
+  ['ASPR', 'astra-praetica', -1089725, 189511, 2900, 45, 346],
+  ['ASMA', 'astra-magnica', -965419, 97819, 2700, 30, 198],
+  ['ASAQ', 'astra-aquilessa', -1051297, -351969, 2700, 30, 34],
+  ['ASRA', 'astra-dranent', -1142722, 37690, 2700, 45, 344],
+  ['ASCO', 'astra-corvanum', -1200450, 214814, 2400, 30, 200],
+  ['ASTA', 'astra-tarnurn', -858197, 9233, 2300, 30, 315],
+  ['ASAR', 'astra-tarnossa', -785646, -97605, 2500, 30, 247],
+  ['ASAE', 'astra-praetor', -1118783, -89417, 2500, 30, 322],
+  ['ASSE', 'astra-severara', -1133234, -200585, 2700, 45, 116],
+  ['KATA', 'kaldis-tarabad', 606003, -135479, 3300, 60, 35],
+  ['KANE', 'kaldis-nevabad', 777297, -71142, 3300, 45, 257],
+  ['KAAR', 'kaldis-taran', 918998, -346674, 3000, 45, 103],
+  ['KAKA', 'kaldis-kalrin', 793499, -471145, 2600, 30, 306],
+  ['KAYA', 'kaldis-yazrin', 933621, -199063, 3200, 45, 64],
+  ['KAAZ', 'kaldis-yazur', 955492, -148523, 2400, 30, 284],
+  ['KABA', 'kaldis-basiya', 645508, -523820, 2200, 30, 121],
+  ['KAZK', 'kaldis-yazkand', 591777, -359086, 2700, 30, 217],
+  ['KAAS', 'kaldis-basad', 860674, -27219, 2600, 30, 324],
+  ['KAZA', 'kaldis-zahrin', 687159, -16263, 2700, 45, 8],
+  ['ORYU', 'oriens-yukiryu', 947587, -711549, 3800, 60, 102],
+  ['ORHO', 'oriens-hoshimi', 1117959, -810548, 2800, 45, 44],
+  ['ORMI', 'oriens-mizugawa', 847340, -943880, 2700, 45, 97],
+  ['ORIZ', 'oriens-mizuno', 1119314, -932076, 2400, 30, 128],
+  ['ORKU', 'oriens-kurono', 993324, -1029877, 2900, 45, 95],
+  ['ORKA', 'oriens-kaimi', 1012981, -658994, 2500, 30, 70],
+  ['ORAK', 'oriens-akika', 1134150, -708664, 2900, 45, 178],
+  ['ORAZ', 'oriens-kazeno', 849849, -788154, 2800, 30, 264],
+  ['ORKI', 'oriens-akiha', 913965, -1014320, 2900, 45, 213],
+  ['MECO', 'meridia-corino', -242083, 470635, 3400, 60, 335],
+  ['MEBE', 'meridia-bellamar', -323071, 653453, 2900, 45, 176],
+  ['MEMO', 'meridia-monteino', -186671, 559380, 3200, 45, 62],
+  ['MEVA', 'meridia-valmar', -95785, 556857, 3000, 45, 96],
+  ['MEPO', 'meridia-porverde', 25901, 545246, 2600, 45, 76],
+  ['MEOR', 'meridia-porora', -306285, 512582, 2700, 45, 350],
+  ['MESO', 'meridia-solante', -250872, 832664, 2800, 45, 137],
+  ['MEMI', 'meridia-miramar', 79669, 680579, 2500, 30, 346],
+  ['MERE', 'meridia-corella', -181422, 808304, 2400, 30, 56],
+  ['THSO', 'thalassia-solella', -1019270, 646382, 3400, 60, 181],
+  ['THLU', 'thalassia-lumiante', -987009, 745025, 2600, 30, 193],
+  ['THMO', 'thalassia-monteante', -862551, 857438, 2400, 30, 236],
+  ['THCA', 'thalassia-calaana', -1146161, 924010, 3000, 45, 1],
+  ['THPO', 'thalassia-poria', -725364, 776593, 3300, 45, 89],
+  ['THRI', 'thalassia-rioora', -971144, 885264, 2500, 30, 97],
+  ['THAL', 'thalassia-calaora', -963856, 642590, 2600, 30, 86],
+  ['THVA', 'thalassia-valana', -719329, 862289, 2900, 45, 258],
+  ['THIO', 'thalassia-rioverde', -1020392, 782223, 2500, 30, 237],
+  ['SEVA', 'serafina-vahava', 977536, 837428, 3600, 60, 257],
+  ['SEPA', 'serafina-paluva', 941133, 966316, 2400, 30, 277],
+  ['SECO', 'serafina-coramay', 696143, 696774, 2700, 45, 187],
+  ['XAMO', 'xanadu-morolis', 952602, 1025887, 3100, 60, 229],
+  ['XAMA', 'xanadu-marina', 1287590, 966674, 2800, 45, 223],
+  ['XAPA', 'xanadu-palupeni', 1111195, 890603, 3000, 45, 46],
+  ['XAAN', 'xanadu-anuaroa', 1212949, 1102048, 3000, 45, 202],
+  ['XAAL', 'xanadu-palulis', 972223, 789664, 2600, 30, 84],
+];
+
 function worldGenerateCities() {
   WORLD_CITIES.length = 0;
-  const usedNames = new Set();
-
-  for (const country of WORLD_COUNTRIES) {
-    const rand = worldRng('city:' + country.id);
-    const placed = [];
-    const wanted = country.cityCount;
-
-    // 候補をたくさん試して、平らで海でない場所だけ採る
-    for (let attempt = 0; attempt < wanted * 90 && placed.length < wanted; attempt++) {
-      const ang = rand() * Math.PI * 2;
-      const dist = Math.sqrt(rand()) * country.radius;
-      const x = Math.round(country.cx + Math.cos(ang) * dist);
-      const z = Math.round(country.cz + Math.sin(ang) * dist);
-
-      const h = worldBaseHeightAt(x, z);
-      if (h < 8 || h > 2600) continue;
-
-      // 首府は大きいので、置ける場所の条件も厳しくする
-      const isCapital = placed.length === 0;
-      const size = isCapital
-        ? 0.82 + rand() * 0.18
-        : 0.18 + Math.pow(rand(), 1.7) * 0.55;
-      const builtR = CITY_BUILT_RADIUS_MIN_M + size * (CITY_BUILT_RADIUS_MAX_M - CITY_BUILT_RADIUS_MIN_M);
-
-      if (worldLocalReliefAt(x, z, builtR, 5) > 420) continue;
-
-      // 街どうしが近すぎないように
-      const minGap = 46000 + size * 60000;
-      let tooClose = false;
-      for (const p of placed) {
-        if (Math.hypot(p.x - x, p.z - z) < minGap) { tooClose = true; break; }
-      }
-      if (tooClose) continue;
-      for (const p of WORLD_CITIES) {
-        if (Math.hypot(p.x - x, p.z - z) < 40000) { tooClose = true; break; }
-      }
-      if (tooClose) continue;
-
-      const nm = worldMakePlaceName(country.nameStyle, rand, usedNames);
-      const id = country.id + '-' + nm.nameLatin.toLowerCase().replace(/\s+/g, '');
-      // 街路の向きと街区の大きさは、**街の名前から引いた別の乱数**で決める。
-      // 配置用の rand() をここで消費すると、以降の街の位置がぜんぶずれる
-      // （実際にずらしてしまい、ステンハイムが標高差270mの斜面に乗って検証が落ちた）。
-      const srand = worldRng('street:' + id);
-      const city = {
-        id,
-        name: nm.name, nameLatin: nm.nameLatin,
-        country: country.id,
-        x, z, size, capital: isCapital,
-        builtRadiusM: builtR,
-        urbanR: 1300 + size * 5400,
-        flatInnerR: builtR * 1.15,
-        flatOuterR: builtR * 1.15 * 2.4,
-        groundY: 0,
-        // 街路の碁盤の目の向きと街区の大きさ。街ごとに変える。
-        // 全部が同じ向きだと、上空から見たときに世界中の街が同じ判子に見える。
-        streetAngle: srand() * Math.PI * 0.5,
-        blockM: CITY_BLOCK_MIN_M + srand() * (CITY_BLOCK_MAX_M - CITY_BLOCK_MIN_M),
-      };
-      placed.push(city);
-      WORLD_CITIES.push(city);
-    }
+  for (const d of WORLD_CITY_DATA) {
+    const [id, name, nameLatin, country, x, z, size, capital] = d;
+    const builtR = CITY_BUILT_RADIUS_MIN_M + size * (CITY_BUILT_RADIUS_MAX_M - CITY_BUILT_RADIUS_MIN_M);
+    // 街路の向きと街区の大きさは街の名前から引く（配置とは別の乱数列）
+    const srand = worldRng('street:' + id);
+    WORLD_CITIES.push({
+      id, name, nameLatin, country,
+      x, z, size, capital: !!capital,
+      builtRadiusM: builtR,
+      urbanR: 1300 + size * 5400,
+      flatInnerR: builtR * 1.15,
+      flatOuterR: builtR * 1.15 * 2.4,
+      groundY: 0,
+      streetAngle: srand() * Math.PI * 0.5,
+      blockM: CITY_BLOCK_MIN_M + srand() * (CITY_BLOCK_MAX_M - CITY_BLOCK_MIN_M),
+    });
   }
 }
 
@@ -816,74 +1007,38 @@ function worldMakeAirportCode(country, city, used) {
 
 function worldGenerateAirports() {
   WORLD_AIRPORTS.length = 0;
-  const usedCodes = new Set();
-
-  for (const city of WORLD_CITIES) {
-    // 小さすぎる街には空港を作らない
-    if (!city.capital && city.size < 0.3) continue;
-
+  for (const d of WORLD_AIRPORT_DATA) {
+    const [id, cityId, x, z, runwayLengthM, runwayWidthM, headingDeg] = d;
+    const city = WORLD_CITIES.find((c) => c.id === cityId);
+    if (!city) continue;
     const country = worldCountryById(city.country);
-    const rand = worldRng('airport:' + city.id);
-
-    const runwayLengthM = city.capital
-      ? Math.round((3000 + rand() * 800) / 100) * 100
-      : Math.round((1600 + city.size * 2000 + rand() * 400) / 100) * 100;
     const maxRunwayLengthM = runwayLengthM + AIRPORT_LENGTH_HEADROOM_M;
     const flatInnerR = maxRunwayLengthM * 0.62 + 700;
-    const flatOuterR = flatInnerR * 2.2;
-
-    // 街の均し範囲と重なると地面が傾くので、必ず外側へ出す
-    const minDist = city.flatOuterR + flatOuterR + 2500;
-
-    let best = null;
-    for (let attempt = 0; attempt < 90; attempt++) {
-      const ang = rand() * Math.PI * 2;
-      const dist = minDist + rand() * 14000;
-      const x = Math.round(city.x + Math.cos(ang) * dist);
-      const z = Math.round(city.z + Math.sin(ang) * dist);
-
-      const h = worldBaseHeightAt(x, z);
-      if (h < 4) continue; // 海はだめ
-
-      const relief = worldLocalReliefAt(x, z, flatInnerR, 5);
-      // 他の空港と近すぎないように
-      let clash = false;
-      for (const a of WORLD_AIRPORTS) {
-        if (Math.hypot(a.x - x, a.z - z) < a.flatOuterR + flatOuterR + 4000) { clash = true; break; }
-      }
-      if (clash) continue;
-
-      if (!best || relief < best.relief) best = { x, z, h, relief };
-      if (relief < 120) break; // 十分平らならそれ以上探さない
-    }
-    if (!best) continue;
-
-    const code = worldMakeAirportCode(country, city, usedCodes);
     // 大きな空港は滑走路を複数本持つ。首府の国際空港は2〜3本の平行滑走路。
     const runwayCount = city.capital ? (city.size > 0.92 ? 3 : 2) : 1;
+    const halfSpan = ((runwayCount - 1) * AIRPORT_RUNWAY_SPACING_M) / 2;
 
     WORLD_AIRPORTS.push({
-      id: code,
+      id,
       name: city.name + (city.capital ? '国際空港' : '空港'),
       nameLatin: city.nameLatin + (city.capital ? ' Intl' : ''),
-      country: country.id,
+      country: country ? country.id : city.country,
       city: city.id,
-      x: best.x, z: best.z,
-      elevationM: Math.round(best.h),
-      runwayLengthM,
-      runwayWidthM: city.capital ? 60 : (city.size > 0.45 ? 45 : 30),
-      headingDeg: Math.round(rand() * 359),
-      maxRunwayLengthM, flatInnerR, flatOuterR,
+      x, z,
+      // **標高は地形から取り直す。** 座標は固定だが高さは固定しない——
+      // 固定すると、地形を変えたときに空港だけ台地や窪地になる。
+      elevationM: Math.round(worldBaseHeightAt(x, z)),
+      runwayLengthM, runwayWidthM, headingDeg,
+      maxRunwayLengthM,
+      flatInnerR, flatOuterR: flatInnerR * 2.2,
       runwayCount,
       runwaySpacingM: AIRPORT_RUNWAY_SPACING_M,
       // ターミナルと、そこへ車が入ってくる位置。**定義の値だけで決める**
       // （UIで滑走路の長さを変えても動かないように）。
       // ローカル座標は +X が滑走路の進行方向、+Z が右手。
       terminalLocalX: -maxRunwayLengthM * 0.5 + 420,
-      terminalLocalZ: airportRunwayHalfSpan({ runwayCount, runwaySpacingM: AIRPORT_RUNWAY_SPACING_M })
-        + AIRPORT_TERMINAL_OFFSET_M,
-      gateLocalZ: airportRunwayHalfSpan({ runwayCount, runwaySpacingM: AIRPORT_RUNWAY_SPACING_M })
-        + AIRPORT_TERMINAL_OFFSET_M + AIRPORT_GATE_OFFSET_M,
+      terminalLocalZ: halfSpan + AIRPORT_TERMINAL_OFFSET_M,
+      gateLocalZ: halfSpan + AIRPORT_TERMINAL_OFFSET_M + AIRPORT_GATE_OFFSET_M,
     });
   }
 }
@@ -2150,6 +2305,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     WORLD_SEED, WORLD_SIZE, WORLD_HALF,
     WORLD_LANDMASSES, WORLD_RANGES, WORLD_COUNTRIES, WORLD_CITIES, WORLD_AIRPORTS,
+    WORLD_CITY_DATA, WORLD_AIRPORT_DATA,
     WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, WORLD_ROADS, WORLD_PEAKS,
     worldLakeAt, worldRiverAt, worldWaterSurfaceAt,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
