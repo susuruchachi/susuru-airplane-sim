@@ -191,12 +191,15 @@ function resetFlightToRunway() {
   const diff = (a, b) => Math.abs(((a - b + 540) % 360) - 180);
   const heading = diff(hdgA, from) <= diff(hdgB, from) ? hdgA : hdgB;
 
-  // 滑走路の端から少し内側に置く
+  // 滑走路の端から少し内側に置く。
+  // **空港の中心ではなく「実際に使う滑走路の中心」から測る** ——平行滑走路のある
+  // 空港では、空港の中心は滑走路と滑走路のあいだの草地なので、そこに置くと草から発進する。
   const rad = THREE.MathUtils.degToRad(heading);
   const fx = Math.sin(rad), fz = -Math.cos(rad);
   const back = st.runwayLengthM * 0.5 - 40;
-  const x = def.x - fx * back;
-  const z = def.z - fz * back;
+  const rc = worldAirportRunwayCenter(def);
+  const x = rc.x - fx * back;
+  const z = rc.z - fz * back;
 
   // 滑走路へ戻すのは「やり直す」ということなので、自動操縦も必ず切っておく
   if (typeof stopAutopilot === 'function') stopAutopilot(null);

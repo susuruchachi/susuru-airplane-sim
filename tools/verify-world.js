@@ -102,20 +102,28 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
     if (Math.abs(W.worldHeightAt(a.x, a.z) - a.elevationM) < 1) level++;
     else check(false, `${a.id} が定義どおりの標高`, `地形 ${W.worldHeightAt(a.x, a.z).toFixed(1)}m / 定義 ${a.elevationM}m`);
 
-    // UIで伸ばせる上限（maxRunwayLengthM）まで含めて平地に収まるか
+    // UIで伸ばせる上限（maxRunwayLengthM）まで含めて平地に収まるか。
+    // **平行滑走路とターミナルまで含めて見る** ——中央の1本だけ見ていると、
+    // 外側の滑走路やターミナルが斜面に乗っていても気付かない。
     const half = a.maxRunwayLengthM / 2 + 400;
-    const hd = (a.headingDeg * Math.PI) / 180;
+    const span = W.airportRunwayHalfSpan(a);
     let worst = 0;
     for (let i = 0; i <= 20; i++) {
       const t = -half + (2 * half * i) / 20;
-      for (const off of [-a.runwayWidthM, 0, a.runwayWidthM]) {
-        const x = a.x + Math.sin(hd) * t + Math.cos(hd) * off;
-        const z = a.z - Math.cos(hd) * t + Math.sin(hd) * off;
-        worst = Math.max(worst, Math.abs(W.worldHeightAt(x, z) - a.elevationM));
+      // 全滑走路の中心線と両縁、それにターミナル・車寄せの帯
+      const lateral = [];
+      for (let k = 0; k < (a.runwayCount || 1); k++) {
+        const o = -span + k * (a.runwaySpacingM || 480);
+        lateral.push(o - a.runwayWidthM, o, o + a.runwayWidthM);
+      }
+      lateral.push(a.terminalLocalZ, a.gateLocalZ);
+      for (const off of lateral) {
+        const p = W.airportLocalToWorld(a, t, off);
+        worst = Math.max(worst, Math.abs(W.worldHeightAt(p.x, p.z) - a.elevationM));
       }
     }
     if (worst < 1) flat++;
-    else check(false, `${a.id} の滑走路全体が平ら`, `最大のずれ ${worst.toFixed(2)}m`);
+    else check(false, `${a.id} の滑走路とターミナルが平ら`, `最大のずれ ${worst.toFixed(2)}m`);
 
     // 街の均しの遷移帯に空港が乗ると、そこだけ地面が傾いて滑走路が崩れる
     const c = W.worldCityById(a.city);
@@ -124,7 +132,7 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
       `${(Math.hypot(a.x - c.x, a.z - c.z) / 1000).toFixed(1)}km`);
   }
   summary('標高どおりに均された空港', level, W.WORLD_AIRPORTS.length);
-  summary('滑走路全体が平らな空港', flat, W.WORLD_AIRPORTS.length);
+  summary('滑走路とターミナルが平らな空港', flat, W.WORLD_AIRPORTS.length);
   summary('街と十分離れた空港', apart, W.WORLD_AIRPORTS.length);
 }
 

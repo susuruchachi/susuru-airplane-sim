@@ -304,14 +304,20 @@ const FOREST_FAR_RADIUS_BASE = 4500;  // 塊を見せる半径（画質プリセ
 // カメラがアンカーからこれだけ離れるまでは、塊の一覧を作り直さない。
 // そのぶん一覧は見せる半径より広く作っておく（先へ進んだとき縁が欠けないように）。
 const FOREST_FAR_SLACK = 900;
-const FOREST_FAR_CELL = 90;           // 候補を置く間隔
-const FOREST_FAR_WIDTH = 105;         // 塊の幅(m)。間隔より広いので、密な森では隣とつながる
-const FOREST_FAR_HEIGHT = 30;         // 塊の高さ(m)
+// 塊の大きさは「木の塊に見えるか」を決める。
+//
+// 以前は 幅105m × 高さ30m を 90m 間隔に置いていた。幅が間隔より広いので**必ず隣と
+// 重なり**、25%地面に埋めてあったのと合わせて、ひと続きのなめらかな面に溶けていた。
+// 縦横比も3.5:1と平たいので、上空から見ると森ではなく「小山の連なり」に見える。
+// いまは間隔より狭くして隣とのあいだに地面を見せ、縦横比も2.2:1まで立てた。
+const FOREST_FAR_CELL = 70;           // 候補を置く間隔
+const FOREST_FAR_WIDTH = 58;          // 塊の幅(m)。間隔より狭いので、塊と塊のあいだに地面が見える
+const FOREST_FAR_HEIGHT = 26;         // 塊の高さ(m)
 // 見せる半径のふちで、塊を小さく潰して地表の色へ溶かす割合。
 // ここが無いと、半径いっぱいのところで質感がぷつりと切れて円い境目が見える
 // （もともと直したかったのと同じ症状が、遠くへ移動するだけになってしまう）。
 const FOREST_FAR_TAPER = 0.26;
-const FOREST_FAR_SINK = 0.25;         // 地面へ埋める割合（下の「高さの取り方」参照）
+const FOREST_FAR_SINK = 0.10;         // 地面へ埋める割合（下の「高さの取り方」参照）
 const FOREST_FAR_MAX_EYE_ALTITUDE_M = 9000;  // これより高く上がったら塊も消す
 const FOREST_FAR_SCAN_BUDGET = 1200;  // 1フレームに調べる候補の数
 const FOREST_FAR_REPACK_DIST = 120;   // カメラがこれだけ動いたら詰め直す
@@ -330,7 +336,8 @@ function forestFarRadius() {
 }
 
 function initFarForest() {
-  _farGeometry = buildConeGeometry(7, 1.30, 0.5);
+  // 平たい笠ではなく、少し尖った葉の塊にする（1.30→1.55）
+  _farGeometry = buildConeGeometry(7, 1.55, 0.5);
   EnvState.forestFarGroup = new THREE.Group();
   EnvState.forestFarGroup.visible = EnvState.env.treesVisible !== false;
   EnvState.scene.add(EnvState.forestFarGroup);
@@ -385,8 +392,11 @@ function scanFarForestCell(ix, iz, out) {
 
   const color = _farColor;
   treeColorAt(x, z, h, color);
-  // 塊は葉の集まりなので、1本の木より少し暗く、ばらつきも控えめにする
-  const shade = 0.74 + r4 * 0.24;
+  // **塊は手前の木より暗くする。** 塊は幅の広いなめらかな面なので光をよく受け、
+  // 同じ色を与えると手前の細い木より明るく出る。実際、手前の木は濃い緑なのに
+  // その先の塊だけ淡い緑になって、木が終わって草地の丘が始まったように見えていた。
+  // ばらつきも大きくして、隣どうしが別々の木立に見えるようにする。
+  const shade = 0.50 + r4 * 0.32;
   out.push({
     x, y: h - height * FOREST_FAR_SINK, z,
     w: width, h: height, rot: r2 * Math.PI * 2,

@@ -1092,9 +1092,13 @@ function apMakeApproachPlan(airport, settings, windDirectionDeg) {
   const half = settings.runwayLengthM * 0.5;
   const elev = airport.elevationM || 0;
 
-  // 進入端（手前側の末端）
-  const thrX = airport.x - f.x * half;
-  const thrZ = airport.z - f.z * half;
+  // 進入端（手前側の末端）。
+  // **空港の中心ではなく「実際に使う滑走路の中心」から測る** ——平行滑走路のある
+  // 空港では、空港の中心は滑走路と滑走路のあいだの草地にあたる。
+  const rc = typeof worldAirportRunwayCenter === 'function'
+    ? worldAirportRunwayCenter(airport) : { x: airport.x, z: airport.z };
+  const thrX = rc.x - f.x * half;
+  const thrZ = rc.z - f.z * half;
   const aimX = thrX + f.x * AP_TOUCHDOWN_M;
   const aimZ = thrZ + f.z * AP_TOUCHDOWN_M;
   const fafX = thrX - f.x * AP_FINAL_M;

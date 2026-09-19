@@ -435,6 +435,42 @@ const CITY_FLATTEN_STRENGTH = 0.90;
 // 空港はUIで滑走路をこれだけ伸ばせる。そのぶんの平地をあらかじめ確保しておく。
 const AIRPORT_LENGTH_HEADROOM_M = 900;
 
+// 平行滑走路の間隔。実際の国際空港（成田760m・羽田など）に比べると詰めてあるが、
+// 広げるほど空港の平地が要るので、見て「2本ある」と分かる最小限にしてある。
+const AIRPORT_RUNWAY_SPACING_M = 480;
+// いちばん外の滑走路の縁から、ターミナルまでの距離（エプロンを挟む）
+const AIRPORT_TERMINAL_OFFSET_M = 430;
+// ターミナルから、道路が入ってくる場所（車寄せ）までの距離
+const AIRPORT_GATE_OFFSET_M = 190;
+
+// 滑走路の並びが、中心線から左右どれだけ広がっているか
+function airportRunwayHalfSpan(a) {
+  const n = a.runwayCount || 1;
+  return ((n - 1) * (a.runwaySpacingM || AIRPORT_RUNWAY_SPACING_M)) / 2;
+}
+
+// 空港のローカル座標（+X が滑走路の進行方向、+Z が右手）を世界座標へ。
+// **描画側（04b-airport.js）のグループ回転と同じ式**にしてあるので、
+// 道路がターミナルへ着く位置と、実際にターミナルが建つ位置がずれない。
+function airportLocalToWorld(a, lx, lz) {
+  const t = ((90 - a.headingDeg) * Math.PI) / 180;
+  const c = Math.cos(t), s = Math.sin(t);
+  return { x: a.x + lx * c + lz * s, z: a.z - lx * s + lz * c };
+}
+
+// **実際に使う滑走路の中心。**
+// 空港の中心 (a.x, a.z) は、平行滑走路があるときは滑走路の「あいだの草地」なので、
+// そこを狙うと離陸も着陸も草の上になる。ターミナル側の1本を使う。
+// 滑走路が1本なら空港の中心と同じ値を返す。
+function worldAirportRunwayCenter(a) {
+  return airportLocalToWorld(a, 0, airportRunwayHalfSpan(a));
+}
+
+// 道路が空港へ入る場所（ターミナルの車寄せ）
+function worldAirportGateAt(a) {
+  return airportLocalToWorld(a, a.terminalLocalX, a.gateLocalZ);
+}
+
 // ============================================================================
 // 7. 気候
 // 3,000km四方を一様な緑にすると単調なので、緯度（-Zが北＝寒い）と
@@ -823,6 +859,9 @@ function worldGenerateAirports() {
     if (!best) continue;
 
     const code = worldMakeAirportCode(country, city, usedCodes);
+    // 大きな空港は滑走路を複数本持つ。首府の国際空港は2〜3本の平行滑走路。
+    const runwayCount = city.capital ? (city.size > 0.92 ? 3 : 2) : 1;
+
     WORLD_AIRPORTS.push({
       id: code,
       name: city.name + (city.capital ? '国際空港' : '空港'),
@@ -835,6 +874,16 @@ function worldGenerateAirports() {
       runwayWidthM: city.capital ? 60 : (city.size > 0.45 ? 45 : 30),
       headingDeg: Math.round(rand() * 359),
       maxRunwayLengthM, flatInnerR, flatOuterR,
+      runwayCount,
+      runwaySpacingM: AIRPORT_RUNWAY_SPACING_M,
+      // ターミナルと、そこへ車が入ってくる位置。**定義の値だけで決める**
+      // （UIで滑走路の長さを変えても動かないように）。
+      // ローカル座標は +X が滑走路の進行方向、+Z が右手。
+      terminalLocalX: -maxRunwayLengthM * 0.5 + 420,
+      terminalLocalZ: airportRunwayHalfSpan({ runwayCount, runwaySpacingM: AIRPORT_RUNWAY_SPACING_M })
+        + AIRPORT_TERMINAL_OFFSET_M,
+      gateLocalZ: airportRunwayHalfSpan({ runwayCount, runwaySpacingM: AIRPORT_RUNWAY_SPACING_M })
+        + AIRPORT_TERMINAL_OFFSET_M + AIRPORT_GATE_OFFSET_M,
     });
   }
 }
@@ -1610,6 +1659,14 @@ const ROAD_WATER_COST = 5;
 const ROAD_MAX_LINK_M = 260000;     // これより遠い街どうしは結ばない
 // 橋で渡せる長さの上限。これを超えて海の上を連続するなら、道ではなく航路。
 const ROAD_MAX_SEA_M = 2500;
+// 空港の舗装（滑走路・誘導路・エプロン）の外側にとる余裕
+const ROAD_AIRPORT_MARGIN_M = 120;
+// 空港の舗装を通るときの倍率。水（5倍）よりずっと重くして、事実上の通行止めにする
+const ROAD_AIRPORT_COST = 400;
+// 空港の取り付き点を、車寄せからどれだけ手前に置くか（ここまではA*、ここからは直線）
+const ROAD_AIRPORT_APPROACH_M = 2600;
+// 経路探索のときだけ空港の判定を広げる量（Chaikinの角落としで内側へ寄るぶん）
+const ROAD_AIRPORT_SEARCH_PAD_M = 700;
 const ROAD_HALF_WIDTH_M = 13;
 const ROAD_SPUR_HALF_WIDTH_M = 9;   // 空港へ行く支線は細い
 
@@ -1639,6 +1696,7 @@ function worldRouteRoad(ax, az, bx, bz) {
   // 高さと「水かどうか」を先に全部取る（A*の中で取ると同じ点を何度も測る）
   const h = new Float64Array(cols * rows);
   const wet = new Uint8Array(cols * rows);
+  const blocked = new Uint8Array(cols * rows);
   for (let i = 0; i <= nU; i++) {
     for (let j = -nV; j <= nV; j++) {
       const x = posX(i, j), z = posZ(i, j);
@@ -1656,6 +1714,17 @@ function worldRouteRoad(ax, az, bx, bz) {
           || worldWaterSurfaceAt(x, z + o) !== null || worldWaterSurfaceAt(x, z - o) !== null) ? 1 : 0;
       }
       wet[k] = w;
+
+      // 空港の舗装の上は通さない。川と同じく、3.5kmの格子で点だけ見ると
+      // 幅60mの滑走路を素通りするので、格子点のまわりも見る。
+      const pad = ROAD_AIRPORT_SEARCH_PAD_M;
+      let bl = worldAirportRoadBlock(x, z, pad);
+      if (!bl) {
+        const o = ROAD_CELL_M * 0.4;
+        bl = (worldAirportRoadBlock(x + o, z, pad) || worldAirportRoadBlock(x - o, z, pad)
+          || worldAirportRoadBlock(x, z + o, pad) || worldAirportRoadBlock(x, z - o, pad)) ? 1 : 0;
+      }
+      blocked[k] = bl;
     }
   }
 
@@ -1697,6 +1766,8 @@ function worldRouteRoad(ax, az, bx, bz) {
         const slope = Math.abs(h[nk] - h[cur]) / seg;
         let cost = seg * (1 + slope * ROAD_SLOPE_COST);
         if (wet[nk] || wet[cur]) cost *= ROAD_WATER_COST;
+        // 空港の舗装は「高い」のではなく「通れない」。迂回しようがないときだけ通る
+        if (blocked[nk]) cost *= ROAD_AIRPORT_COST;
 
         const ng = g[cur] + cost;
         if (ng < g[nk]) { g[nk] = ng; from[nk] = cur; open.push(nk); }
@@ -1722,9 +1793,15 @@ function worldRouteRoad(ax, az, bx, bz) {
   return worldChaikinPath(raw, 2);
 }
 
-function worldAddRoad(id, ax, az, bx, bz, halfWidth, kind) {
+// tail を渡すと、経路のあとにその点列をそのままつなぐ（空港の取り付き〜車寄せなど、
+// A* に任せず必ずまっすぐ通したい区間に使う）。
+function worldAddRoad(id, ax, az, bx, bz, halfWidth, kind, tail) {
   const pts = worldRouteRoad(ax, az, bx, bz);
   if (!pts || pts.length < 2) return null;
+  if (tail) {
+    // 取り付き点は経路の終点と同じ場所なので重複を避ける
+    for (let i = 1; i < tail.length; i++) pts.push({ x: tail[i].x, z: tail[i].z });
+  }
 
   // **海をまたぐ道は引かない。** 全域木は陸か海かを見ずに街を結ぶので、
   // 島がいくつもある国（セラフィナ諸島など）では海の上に道ができる。
@@ -1802,12 +1879,53 @@ function worldGenerateRoads() {
     }
   }
 
-  // 3) 空港はどれも街から13〜33km離れているので、親の街から支線を引く
+  // 3) 空港はどれも街から13〜33km離れているので、親の街から支線を引く。
+  //    **終点は空港の中心ではなくターミナルの車寄せ。** 中心を終点にしていたので、
+  //    72本すべてが滑走路のど真ん中に着いていた（実測で滑走路との距離0m）。
   for (const a of WORLD_AIRPORTS) {
     const c = worldCityById(a.city);
     if (!c) continue;
-    worldAddRoad('road-' + a.id, c.x, c.z, a.x, a.z, ROAD_SPUR_HALF_WIDTH_M, 'spur');
+    // 車寄せへ直接A*を走らせると、格子の目が3.5kmあるせいで最後の詰めが利かず、
+    // 舗装の上を通ってから着いてしまう（実測で32本が舗装にかかった）。
+    // **陸側に取り付き点を置いて、そこから車寄せまではまっすぐ**入れる。
+    // 取り付き点はターミナルの正面（ローカル +Z 方向）なので、滑走路は絶対にまたがない。
+    const via = airportLocalToWorld(a, a.terminalLocalX, a.gateLocalZ + ROAD_AIRPORT_APPROACH_M);
+    const gate = worldAirportGateAt(a);
+    worldAddRoad('road-' + a.id, c.x, c.z, via.x, via.z, ROAD_SPUR_HALF_WIDTH_M, 'spur',
+      [via, gate]);
   }
+}
+
+// その地点が、どこかの空港の「舗装のある側」にどれだけ食い込んでいるか（0〜1）。
+// 滑走路・誘導路・エプロンの上に道路を通さないために使う。
+// 1 を返すところは通行止め、0 なら自由。
+// extra を足すと判定を広げられる。経路探索では広めに見て避けさせ、
+// 「実際に舗装に乗っているか」の検証では素の値で見る——Chaikinで角を落とすと
+// 経路が内側へ寄るので、探索時だけ余裕を持たせないと縁をかすめる。
+function worldAirportRoadBlock(x, z, extra) {
+  if (!_worldAirportGrid) return 0;
+  const pad = extra || 0;
+  const aps = _worldAirportGrid.at(x, z);
+  if (!aps) return 0;
+  let worst = 0;
+  for (let i = 0; i < aps.length; i++) {
+    const a = aps[i];
+    const t = ((90 - a.headingDeg) * Math.PI) / 180;
+    const c = Math.cos(t), s = Math.sin(t);
+    const dx = x - a.x, dz = z - a.z;
+    // 世界→ローカル（airportLocalToWorld の逆）
+    const lx = dx * c - dz * s;
+    const lz = dx * s + dz * c;
+    // 滑走路の並び＋誘導路・エプロンが載っている帯。長さ方向は滑走路の全長＋余裕。
+    const halfLen = a.maxRunwayLengthM * 0.5 + ROAD_AIRPORT_MARGIN_M + pad;
+    // ターミナル側（+Z）は車寄せの手前まで、反対側（−Z）は滑走路の縁まで
+    const spanPlus = a.terminalLocalZ - 60;
+    const spanMinus = airportRunwayHalfSpan(a) + a.runwayWidthM + ROAD_AIRPORT_MARGIN_M + pad;
+    if (lx < -halfLen || lx > halfLen) continue;
+    if (lz > spanPlus || lz < -spanMinus) continue;
+    if (worst < 1) worst = 1;
+  }
+  return worst;
 }
 
 // 木の上での2点間の距離（辺の長さの合計）。近道を足すかどうかの判断に使う。
@@ -2040,6 +2158,8 @@ if (typeof module !== 'undefined' && module.exports) {
     worldTemperatureAt, worldDrynessAt, worldForestDensity, worldWeatherFieldAt, worldLocalReliefAt,
     worldNearestAirport, worldRegionAt, worldCountryById, worldCityById, worldAirportById,
     worldRangeCrestAt, worldRangeHeightAt, worldCityStreetDist,
+    airportLocalToWorld, airportRunwayHalfSpan, worldAirportGateAt, worldAirportRoadBlock,
+    worldAirportRunwayCenter,
     CITY_STREET_HALF_W_M, CITY_STREET_CLEAR_M,
   };
 }

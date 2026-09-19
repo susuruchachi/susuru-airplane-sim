@@ -21,6 +21,19 @@ const ROAD_LIFT_M = 1.2;
 const ROAD_STEP_NEAR_M = 400;
 const ROAD_STEP_FAR_M = 2000;
 
+// --- 街灯 -------------------------------------------------------------------
+// 夜に道路が消えると、街と街のあいだが真っ暗になって世界が途切れて見える。
+// 建物を置くと重いので、街と同じ「加算で重ねる点」で灯りだけ出す。
+// 明るさは街明かりに合わせる（道路灯だけ目立つと高速道路の絵にならない）。
+const ROAD_LAMP_SPACING_M = 260;   // 街灯の間隔
+const ROAD_LAMP_Y = 9;             // 路面からの高さ
+const ROAD_LAMP_SIZE = 22;
+// 街灯を出す範囲。灯りは小さな点なので、道の帯より手前で切ってよい。
+const ROAD_LAMP_RADIUS_BASE = 26000;
+// 街の灯りと同じ強さ（03d-places.js は opacity をそのまま 0〜1 で使っている）。
+// 1.0 だと点が白く飛んで高速道路というより滑走路の灯火に見えたので、少し落とす。
+const ROAD_LAMP_OPACITY = 0.75;
+
 function roadActiveRadius() {
   // 03h-env-quality.js はこのファイルより後に読まれるので、呼ばれる時点では
   // 必ずあるが、念のため（他の実体化半径と同じ書き方）
@@ -41,7 +54,40 @@ function initRoads() {
   EnvState.roadMaterial.polygonOffsetFactor = -6;
   EnvState.roadMaterial.polygonOffsetUnits = -6;
 
+  // 街灯。道どうしで共有する（道の出し入れのたびに作り直さない）。
+  // 街の灯り（03d-places.js）と同じ加算合成で、昼は opacity 0 にして消す。
+  if (!_roadLampTexture) _roadLampTexture = buildRoadLampTexture();
+  EnvState.roadLampMaterial = new THREE.PointsMaterial({
+    size: ROAD_LAMP_SIZE, map: _roadLampTexture, sizeAttenuation: true,
+    transparent: true, opacity: 0, depthWrite: false,
+    blending: THREE.AdditiveBlending, fog: true,
+    color: 0xffd9a0,
+  });
+
   refreshRoads();
+}
+
+// 街灯の点の絵（中心が明るく外へ向かって消える円）。街の灯りと同じ作り。
+let _roadLampTexture = null;
+function buildRoadLampTexture() {
+  const size = 32;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = size;
+  const g = cv.getContext('2d');
+  const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.35, 'rgba(255,225,180,0.55)');
+  grad.addColorStop(1, 'rgba(255,200,140,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function roadLampRadius() {
+  const scale = typeof envQualityPreset === 'function' ? envQualityPreset().distance : 1;
+  return Math.max(ROAD_LAMP_RADIUS_BASE * scale, 9000);
 }
 
 function refreshRoads() {
@@ -68,10 +114,14 @@ function roadNearCamera(road, cam, R) {
 }
 
 function disposeRoadInstance(id) {
-  const mesh = EnvState.builtRoads.get(id);
-  if (!mesh) return;
-  EnvState.roadGroup.remove(mesh);
-  mesh.geometry.dispose();
+  const e = EnvState.builtRoads.get(id);
+  if (!e) return;
+  EnvState.roadGroup.remove(e.strip);
+  e.strip.geometry.dispose();
+  if (e.lamps) {
+    EnvState.roadGroup.remove(e.lamps);
+    e.lamps.geometry.dispose();   // マテリアルは道で共有しているので dispose しない
+  }
   EnvState.builtRoads.delete(id);
 }
 
@@ -140,7 +190,54 @@ function buildRoadInstance(road) {
   mesh.matrixAutoUpdate = false;
   mesh.updateMatrix();
   EnvState.roadGroup.add(mesh);
-  EnvState.builtRoads.set(road.id, mesh);
+
+  const lamps = buildRoadLamps(road, pts, ox, oy, oz);
+  if (lamps) EnvState.roadGroup.add(lamps);
+
+  EnvState.builtRoads.set(road.id, { strip: mesh, lamps });
+}
+
+// 道に沿って街灯を置く。左右に振らず中央に1列（遠目には中央分離帯の灯りに見える）。
+// 近い道にだけ出す——灯りは小さな点なので、遠くでは点が潰れて線にならず、
+// 頂点だけ増えて何も見えない。
+function buildRoadLamps(road, pts, ox, oy, oz) {
+  const cam = EnvState.camera.position;
+  const R = roadLampRadius();
+  const positions = [];
+  let acc = ROAD_LAMP_SPACING_M; // 始点にも1つ置く
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const d = Math.hypot(b.x - a.x, b.z - a.z);
+    acc += d;
+    if (acc < ROAD_LAMP_SPACING_M) continue;
+    acc = 0;
+    if (Math.hypot(b.x - cam.x, b.z - cam.z) > R) continue;
+    const y = terrainSurfaceHeightAt(b.x, b.z) + ROAD_LAMP_Y;
+    positions.push(b.x - ox, y - oy, b.z - oz);
+  }
+  if (!positions.length) return null;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+  geo.computeBoundingSphere();
+  const pts2 = new THREE.Points(geo, EnvState.roadLampMaterial);
+  pts2.position.set(ox, oy, oz);
+  pts2.matrixAutoUpdate = false;
+  pts2.updateMatrix();
+  return pts2;
+}
+
+// 夜になったら道の街灯を点ける。明るさは街の灯りに合わせる
+// （03d-places.js の updatePlacesForDaylight と同じ dayFactor を受け取る）。
+function updateRoadsForDaylight(dayFactor) {
+  if (!EnvState.roadLampMaterial) return;
+  const v = 1 - THREE.MathUtils.clamp(dayFactor, 0, 1);
+  EnvState.roadLampMaterial.opacity = v * ROAD_LAMP_OPACITY;
+  if (EnvState.roadGroup) {
+    for (const e of EnvState.builtRoads.values()) {
+      if (e.lamps) e.lamps.visible = v > 0.01;
+    }
+  }
 }
 
 // カメラが動いたら、出し入れと間引きをやり直す。
