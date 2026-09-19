@@ -163,6 +163,72 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   check(W.WORLD_RIVERS.length >= 20, '川が十分な数ある', String(W.WORLD_RIVERS.length));
 }
 
+// --- 河口 ---
+// 川幅は「集めた水の量」で決まる（源流からの距離の平方根）。
+// 以前は「何割来たか」だけで決めていたので、31kmの川も139kmの川も河口の半幅が
+// 107mちょうどで、空から見て大河と小川の区別が付かなかった。
+// 河口は入り江か三角州で海につなぐ。川床を海面下まで下げて海を呼び込むので、
+// 下げすぎて河口の街を沈めていないかもここで見る。
+{
+  let widthMono = 0, deepEnough = 0, notDrowned = 0;
+  const seaBound = W.WORLD_RIVERS.filter((r) => r.mouthKind);
+  for (const r of W.WORLD_RIVERS) {
+    // 幅は上流から下流へ細らない
+    let shrinks = 0;
+    for (let i = 1; i < r.points.length; i++) {
+      if (r.points[i].halfWidth < r.points[i - 1].halfWidth - 0.001) shrinks++;
+    }
+    if (shrinks === 0) widthMono++;
+    else check(false, `${r.nameLatin} の幅が下流へ広がる`, `${shrinks}区間が細くなっている`);
+
+    // 川床も下り一方（河口の掘り下げを入れたあとで）
+    let bedRises = 0;
+    for (let i = 1; i < r.points.length; i++) {
+      if (r.points[i].bedH > r.points[i - 1].bedH + 0.001) bedRises++;
+    }
+    if (bedRises === 0) deepEnough++;
+    else check(false, `${r.nameLatin} の川床が下り一方（河口を含む）`, `${bedRises}区間が上っている`);
+  }
+  summary('幅が下流へ広がる川', widthMono, W.WORLD_RIVERS.length);
+  summary('川床が下り一方の川（河口の掘り下げ込み）', deepEnough, W.WORLD_RIVERS.length);
+
+  // 河口の掘り下げで街が水没していないか（街の判定は上の「陸の上にある都市」と同じ基準）
+  for (const c of W.WORLD_CITIES) if (W.worldHeightAt(c.x, c.z) > 1) notDrowned++;
+  summary('河口に沈んでいない都市', notDrowned, W.WORLD_CITIES.length);
+
+  // 河口の半幅がばらけていること（同じ幅ばかりなら流量で決まっていない）
+  const mw = seaBound.map((r) => r.points[r.points.length - 1].halfWidth).sort((a, b) => a - b);
+  if (mw.length) {
+    const lo = mw[0], hi = mw[mw.length - 1];
+    console.log(`[  --  ] 河口の半幅: 最小${lo.toFixed(0)}m 中央${mw[mw.length >> 1].toFixed(0)}m 最大${hi.toFixed(0)}m`);
+    check(hi > lo * 2, '河口の幅が川ごとに違う', `最大が最小の${(hi / lo).toFixed(1)}倍`);
+  }
+
+  const delta = W.WORLD_RIVERS.filter((r) => r.mouthKind === 'delta').length;
+  const estuary = W.WORLD_RIVERS.filter((r) => r.mouthKind === 'estuary').length;
+  console.log(`[  --  ] 河口: 入り江${estuary} 三角州${delta} 内陸（湖に注ぐ）${W.WORLD_RIVERS.length - estuary - delta}`);
+  check(delta >= 2, '三角州がいくつかある', String(delta));
+  check(estuary >= 10, '入り江が十分ある', String(estuary));
+
+  // 三角州は「積もらせた土を分流が切り開く」形。中州が海面より上に出ていること、
+  // 分流が海面より下に掘れていることの両方を見る（片方だけだと何も見えない）。
+  let shaped = 0;
+  for (const r of W.WORLD_RIVERS) {
+    if (r.mouthKind !== 'delta' || !r.mouthBranches) continue;
+    // 隣り合う分流の中間＝中州になるはずの場所。分流の長さは海に出るまでで
+    // 決まるので固定の番号では拾えない。短いほうの真ん中で見る。
+    const a = r.mouthBranches[0], b = r.mouthBranches[1];
+    const k = Math.max(2, Math.min(a.length, b.length) >> 1);
+    const ix = (a[k].x + b[k].x) / 2, iz = (a[k].z + b[k].z) / 2;
+    const island = W.worldHeightAt(ix, iz);
+    const channel = W.worldHeightAt(a[k].x, a[k].z);
+    if (island > 0 && channel < 0) shaped++;
+    else check(false, `${r.nameLatin} の三角州に中州と分流がある`,
+      `中州 ${island.toFixed(1)}m / 分流 ${channel.toFixed(1)}m`);
+  }
+  summary('中州と分流のある三角州', shaped, delta);
+}
+
 // --- 湖 ---
 {
   let deep = 0, clear = 0;

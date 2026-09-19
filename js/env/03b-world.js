@@ -290,6 +290,7 @@ const WORLD_CITIES = [];
 const WORLD_AIRPORTS = [];
 const WORLD_LAKES = [];
 const WORLD_RIVERS = [];
+const WORLD_DELTAS = [];
 const WORLD_LAND_ANCHORS = [];
 
 // 高さ関数の「段階」。前の段階の地形を見て次の地物を配置するので、
@@ -305,6 +306,7 @@ let _worldLandmassGrid = null;
 let _worldRangeGrid = null;
 let _worldLakeGrid = null;
 let _worldRiverGrid = null;
+let _worldDeltaGrid = null;
 
 // 都市の広がり。builtRadiusM は建物が建つ範囲（js/env/03d-places.js もこれを使う）、
 // urbanR は市街地として地表色を変える範囲。
@@ -521,6 +523,8 @@ function worldHeightAt(x, z) {
   // 空港の均しはこのあとに来るので、滑走路の平面が最後に必ず勝つ。
   if (_worldWaterReady) {
     h = worldCarveLakes(x, z, h);
+    // 三角州は「積もらせてから切り開く」。堆積を刻み込みより先に掛ける。
+    h = worldDepositDeltas(x, z, h);
     h = worldCarveRivers(x, z, h);
   }
 
@@ -745,6 +749,41 @@ const RIVER_MAX_INFLUENCE = 2400;
 const RIVER_STEP_M = 1500;
 const RIVER_MAX_STEPS = 420;
 const RIVER_MIN_LENGTH_M = 25000;
+
+// 川幅は「そこまでに集めた水の量」で決める。
+//
+// 以前は 12 + (源流からの割合) * 95 だった。これは長さに関係なく
+// 「何割来たか」だけで決まるので、31kmの川も139kmの川も河口の半幅が107mちょうどになり、
+// 空から見て大河と小川の区別がつかなかった。
+// 集水面積は流路長のおよそ1.8乗、川幅は流量のおよそ0.5乗で増えるので、
+// 合わせると幅は流路長の0.9乗——ここでは平方根で近似する（少なめに見積もる側）。
+const RIVER_WIDTH_K = 0.30;          // 半幅[m] = K * sqrt(源流からの距離[m])
+const RIVER_MIN_HALF_WIDTH_M = 10;
+
+// --- 河口 -------------------------------------------------------------------
+//
+// 川が海岸線でぶつ切りになっていたのを、入り江か三角州で海につなぐ。
+// どちらになるかは海岸の傾きで決める（実際の地形と同じ理屈）。
+//
+//   遠浅の海岸 … 運んできた土砂が溜まるので河口が埋まり、流れが分かれる＝三角州
+//   急な海岸   … 谷がそのまま海に沈むので、細長い入り江（溺れ谷）になる
+//
+// どちらの場合も河口の川床を海面下まで下げる。地形が海面(y=0)より低くなれば
+// そこは自動的に海になるので、「海が内陸へ入り込む」形が地形だけで出る。
+const RIVER_MOUTH_FLARE_M = 9000;    // 河口からこの距離のあいだで幅を広げる
+const RIVER_MOUTH_FLARE_MUL = 2.4;   // 河口での幅の倍率
+const RIVER_MOUTH_SEA_DEPTH_M = 12;  // 河口の川床を海面下このぶんまで下げる
+const RIVER_OFFSHORE_PROBE_M = 12000; // 海岸の傾きを測る沖への距離
+const DELTA_MIN_SHELF_H = -45;       // 沖がこれより浅ければ遠浅＝三角州にする
+const DELTA_MIN_LENGTH_M = 65000;    // 短い川は土砂を運べないので三角州にしない
+const DELTA_REACH_M = 5200;          // 分流が海へ伸びる距離のめやす（実際は海に出るまで歩く）
+const DELTA_STEP_M = 870;
+const DELTA_MAX_STEPS = 14;          // 遠浅すぎて海に出られないときの打ち切り（約12km）
+const DELTA_SPREAD_RAD = 0.70;       // いちばん外の分流が本流から開く角度
+const DELTA_BRANCH_WIDTH = 0.40;     // 分流の幅（本流の河口幅に対する割合）
+const DELTA_DRIFT_MAX = 0.30;        // 分流が扇形の向きから曲がってよい角度
+const DELTA_BRANCHES = 3;
+const DELTA_DEPOSIT_H = 4;           // 堆積でできる中州の高さ（海面から）
 
 // 経路探索で使う「なだらかにした地形」。
 // 山地の尾根ノイズは1〜3km規模の小さな窪地をいくらでも作るので、
@@ -1047,6 +1086,233 @@ function worldAddTerminalLakes() {
   }
 }
 
+// --- 河口 -------------------------------------------------------------------
+
+// 海に出ている川の河口の形を決める。worldAddTerminalLakes のあとに呼ぶこと
+// （湖に注ぐ川は海岸を持たないので対象外）。
+// ここでは「向き」と「入り江か三角州か」だけを決め、実際の幅・川床・分流は
+// worldBuildRiverGrid が作る（本流の幅が決まっていないと分流の幅を決められないため）。
+function worldShapeRiverMouths() {
+  WORLD_DELTAS.length = 0;
+
+  for (const r of WORLD_RIVERS) {
+    r.mouthKind = null;
+    const end = r.points[r.points.length - 1];
+    if (end.h > 20) continue;                            // 内陸で終わっている
+    if (worldLakeGridHas(end.x, end.z, end.h)) continue; // 湖に注いでいる
+
+    // 河口での流れの向き。最後の1区間だけ見ると Chaikin のギザギザを拾うので、
+    // 3kmほど手前から見る。
+    const back = r.points[Math.max(0, r.points.length - 9)];
+    const base = Math.atan2(end.z - back.z, end.x - back.x);
+
+    // その向きが本当に沖かを確かめる。海岸線は曲がっているので、上流からの向きを
+    // そのまま伸ばすと陸へ突っ込むことがある。±90°のうち一番深いほうを沖とする。
+    let ang = base, shelf = Infinity;
+    for (let k = -4; k <= 4; k++) {
+      const a = base + (k / 4) * (Math.PI / 2);
+      const h = worldBaseHeightAt(end.x + Math.cos(a) * RIVER_OFFSHORE_PROBE_M,
+                                  end.z + Math.sin(a) * RIVER_OFFSHORE_PROBE_M);
+      if (h < shelf) { shelf = h; ang = a; }
+    }
+    if (shelf > 0) continue; // どちらを向いても陸。海に出ていないので触らない
+
+    r.mouthAngle = ang;
+    // 遠浅なら土砂が溜まって流れが分かれる＝三角州。
+    // 急に落ちる海岸なら谷がそのまま沈む＝入り江（溺れ谷）。
+    // 短い川は土砂を運べないので、遠浅でも入り江にする。
+    if (shelf < DELTA_MIN_SHELF_H || r.lengthM < DELTA_MIN_LENGTH_M) {
+      r.mouthKind = 'estuary';
+      continue;
+    }
+    r.mouthKind = 'delta';
+    WORLD_DELTAS.push({
+      x: end.x, z: end.z, dx: Math.cos(ang), dz: Math.sin(ang),
+      reach: DELTA_REACH_M * 1.15,
+      halfAngle: DELTA_SPREAD_RAD + 0.28,
+      river: r.id,
+    });
+  }
+}
+
+// 三角州の堆積。河口の沖に広がる扇形を、海面より少しだけ高い平地にする。
+// 川の刻み込みより先に呼ぶこと——「積もらせた土を分流が切り開く」という順番でないと、
+// 分流を掘っても海底を掘るだけになって、水面下で何も見えない。
+function worldDepositDeltas(x, z, h) {
+  if (!_worldDeltaGrid) return h;
+  const ds = _worldDeltaGrid.at(x, z);
+  if (!ds) return h;
+  for (let i = 0; i < ds.length; i++) {
+    const d = ds[i];
+    const vx = x - d.x, vz = z - d.z;
+    const dist = Math.hypot(vx, vz);
+    if (dist < 1 || dist > d.reach) continue;
+    // 扇の内側か（河口から沖へ向く向きとの角度で見る）
+    const a = Math.acos(worldClamp((vx * d.dx + vz * d.dz) / dist, -1, 1));
+    if (a > d.halfAngle) continue;
+    // 縁は海へなだらかに沈める。外形を波打たせないと、扇が定規で描いた
+    // 「きれいな円弧＋まっすぐな二辺」になって、上空から見たときに一目で作り物と分かる。
+    // 半径方向と角度方向の両方を、別のノイズで揺らす。
+    const wr = 0.80 + 0.32 * worldValueNoise(x * 0.00035 + 40, z * 0.00035 - 17);
+    const wa = 0.72 + 0.46 * worldValueNoise(x * 0.00021 - 63, z * 0.00021 + 88);
+    const fr = 1 - worldSmooth01(dist / (d.reach * wr));
+    const edge = d.halfAngle * wa;
+    const fa = 1 - worldSmooth01((a - edge * 0.55) / (edge * 0.45));
+    const target = DELTA_DEPOSIT_H * fr * fa;
+    if (target > h) h = target;
+  }
+  return h;
+}
+
+// 川の幅と川床を決め、地形を刻むための空間インデックスに入れる。
+// 経路（worldGenerateRivers）と河口の種類（worldShapeRiverMouths）が決まったあとに呼ぶ。
+function worldBuildRiverGrid() {
+  _worldRiverGrid = makeWorldGrid(20000);
+
+  for (const r of WORLD_RIVERS) {
+    const pts = r.points;
+    const n = pts.length;
+
+    // 幅：源流からの距離の平方根に比例（＝集めた水の量で決まる）
+    let acc = 0;
+    pts[0].fromSource = 0;
+    for (let i = 1; i < n; i++) {
+      acc += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z);
+      pts[i].fromSource = acc;
+    }
+    for (let i = 0; i < n; i++) {
+      const p = pts[i];
+      p.halfWidth = Math.max(RIVER_MIN_HALF_WIDTH_M, RIVER_WIDTH_K * Math.sqrt(p.fromSource));
+      p.bedH = p.h - RIVER_BED_OFFSET_M;
+    }
+
+    // 河口：手前で幅を広げ、川床を海面下まで下ろす。
+    // 地形が海面(y=0)より低くなればそこは海になるので、
+    // 「海が谷へ入り込む」形（入り江）が地形だけで出る。
+    if (r.mouthKind) {
+      const g = worldMouthCityGuard(r);
+      for (let i = 0; i < n; i++) {
+        const p = pts[i];
+        const fromMouth = r.lengthM - p.fromSource;
+        if (fromMouth > RIVER_MOUTH_FLARE_M) continue;
+        const t = worldSmooth01(1 - fromMouth / RIVER_MOUTH_FLARE_M) * g;
+        p.halfWidth *= 1 + (RIVER_MOUTH_FLARE_MUL - 1) * t;
+        // 下げるだけ。すでに海面下12mより深い川床（急な海岸に出る川）を
+        // 持ち上げてしまうと、そこだけ川床が上って水が溜まる形になる。
+        p.bedH = Math.min(p.bedH, p.bedH + (-RIVER_MOUTH_SEA_DEPTH_M - p.bedH) * t);
+      }
+    }
+
+    for (let i = 1; i < n; i++) worldInsertRiverSegment(pts[i - 1], pts[i]);
+
+    // 三角州の分流。本流の河口の幅・川床が決まってから作る。
+    r.mouthBranches = r.mouthKind === 'delta' ? worldBuildDeltaBranches(r) : null;
+    if (r.mouthBranches) {
+      for (const br of r.mouthBranches) {
+        for (let i = 1; i < br.length; i++) worldInsertRiverSegment(br[i - 1], br[i]);
+      }
+    }
+  }
+
+  // 堆積の広がりは分流を歩いてみないと決まらないので、空間インデックスはここで作る
+  _worldDeltaGrid = makeWorldGrid(20000);
+  for (const d of WORLD_DELTAS) _worldDeltaGrid.insert(d.x, d.z, d.reach, d);
+}
+
+// 河口を掘り下げてよい強さ（0〜1）。街の上を通る河口は掘らない。
+//
+// 街の均しは川の刻み込みより先に掛かるので、掘ったぶんは街にもそのまま効く。
+// 河口を海面下12mまで下げると、河口に建っている街がまるごと水没する
+// （グリムフィヨルド川は街の中心から98mのところを流れていて、実際に沈んだ）。
+//
+// 点ごとに弱めるのではなく、川ごとに1つの値にしてある。点ごとにすると
+// 街の手前だけ川床が持ち上がって、そこに水が溜まる形になってしまう。
+function worldMouthCityGuard(r) {
+  let g = 1;
+  for (const p of r.points) {
+    if (r.lengthM - p.fromSource > RIVER_MOUTH_FLARE_M) continue;
+    for (const c of WORLD_CITIES) {
+      const d = Math.hypot(p.x - c.x, p.z - c.z);
+      if (d >= c.flatOuterR) continue;
+      const f = worldSmooth01((d - c.flatInnerR) / (c.flatOuterR - c.flatInnerR));
+      if (f < g) g = f;
+    }
+  }
+  return g;
+}
+
+function worldInsertRiverSegment(a, b) {
+  const segLen = Math.hypot(b.x - a.x, b.z - a.z);
+  _worldRiverGrid.insert((a.x + b.x) / 2, (a.z + b.z) / 2, segLen / 2 + RIVER_MAX_INFLUENCE, {
+    ax: a.x, az: a.z, ah: a.bedH,
+    bx: b.x, bz: b.z, bh: b.bedH,
+    halfWidth: Math.max(a.halfWidth, b.halfWidth),
+  });
+}
+
+// 三角州の分流。河口から扇形に開いて海へ向かう水路を DELTA_BRANCHES 本作る。
+// 本流をそのまま伸ばさずに分けるのは、あいだに残る中州が「三角州らしさ」そのものだから。
+//
+// 長さは決め打ちにしない。三角州になる海岸はとても遠浅で、河口から5kmでも
+// まだ地面が標高+1.5mある（だから土砂が溜まって三角州になる）。
+// 決め打ちだと水路が陸のなかで行き止まりになって、ただの池になってしまう。
+// 素の地形が海面下に落ちるところまで歩かせて、そこで海につなぐ。
+function worldBuildDeltaBranches(r) {
+  const end = r.points[r.points.length - 1];
+  const rand = worldRng('delta:' + r.id);
+  const width = end.halfWidth * DELTA_BRANCH_WIDTH;
+  const out = [];
+  let longest = DELTA_REACH_M;
+
+  for (let b = 0; b < DELTA_BRANCHES; b++) {
+    // -DELTA_SPREAD_RAD 〜 +DELTA_SPREAD_RAD に均等に開く
+    const spread = DELTA_BRANCHES === 1 ? 0
+      : (b / (DELTA_BRANCHES - 1) * 2 - 1) * DELTA_SPREAD_RAD;
+    // 分流を曲げる。まっすぐだと扇形に引いた定規の線にしか見えない。
+    //
+    // ただの乱歩にすると際限なく流れて分流どうしが交わり、あいだの中州が消える
+    // （実際 6本中2本で中州が海面下2.5mまで沈んだ）。
+    // 前の値を0.85倍して引き戻し、さらに DELTA_DRIFT_MAX で頭打ちにする。
+    // 隣の分流とは 2*DELTA_SPREAD_RAD/(DELTA_BRANCHES-1) = 0.70rad 離れているので、
+    // 両方が目いっぱい寄っても 0.70-2*0.30 = 0.10rad 残る＝交わらない。
+    // 引き戻しが弱いぶん向きの変化はゆっくりで、細かく震えずに大きく弧を描く。
+    let drift = 0, run = 0;
+    const br = [{ x: end.x, z: end.z, bedH: end.bedH, halfWidth: end.halfWidth }];
+    for (let i = 1; i <= DELTA_MAX_STEPS; i++) {
+      const prev = br[br.length - 1];
+      // 曲がってよい幅は河口から離れるほど大きくする。分かれた直後は
+      // 3本が寄り集まっているので、そこで曲げると隣とくっついてしまう。
+      const cap = DELTA_DRIFT_MAX * Math.min(1, run / DELTA_REACH_M);
+      drift = worldClamp(drift * 0.85 + (rand() - 0.5) * 0.34, -cap, cap);
+      const ang = r.mouthAngle + spread + drift;
+      const x = prev.x + Math.cos(ang) * DELTA_STEP_M;
+      const z = prev.z + Math.sin(ang) * DELTA_STEP_M;
+      run += DELTA_STEP_M;
+      br.push({
+        x, z,
+        // 深さは河口のまま。沖ほど深く掘ると谷の斜面が広がって、
+        // 分流のあいだの中州まで海面下へ削ってしまう（0.03の斜面なので
+        // 10m深くすると333m余分に削れる）。
+        bedH: end.bedH,
+        // 流れが分かれるぶん、1本の幅は本流より細い。
+        // ゆっくり細らせると河口のすぐ先で3本が重なって1本の広い水路になり、
+        // 中州が出ないので、最初の3分の1で細りきらせる。
+        halfWidth: end.halfWidth
+          + (width - end.halfWidth) * worldSmooth01((run / DELTA_REACH_M) * 2.8),
+      });
+      // 素の地形が海面下に落ちたら、そこから先は海。もう掘る必要はない
+      if (run >= DELTA_REACH_M * 0.5 && worldBaseHeightAt(x, z) < -3) break;
+    }
+    if (run > longest) longest = run;
+    out.push(br);
+  }
+
+  // 堆積（中州）の広がりを、実際に歩いた長さに合わせる
+  const d = WORLD_DELTAS.find((v) => v.river === r.id);
+  if (d) d.reach = longest * 1.15;
+  return out;
+}
+
 function worldNearestCountryId(x, z) {
   let best = null, bestD = Infinity;
   for (const c of WORLD_COUNTRIES) {
@@ -1122,7 +1388,11 @@ function worldWaterSurfaceAt(x, z) {
       const w = s.halfWidth + bank;
       const d2 = worldPointSegDist2(x, z, s.ax, s.az, s.bx, s.bz);
       if (d2 < w * w) {
-        return s.ah + (s.bh - s.ah) * _worldSegT.t + RIVER_WATER_DEPTH_M;
+        const surface = s.ah + (s.bh - s.ah) * _worldSegT.t + RIVER_WATER_DEPTH_M;
+        // 河口は川床が海面下まで落ちている。そこは川ではなく海なので、
+        // 海面より低い「川の水面」は返さない（呼ぶ側は海を別に見ている）。
+        if (surface <= 0) return null;
+        return surface;
       }
     }
   }
@@ -1198,26 +1468,11 @@ function initWorld() {
   _worldLakeGrid = makeWorldGrid(30000);
   for (const l of WORLD_LAKES) _worldLakeGrid.insert(l.x, l.z, l.outerR, l);
 
-  _worldRiverGrid = makeWorldGrid(20000);
-  for (const r of WORLD_RIVERS) {
-    let acc = 0;
-    r.points[0].halfWidth = 12;
-    for (let i = 1; i < r.points.length; i++) {
-      const a = r.points[i - 1], b = r.points[i];
-      const segLen = Math.hypot(b.x - a.x, b.z - a.z);
-      // 下流ほど幅が広がる
-      const halfWidth = 12 + ((acc + segLen / 2) / r.lengthM) * 95;
-      b.halfWidth = halfWidth;
-      _worldRiverGrid.insert((a.x + b.x) / 2, (a.z + b.z) / 2, segLen / 2 + RIVER_MAX_INFLUENCE, {
-        ax: a.x, az: a.z, ah: a.h - RIVER_BED_OFFSET_M,
-        bx: b.x, bz: b.z, bh: b.h - RIVER_BED_OFFSET_M,
-        halfWidth,
-      });
-      acc += segLen;
-    }
-  }
+  // 5) 河口の形（入り江か三角州か）を決めてから、川の幅・川床・分流を作る
+  worldShapeRiverMouths();
+  worldBuildRiverGrid();
 
-  // 5) 街と空港が海岸線ノイズで沈まないようアンカーを張る
+  // 6) 街と空港が海岸線ノイズで沈まないようアンカーを張る
   WORLD_LAND_ANCHORS.length = 0;
   for (const a of WORLD_AIRPORTS) {
     WORLD_LAND_ANCHORS.push({ x: a.x, z: a.z, r: Math.max(a.flatOuterR * 1.5, 22000) });
@@ -1228,7 +1483,7 @@ function initWorld() {
   _worldAnchorGrid = makeWorldGrid(40000);
   for (const a of WORLD_LAND_ANCHORS) _worldAnchorGrid.insert(a.x, a.z, a.r, a);
 
-  // 6) 街の基準標高を「街を均す前の地形」から取ってから、街の均しを有効にする
+  // 7) 街の基準標高を「街を均す前の地形」から取ってから、街の均しを有効にする
   _worldCityGrid = makeWorldGrid(40000);
   for (const c of WORLD_CITIES) {
     c.groundY = worldHeightAt(c.x, c.z);
@@ -1236,10 +1491,10 @@ function initWorld() {
   }
   _worldCitiesReady = true;
 
-  // 7) 湖と川の刻み込みを有効にする（街の均しのあと、空港の均しの前）
+  // 8) 湖と川の刻み込みを有効にする（街の均しのあと、空港の均しの前）
   _worldWaterReady = true;
 
-  // 8) 空港の均しを有効にする（滑走路の平面が最後に勝つ）
+  // 9) 空港の均しを有効にする（滑走路の平面が最後に勝つ）
   _worldAirportGrid = makeWorldGrid(40000);
   for (const a of WORLD_AIRPORTS) _worldAirportGrid.insert(a.x, a.z, a.flatOuterR, a);
   _worldAirportsReady = true;
@@ -1253,7 +1508,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     WORLD_SEED, WORLD_SIZE, WORLD_HALF,
     WORLD_LANDMASSES, WORLD_RANGES, WORLD_COUNTRIES, WORLD_CITIES, WORLD_AIRPORTS,
-    WORLD_LAKES, WORLD_RIVERS, worldLakeAt, worldRiverAt, worldWaterSurfaceAt,
+    WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, worldLakeAt, worldRiverAt, worldWaterSurfaceAt,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
     worldClamp, worldSmooth01, worldValueNoise, worldFbm,
     initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt,

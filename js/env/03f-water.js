@@ -76,10 +76,21 @@ function disposeWaterInstance(id) {
 
 // --- 川 ---------------------------------------------------------------------
 
+// 川の水面の高さ。川床（bedH）は世界側が河口で海面下まで下げているので、
+// ここでそれを引き直さず、そのまま使う。
+function riverSurfaceY(p) {
+  const bed = p.bedH !== undefined ? p.bedH : p.h - RIVER_BED_OFFSET_M;
+  return bed + RIVER_WATER_DEPTH_M;
+}
+
 // 経路に沿って左右へ幅を振り、帯状のメッシュにする
 function buildRiverInstance(river) {
+  // 河口では川床が海面下まで落ちている（入り江・三角州）。そこはもう海なので、
+  // 水面の帯は海面より上にいるあいだだけ張る。続きは海の面が引き受ける。
+  // 張ってしまうと半透明の面が海と二重になって、河口だけ帯状に暗くなる。
   const pts = river.points;
-  const n = pts.length;
+  let n = pts.length;
+  while (n > 1 && riverSurfaceY(pts[n - 1]) <= 0) n--;
   if (n < 2) return;
 
   const ox = pts[0].x, oz = pts[0].z, oy = pts[0].h;
@@ -95,7 +106,7 @@ function buildRiverInstance(river) {
     // 水平面内で接線に直交する向き
     const px = -tz, pz = tx;
     const w = (p.halfWidth || 12) + RIVER_BANK_MARGIN_M;
-    const y = p.h - RIVER_BED_OFFSET_M + RIVER_WATER_DEPTH_M;
+    const y = riverSurfaceY(p);
 
     const li = i * 6, ri = i * 6 + 3;
     positions[li] = p.x - ox + px * w; positions[li + 1] = y - oy; positions[li + 2] = p.z - oz + pz * w;
