@@ -63,6 +63,24 @@ function pushBox(positions, normals, colors, cx, cy, cz, sx, sy, sz, r, g, b) {
   }
 }
 
+// 間口 fw×fd の建物を (x, z) に建てると、中心か四隅が水（川・湖・海）に入るか。
+// 水面が地面より高ければ水の中。岸の斜面で水面とほぼ同じ高さの地面（0.3m以内）も水際として避ける。
+// 1都市で千軒以上を調べるので、地面の高さ（重い）は水の近くか海の近く（ground が低い）でだけ引く。
+function cityFootprintWet(x, z, fw, fd, ground) {
+  const hx = fw * 0.5, hz = fd * 0.5;
+  const pts = fw > 0 ? [[0, 0], [-hx, -hz], [hx, -hz], [hx, hz], [-hx, hz]] : [[0, 0]];
+  const nearSea = ground < 20;
+  for (const [dx, dz] of pts) {
+    const px = x + dx, pz = z + dz;
+    const w = worldWaterSurfaceAt(px, pz);
+    if (w === null && !nearSea) continue;
+    const g = worldHeightAt(px, pz);
+    if (g <= 0.5) return true;
+    if (w !== null && w > g - 0.3) return true;
+  }
+  return false;
+}
+
 // --- 都市の出し入れ ---------------------------------------------------------
 
 function initPlaces() {
@@ -171,6 +189,10 @@ function buildCityInstance(city) {
     // 地形が格子点の間を三角形で結んでいるぶんだけ建物が浮いたり埋まったりする。
     const ground = terrainSurfaceHeightAt(city.x + ox, city.z + oz);
     if (ground <= 0.5) continue; // 海にはみ出したぶんは建てない
+    // 川の中にも建てない。街は川の谷をまたいで広がるので、何もしないと
+    // 130都市の88,443軒のうち350軒（イーゼンダール152・アルドミア121など4都市）が水の上に建っていた。
+    // 間口の四隅まで見る（中心だけだと岸に半分かかった建物が水に浸かる）。
+    if (cityFootprintWet(city.x + ox, city.z + oz, fw, fd, ground)) continue;
     const localY = ground - city.groundY;
 
     const hex = CITY_BUILDING_COLORS[(rand() * CITY_BUILDING_COLORS.length) | 0];
@@ -193,6 +215,7 @@ function buildCityInstance(city) {
     const ox = Math.cos(ang) * dist, oz = Math.sin(ang) * dist;
     const ground = terrainSurfaceHeightAt(city.x + ox, city.z + oz);
     if (ground <= 0.5) continue;
+    if (cityFootprintWet(city.x + ox, city.z + oz, 0, 0, ground)) continue; // 川面に灯りを浮かべない
     const warm = 0.5 + rand() * 0.3;
     lightPositions.push(ox, ground - city.groundY + CITY_LIGHT_Y, oz);
     lightColors.push(warm, warm * 0.62, warm * 0.3);
@@ -272,28 +295,33 @@ function buildCityStreets(city) {
         * (0.82 + 0.18 * erand());
       if (halfChord < STEP) continue;
       const n = Math.max(2, Math.round((2 * halfChord) / STEP));
-      const first = vi;
+      // 川を渡るところは舗装を切る（橋はまだ無い）。敷いたままだと、
+      // 半透明の川面の下に街路が沈んで透けて見える。
+      let prev = -1; // 直前の点の頂点番号（水の中なら -1）
       for (let i = 0; i <= n; i++) {
         const t = -halfChord + (2 * halfChord * i) / n;
         // alongU: 線が u 方向に走る（横は v 方向）
         const u = alongU ? t : off;
         const v = alongU ? off : t;
         const ox = u * cosA - v * sinA, oz = u * sinA + v * cosA;
+        const ground = terrainSurfaceHeightAt(city.x + ox, city.z + oz);
+        if (cityFootprintWet(city.x + ox, city.z + oz, 0, 0, ground)) { prev = -1; continue; }
         // 幅方向の単位ベクトル
         const px = alongU ? -sinA : cosA, pz = alongU ? cosA : sinA;
-        const y = terrainSurfaceHeightAt(city.x + ox, city.z + oz) - city.groundY + CITY_STREET_LIFT_M;
+        const y = ground - city.groundY + CITY_STREET_LIFT_M;
         positions.push(ox + px * w, y, oz + pz * w);
         positions.push(ox - px * w, y, oz - pz * w);
         normals.push(0, 1, 0, 0, 1, 0);
+        // **巻き順は向きで入れ替える。** u方向とv方向では「進む向き×幅の向き」の
+        // 手前・奥が逆になるので、同じ順で三角形を張ると片方が裏を向いて
+        // 背面カリングで消える（実際、碁盤の目が一方向の縞にしか見えなかった）。
+        if (prev >= 0) {
+          const a = prev, c = a + 1, d = vi, e = vi + 1;
+          if (alongU) indices.push(a, d, c, c, d, e);
+          else indices.push(a, c, d, c, e, d);
+        }
+        prev = vi;
         vi += 2;
-      }
-      // **巻き順は向きで入れ替える。** u方向とv方向では「進む向き×幅の向き」の
-      // 手前・奥が逆になるので、同じ順で三角形を張ると片方が裏を向いて
-      // 背面カリングで消える（実際、碁盤の目が一方向の縞にしか見えなかった）。
-      for (let i = 0; i < n; i++) {
-        const a = first + i * 2, c = a + 1, d = a + 2, e = a + 3;
-        if (alongU) indices.push(a, d, c, c, d, e);
-        else indices.push(a, c, d, c, e, d);
       }
     }
   };
