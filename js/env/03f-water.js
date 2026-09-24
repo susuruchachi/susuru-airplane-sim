@@ -14,7 +14,10 @@ const WATER_ACTIVE_RADIUS = 130000;
 // 水面が地面に埋まったり、地面が水面から顔を出したりする。
 const RIVER_BANK_MARGIN_M = RIVER_WATER_DEPTH_M / RIVER_VALLEY_SLOPE;
 
-const LAKE_SHORE_RAYS = 72;
+// 岸の線を何方位で結ぶか。弦は岸の曲線から外へ最大36m・内へ最大78mずれる
+// （72方位では279m・402m）。内側のずれでは湖底が水面の1m未満下、外側のずれでは
+// 岸の斜面が水面より2mほど上にあるので、どちらも表には出ない。
+const LAKE_SHORE_RAYS = 240;
 
 function initWater() {
   EnvState.waterGroup = new THREE.Group();
@@ -83,43 +86,109 @@ function riverSurfaceY(p) {
   return bed + RIVER_WATER_DEPTH_M;
 }
 
+// 川の水面を張ってよい点か。海面より下（河口の先）と湖の中は張らない。
+// 河口の先はもう海で、湖の中は湖の水面が引き受ける。張ってしまうと半透明の面が
+// 二重になって、そこだけ帯状に暗くなる。
+function riverPointWet(p) {
+  return riverSurfaceY(p) > 0 && !worldLakeFootprintAt(p.x, p.z);
+}
+
+// 張る点と張らない点のあいだで、岸（または海面）をまたぐところを探す。
+// 以前は最後に張れた点で帯を切っていたので、河口では海面の手前0〜2.5m・
+// 最大375m手前で水面が終わり、その先の谷の斜面が乾いたまま海まで残っていた。
+function riverEdgePoint(wet, dry) {
+  let lo = 0, hi = 1;
+  const at = (t) => ({
+    x: wet.x + (dry.x - wet.x) * t,
+    z: wet.z + (dry.z - wet.z) * t,
+    bedH: riverSurfaceY(wet) + (riverSurfaceY(dry) - riverSurfaceY(wet)) * t - RIVER_WATER_DEPTH_M,
+    halfWidth: (wet.halfWidth || 12) + ((dry.halfWidth || 12) - (wet.halfWidth || 12)) * t,
+  });
+  for (let k = 0; k < 14; k++) {
+    const t = (lo + hi) / 2;
+    if (riverPointWet(at(t))) lo = t; else hi = t;
+  }
+  const e = at(hi);
+  // 湖や海に出るところは、水面をちょうど湖面・海面に置いて同じ高さでつなぐ
+  const lake = worldLakeFootprintAt(e.x, e.z);
+  if (lake) e.bedH = lake.level - RIVER_WATER_DEPTH_M;
+  else if (riverSurfaceY(e) < 0) e.bedH = -RIVER_WATER_DEPTH_M;
+  return e;
+}
+
+// 経路を「水面を張る区間」に切り分ける。区間の両端は岸・海面ちょうどの点
+function riverWetRuns(pts) {
+  const runs = [];
+  let run = null;
+  for (let i = 0; i < pts.length; i++) {
+    const wet = riverPointWet(pts[i]);
+    if (wet && !run) {
+      run = [];
+      if (i > 0) run.push(riverEdgePoint(pts[i], pts[i - 1]));
+    }
+    if (wet) run.push(pts[i]);
+    if (!wet && run) {
+      run.push(riverEdgePoint(pts[i - 1], pts[i]));
+      runs.push(run);
+      run = null;
+    }
+  }
+  if (run) runs.push(run);
+  return runs.filter((r) => r.length >= 2);
+}
+
 // 経路に沿って左右へ幅を振り、帯状のメッシュにする
 function buildRiverInstance(river) {
-  // 河口では川床が海面下まで落ちている（入り江・三角州）。そこはもう海なので、
-  // 水面の帯は海面より上にいるあいだだけ張る。続きは海の面が引き受ける。
-  // 張ってしまうと半透明の面が海と二重になって、河口だけ帯状に暗くなる。
-  const pts = river.points;
-  let n = pts.length;
-  while (n > 1 && riverSurfaceY(pts[n - 1]) <= 0) n--;
-  if (n < 2) return;
+  const runs = riverWetRuns(river.points);
+  if (!runs.length) return;
 
-  const ox = pts[0].x, oz = pts[0].z, oy = pts[0].h;
-  const positions = new Float32Array(n * 2 * 3);
-  const normals = new Float32Array(n * 2 * 3);
-
-  for (let i = 0; i < n; i++) {
-    const p = pts[i];
-    const a = pts[Math.max(i - 1, 0)], b = pts[Math.min(i + 1, n - 1)];
-    let tx = b.x - a.x, tz = b.z - a.z;
-    const len = Math.hypot(tx, tz) || 1;
-    tx /= len; tz /= len;
-    // 水平面内で接線に直交する向き
-    const px = -tz, pz = tx;
-    const w = (p.halfWidth || 12) + RIVER_BANK_MARGIN_M;
-    const y = riverSurfaceY(p);
-
-    const li = i * 6, ri = i * 6 + 3;
-    positions[li] = p.x - ox + px * w; positions[li + 1] = y - oy; positions[li + 2] = p.z - oz + pz * w;
-    positions[ri] = p.x - ox - px * w; positions[ri + 1] = y - oy; positions[ri + 2] = p.z - oz - pz * w;
-    normals[li + 1] = 1; normals[ri + 1] = 1;
+  // 河口に街がある川は川床を海面下まで下げられない（worldMouthCityGuard）ので、
+  // 水面が海面より上のまま終わる（グリムフィヨルド川は+3.6m）。
+  // そのままだと海の手前に水面の段ができるので、最後の1区間ぶん先で海面まで下ろす。
+  const tail = runs[runs.length - 1];
+  const last = tail[tail.length - 1];
+  if (river.mouthKind && riverSurfaceY(last) > 0.01) {
+    const prev = tail[tail.length - 2];
+    tail.push({
+      x: last.x + (last.x - prev.x), z: last.z + (last.z - prev.z),
+      bedH: -RIVER_WATER_DEPTH_M, halfWidth: last.halfWidth,
+    });
   }
 
-  const indices = new Uint32Array((n - 1) * 6);
-  let k = 0;
-  for (let i = 0; i < n - 1; i++) {
-    const a = i * 2, b = a + 1, c = a + 2, d = a + 3;
-    indices[k++] = a; indices[k++] = c; indices[k++] = b;
-    indices[k++] = b; indices[k++] = c; indices[k++] = d;
+  const pts0 = river.points;
+  const ox = pts0[0].x, oz = pts0[0].z, oy = pts0[0].h;
+  let total = 0;
+  for (const run of runs) total += run.length;
+  const positions = new Float32Array(total * 2 * 3);
+  const normals = new Float32Array(total * 2 * 3);
+  const indices = new Uint32Array((total - runs.length) * 6);
+  let v = 0, k = 0;
+
+  for (const pts of runs) {
+    const n = pts.length;
+    const base = v;
+    for (let i = 0; i < n; i++) {
+      const p = pts[i];
+      const a = pts[Math.max(i - 1, 0)], b = pts[Math.min(i + 1, n - 1)];
+      let tx = b.x - a.x, tz = b.z - a.z;
+      const len = Math.hypot(tx, tz) || 1;
+      tx /= len; tz /= len;
+      // 水平面内で接線に直交する向き
+      const px = -tz, pz = tx;
+      const w = (p.halfWidth || 12) + RIVER_BANK_MARGIN_M;
+      const y = riverSurfaceY(p);
+
+      const li = v * 3, ri = v * 3 + 3;
+      positions[li] = p.x - ox + px * w; positions[li + 1] = y - oy; positions[li + 2] = p.z - oz + pz * w;
+      positions[ri] = p.x - ox - px * w; positions[ri + 1] = y - oy; positions[ri + 2] = p.z - oz - pz * w;
+      normals[li + 1] = 1; normals[ri + 1] = 1;
+      v += 2;
+    }
+    for (let i = 0; i < n - 1; i++) {
+      const a = base + i * 2, b = a + 1, c = a + 2, d = a + 3;
+      indices[k++] = a; indices[k++] = c; indices[k++] = b;
+      indices[k++] = b; indices[k++] = c; indices[k++] = d;
+    }
   }
 
   const geo = new THREE.BufferGeometry();
@@ -139,23 +208,23 @@ function buildRiverInstance(river) {
 
 // --- 湖 ---------------------------------------------------------------------
 
-// 岸の形は「中心から外へ地形を辿って、水面の高さに達したところ」で決める。
-// 掘り方（worldCarveLakes）と描き方をここで一致させておくと、
-// 湖が丘に食い込む形もそのまま出る。
+// 岸の形は世界側の worldLakeRimScale そのもの。湖底はその内側を水面より下に掘り、
+// 岸の外は水面から上がる斜面になっている（03b-world.js の worldCarveLakes）ので、
+// 岸の線で水面を切れば、水面が地面から浮くことも、湖底が水面から出ることもない。
+//
+// 以前は中心から地形を辿って「水面の高さに達したところ」を岸にしていた。
+// 中の小山で止まるとその先の湖底が剥き出しになり、岸まで届かない方位では
+// outerR で切っていたので、そこでは水面が宙に浮いていた。
 function buildLakeInstance(lake) {
   const rays = LAKE_SHORE_RAYS;
   const positions = new Float32Array((rays + 1) * 3);
   const normals = new Float32Array((rays + 1) * 3);
   normals[1] = 1;
 
-  const step = lake.outerR / 26;
   for (let i = 0; i < rays; i++) {
     const a = (i / rays) * Math.PI * 2;
     const cx = Math.cos(a), cz = Math.sin(a);
-    let shore = lake.outerR;
-    for (let d = step; d <= lake.outerR * 1.35; d += step) {
-      if (worldHeightAt(lake.x + cx * d, lake.z + cz * d) >= lake.level) { shore = d; break; }
-    }
+    const shore = lake.outerR * worldLakeRimScale(lake, lake.x + cx, lake.z + cz);
     const vi = (i + 1) * 3;
     positions[vi] = cx * shore;
     positions[vi + 2] = cz * shore;

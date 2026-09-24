@@ -385,6 +385,60 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   summary('窪地になっている湖', deep, W.WORLD_LAKES.length);
   summary('街や空港と重ならない湖', clear, W.WORLD_LAKES.length);
   check(W.WORLD_LAKES.length >= 15, '湖が十分な数ある', String(W.WORLD_LAKES.length));
+
+  // 水面が浮いていないか。岸のすぐ外の地面が水面より低いと、水面の縁が宙に浮いて
+  // 下が透けて見える（以前は49湖の岸の半分がそうだった）。
+  // 川が岸を横切るところは谷が水面より低いが、そこは川の水面が湖面の高さで続いている。
+  // 岸の内側に水面より高い地面（島）があると、そこだけ水面を突き抜ける。
+  let dry = 0, noIsland = 0, worstFloat = 0, worstBank = 0;
+  for (const l of W.WORLD_LAKES) {
+    let float = 0, island = 0;
+    for (let i = 0; i < 360; i++) {
+      const a = (i / 360) * Math.PI * 2, cx = Math.cos(a), cz = Math.sin(a);
+      const rim = l.outerR * W.worldLakeRimScale(l, l.x + cx, l.z + cz);
+      const ox = l.x + cx * rim, oz = l.z + cz * rim;
+      const h = W.worldHeightAt(ox, oz);
+      const river = W.worldWaterSurfaceAt(ox, oz);
+      if (h < l.level - 0.5 && river === null) {
+        float++;
+        worstFloat = Math.max(worstFloat, l.level - h);
+      }
+      // 岸の外の斜面が崖になっていないか（岸から300mの平均の傾き）
+      const hb = W.worldHeightAt(l.x + cx * (rim + 300), l.z + cz * (rim + 300));
+      worstBank = Math.max(worstBank, (hb - Math.max(h, l.level)) / 300);
+      for (const f of [0.3, 0.6, 0.9, 0.99]) {
+        if (W.worldHeightAt(l.x + cx * rim * f, l.z + cz * rim * f) > l.level + 0.05) island++;
+      }
+    }
+    if (float === 0) dry++;
+    else check(false, `${l.nameLatin} の水面が岸より高くない`, `岸360点のうち${float}点が水面より低い`);
+    if (island === 0) noIsland++;
+    else check(false, `${l.nameLatin} の中に水面を突き抜ける地面がない`, `${island}点`);
+  }
+  summary('水面が浮いていない湖（岸が水面より低くない）', dry, W.WORLD_LAKES.length,
+    `最大 ${worstFloat.toFixed(1)}m`);
+  summary('水面を突き抜ける地面がない湖', noIsland, W.WORLD_LAKES.length);
+  check(worstBank < 0.4, '湖の岸の外が崖になっていない', `岸から300mの傾き 最大 ${worstBank.toFixed(2)}`);
+
+  // 川と湖の水面がつながっているか。岸を横切るところで、岸の外側の川の水面と湖面が同じ高さ
+  let joints = 0, flush = 0, worstStep = 0;
+  for (const r of W.WORLD_RIVERS) {
+    let prev = W.worldLakeFootprintAt(r.points[0].x, r.points[0].z);
+    for (let i = 1; i < r.points.length; i++) {
+      const cur = W.worldLakeFootprintAt(r.points[i].x, r.points[i].z);
+      if (cur !== prev) {
+        // 注ぐ側は湖面ちょうど、流れ出る側は湖面以下（そこから下っていく）
+        const lake = cur || prev, out = cur ? r.points[i - 1] : r.points[i];
+        const d = out.bedH + W.RIVER_WATER_DEPTH_M - lake.level;
+        const step = cur ? Math.abs(d) : Math.max(0, d);
+        joints++;
+        if (step < 0.01) flush++;
+        worstStep = Math.max(worstStep, step);
+      }
+      prev = cur;
+    }
+  }
+  summary('湖と段差なくつながる川', flush, joints, `最大の段差 ${worstStep.toFixed(2)}m`);
 }
 
 // --- 山脈 ---
