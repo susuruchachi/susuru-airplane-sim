@@ -310,16 +310,23 @@ const FOREST_FAR_SLACK = 900;
 // 重なり**、25%地面に埋めてあったのと合わせて、ひと続きのなめらかな面に溶けていた。
 // 縦横比も3.5:1と平たいので、上空から見ると森ではなく「小山の連なり」に見える。
 // いまは間隔より狭くして隣とのあいだに地面を見せ、縦横比も2.2:1まで立てた。
-const FOREST_FAR_CELL = 70;           // 候補を置く間隔
-const FOREST_FAR_WIDTH = 58;          // 塊の幅(m)。間隔より狭いので、塊と塊のあいだに地面が見える
-const FOREST_FAR_HEIGHT = 26;         // 塊の高さ(m)
+//
+// それでも 幅58m・間隔70m では、**大きな画面（iPad・パソコン）で1つ1つが「謎の小山」に
+// 見えた**。2km先の塊が画面の高さ1,000pxで約22px——木ではなく、ぽつぽつ離れた丘として
+// 読めてしまう大きさだった（スマホは画面が小さいぶん目立たなかった）。
+// 塊を**本物の木の樹冠の塊くらいまで小さく（幅36m・高さ18m）して、間隔（32m）より
+// わずかに広くし、隣と触れ合うくらいに詰めた**。ひとつひとつは見分けられず、
+// でこぼこした樹冠の面として続く。数は約5倍になる（下の「詰め直し」を軽くしてある）。
+const FOREST_FAR_CELL = 32;           // 候補を置く間隔
+const FOREST_FAR_WIDTH = 36;          // 塊の幅(m)。間隔よりわずかに広く、隣と触れ合う
+const FOREST_FAR_HEIGHT = 18;         // 塊の高さ(m)
 // 見せる半径のふちで、塊を小さく潰して地表の色へ溶かす割合。
 // ここが無いと、半径いっぱいのところで質感がぷつりと切れて円い境目が見える
 // （もともと直したかったのと同じ症状が、遠くへ移動するだけになってしまう）。
 const FOREST_FAR_TAPER = 0.26;
 const FOREST_FAR_SINK = 0.10;         // 地面へ埋める割合（下の「高さの取り方」参照）
 const FOREST_FAR_MAX_EYE_ALTITUDE_M = 9000;  // これより高く上がったら塊も消す
-const FOREST_FAR_SCAN_BUDGET = 1200;  // 1フレームに調べる候補の数
+const FOREST_FAR_SCAN_BUDGET = 1600;  // 1フレームに調べる候補の数
 const FOREST_FAR_REPACK_DIST = 120;   // カメラがこれだけ動いたら詰め直す
 
 let _farMounds = [];       // 一覧（ワールド座標）。カメラが大きく動いたときだけ作り直す
@@ -336,8 +343,10 @@ function forestFarRadius() {
 }
 
 function initFarForest() {
-  // 平たい笠ではなく、少し尖った葉の塊にする（1.30→1.55）
-  _farGeometry = buildConeGeometry(7, 1.55, 0.5);
+  // 平たい笠ではなく、少し尖った葉の塊にする（1.30→1.55）。
+  // 面は5枚（手前の木と同じ）。塊を小さく詰めて数が約5倍になったので、7枚のままだと
+  // 三角形が37万枚を超える。幅36mで向きもばらばらなので、5角形でも角は見えない。
+  _farGeometry = buildConeGeometry(5, 1.55, 0.5);
   EnvState.forestFarGroup = new THREE.Group();
   EnvState.forestFarGroup.visible = EnvState.env.treesVisible !== false;
   EnvState.scene.add(EnvState.forestFarGroup);
@@ -396,12 +405,23 @@ function scanFarForestCell(ix, iz, out) {
   // 同じ色を与えると手前の細い木より明るく出る。実際、手前の木は濃い緑なのに
   // その先の塊だけ淡い緑になって、木が終わって草地の丘が始まったように見えていた。
   // ばらつきも大きくして、隣どうしが別々の木立に見えるようにする。
-  const shade = 0.50 + r4 * 0.32;
-  out.push({
+  // 小さくしたぶん1つあたりの面が光を受ける向きがばらけて、同じ暗さでも明るく見えるので
+  // もう一段落とす（0.50〜0.82 → 0.40〜0.66）。
+  const shade = 0.40 + r4 * 0.26;
+  const m = {
     x, y: h - height * FOREST_FAR_SINK, z,
     w: width, h: height, rot: r2 * Math.PI * 2,
     r: color.r * shade, g: color.g * shade, b: color.b * shade,
-  });
+    mat: null,
+  };
+  // 縮めないときの行列は先に作っておく（詰め直しで毎回組み立てると、数が5倍になった
+  // ぶんそのまま重くなる）。
+  _farP.set(m.x, m.y, m.z);
+  _farQ.setFromAxisAngle(_farAxis, m.rot);
+  _farS.set(m.w, m.h, m.w);
+  _farM.compose(_farP, _farQ, _farS);
+  m.mat = Float32Array.from(_farM.elements);
+  out.push(m);
 }
 
 // カメラの周りの塊の一覧を作り直しはじめる（実際の走査は少しずつ進める）
@@ -485,6 +505,7 @@ function repackFarForest() {
   const taperFrom = far * (1 - FOREST_FAR_TAPER);
   const taperSpan = far - taperFrom;
   const colors = mesh.instanceColor.array;
+  const mats = mesh.instanceMatrix.array;
   let n = 0;
   for (const m of _farMounds) {
     const dx = m.x - cam.x, dz = m.z - cam.z;
@@ -493,13 +514,16 @@ function repackFarForest() {
     // ふちに近い塊ほど小さく潰して、地表の色へなだらかに溶かす。
     // 埋める深さは元の高さで決めてあるので、縮んだ塊は地面に沈んで先に消える
     // （そのぶん溶け方が少し早い。狙いどおりなので直していない）。
-    let s = 1;
-    if (d2 > taperFrom * taperFrom) s = 1 - (Math.sqrt(d2) - taperFrom) / taperSpan;
-    _farP.set(m.x, m.y, m.z);
-    _farQ.setFromAxisAngle(_farAxis, m.rot);
-    _farS.set(m.w * s, m.h * s, m.w * s);
-    _farM.compose(_farP, _farQ, _farS);
-    mesh.setMatrixAt(n, _farM);
+    if (d2 > taperFrom * taperFrom) {
+      const s = 1 - (Math.sqrt(d2) - taperFrom) / taperSpan;
+      _farP.set(m.x, m.y, m.z);
+      _farQ.setFromAxisAngle(_farAxis, m.rot);
+      _farS.set(m.w * s, m.h * s, m.w * s);
+      _farM.compose(_farP, _farQ, _farS);
+      mesh.setMatrixAt(n, _farM);
+    } else {
+      mats.set(m.mat, n * 16);
+    }
     colors[n * 3] = m.r; colors[n * 3 + 1] = m.g; colors[n * 3 + 2] = m.b;
     n++;
   }
