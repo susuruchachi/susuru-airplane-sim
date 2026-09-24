@@ -407,26 +407,11 @@ let _worldDeltaGrid = null;
 const CITY_BUILT_RADIUS_MIN_M = 700;
 const CITY_BUILT_RADIUS_MAX_M = 3800;
 
-// 街路の碁盤の目。街区の一辺と、街路そのものの半幅。
+// 街区の一辺（街路の間隔）。街路網の形そのものは js/env/03j-city-layout.js が作る。
 // 街区を小さくしすぎると、建物1個より街路のほうが太くなって「舗装の海」になる。
 // 建物の間口が11〜37mなので、街区は1辺に数軒が並ぶ大きさにする。
 const CITY_BLOCK_MIN_M = 150;
 const CITY_BLOCK_MAX_M = 230;
-const CITY_STREET_HALF_W_M = 7;
-// 建物を街路から離す余白。0だと建物の角が舗装にかぶって街路が途切れて見える。
-const CITY_STREET_CLEAR_M = 4;
-
-// 街の中心からの相対位置 (ox,oz) が、いちばん近い街路の中心線からどれだけ離れているか。
-// 建物を街路に建てないためと、街路の帯を描くために使う——**同じ式を両方が見る**ので、
-// 建物と舗装がずれない。
-function worldCityStreetDist(city, ox, oz) {
-  const c = Math.cos(city.streetAngle), s = Math.sin(city.streetAngle);
-  const u = ox * c + oz * s, v = -ox * s + oz * c;
-  const b = city.blockM;
-  const du = Math.abs(u - Math.round(u / b) * b);
-  const dv = Math.abs(v - Math.round(v / b) * b);
-  return du < dv ? du : dv;
-}
 
 // 街の下の地形をゆるく均す強さ。1.0だと完全な平面になって不自然なので、
 // 元の起伏を1割残す。空港（完全に平ら）と違い、街は多少の起伏があってよい。
@@ -3103,13 +3088,12 @@ if (typeof module !== 'undefined' && module.exports) {
     worldLakeAt, worldRiverAt, worldWaterSurfaceAt, worldLakeFootprintAt, worldLakeRimScale,
     worldRangeUpliftAt, worldInRangeAt, worldNearestCrestDist,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
-    worldClamp, worldSmooth01, worldValueNoise, worldFbm,
+    worldClamp, worldSmooth01, worldValueNoise, worldFbm, worldRng,
     initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt,
     worldTemperatureAt, worldDrynessAt, worldForestDensity, worldWeatherFieldAt, worldLocalReliefAt,
     worldNearestAirport, worldRegionAt, worldCountryById, worldCityById, worldAirportById,
-    worldRangeCrestAt, worldRangeHeightAt, worldCityStreetDist,
+    worldRangeCrestAt, worldRangeHeightAt,
     airportLocalToWorld, airportRunwayHalfSpan, worldAirportGateAt, worldAirportRoadBlock,
     worldAirportRunwayCenter, worldBridgeProfileY, BRIDGE_CLEARANCE_M, worldRoadEdgeDistance,
-    CITY_STREET_HALF_W_M, CITY_STREET_CLEAR_M,
   };
 }

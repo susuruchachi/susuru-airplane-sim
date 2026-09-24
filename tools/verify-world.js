@@ -95,6 +95,49 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   summary('市街地が平坦な都市', flat, W.WORLD_CITIES.length);
 }
 
+// --- 街の形：街路の型と建物の並べ方（js/env/03j-city-layout.js） ---
+// 以前は130都市すべてが碁盤の目で、建物は向きが世界の軸のままだった。
+{
+  const C = require(path.join(__dirname, '..', 'js', 'env', '03j-city-layout.js'));
+  const types = {}, perCountry = {};
+  let withStreets = 0, planned = 0, target = 0, onPavement = 0, worstMs = 0;
+  for (const c of W.WORLD_CITIES) {
+    const t0 = Date.now();
+    const net = C.cityStreetNetwork(c);
+    const plan = C.cityBuildingPlan(c);
+    worstMs = Math.max(worstMs, Date.now() - t0);
+    const L = C.cityLayoutOf(c);
+    types[L.type] = (types[L.type] || 0) + 1;
+    (perCountry[c.country] = perCountry[c.country] || new Set()).add(L.type);
+    if (net.streets.length > 0) withStreets++;
+    target += C.cityBuildingTarget(c);
+    planned += plan.length;
+    // 建物の中心と四隅が舗装にかかっていないか（向きを付けた四隅で見る）
+    for (const b of plan) {
+      const dx = Math.cos(b.ang), dz = Math.sin(b.ang), px = -dz, pz = dx;
+      for (const [u, v] of [[0, 0], [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5], [-0.5, -0.5]]) {
+        const x = b.x + dx * u * b.w + px * v * b.d, z = b.z + dz * u * b.w + pz * v * b.d;
+        if (C.cityStreetClearance(net, x, z) < 0) { onPavement++; break; }
+      }
+    }
+  }
+  console.log(`[  --  ] 街路の型: ${Object.entries(types).map(([k, v]) => `${k} ${v}`).join(' / ')}`);
+  summary('街路のある都市', withStreets, W.WORLD_CITIES.length);
+  check(Object.keys(types).length >= 4, '街路の型が4種類以上ある', Object.keys(types).join(','));
+  let varied = 0, big = 0;
+  for (const co of W.WORLD_COUNTRIES) {
+    const n = W.WORLD_CITIES.filter((c) => c.country === co.id).length;
+    if (n < 4) continue;
+    big++;
+    if (perCountry[co.id] && perCountry[co.id].size >= 2) varied++;
+  }
+  summary('4都市以上ある国で、街の型が2種類以上', varied, big);
+  check(planned >= target * 0.9, '建物が予定の9割以上建つ（街路にかからない場所へ置けた）',
+    `${planned}/${target}（${(planned / target * 100).toFixed(0)}%）`);
+  check(onPavement === 0, '舗装にかかる建物が無い', `${onPavement}軒`);
+  check(worstMs < 100, '街1つの並べ方が100ms以内', `最大 ${worstMs}ms`);
+}
+
 // --- 空港：標高どおりに均されていて、滑走路の全長が平らか ---
 {
   let level = 0, flat = 0, apart = 0;

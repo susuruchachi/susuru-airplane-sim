@@ -22,8 +22,7 @@ const CITY_BRIDGE_RAMP_SLOPE = 0.08;
 const CITY_BRIDGE_EVERY = 3;       // 街路何本に1本、橋を架けるか
 const CITY_BRIDGE_MAX_M = 1200;    // これより長く水の上を行く街路には架けない
 
-// 建物の色。地形と同じく、sRGB出力で持ち上がるぶんを見越して暗めに置く。
-const CITY_BUILDING_COLORS = [0x43413c, 0x4b4740, 0x3f4247, 0x504a43, 0x3a3d41];
+// 建物の色は国ごとに 03j-city-layout.js の CITY_COUNTRY_STYLE が持っている。
 
 // ラベルの種類ごとの見え方。国名は遠くからでも読めたほうが地図として使いやすい。
 const LABEL_KINDS = {
@@ -40,13 +39,15 @@ const LABEL_KINDS = {
 // 都市IDから決まる擬似乱数（世界側と同じ実装を使う）
 const placesRng = worldRng;
 
-// 直方体1つぶんの頂点・法線・色を配列へ積む（都市ごとに1メッシュへまとめるため）
-function pushBox(positions, normals, colors, cx, cy, cz, sx, sy, sz, r, g, b) {
-  const x0 = cx - sx / 2, x1 = cx + sx / 2;
+// 直方体1つぶんの頂点・法線・色を配列へ積む（都市ごとに1メッシュへまとめるため）。
+// ang は水平面での向き（sx の辺がこの向きに沿う）。建物を街路の向きに揃えるのに使う。
+function pushBox(positions, normals, colors, cx, cy, cz, sx, sy, sz, r, g, b, ang) {
+  const c = Math.cos(ang || 0), sn = Math.sin(ang || 0);
+  const x0 = -sx / 2, x1 = sx / 2;
   const y0 = cy, y1 = cy + sy;
-  const z0 = cz - sz / 2, z1 = cz + sz / 2;
+  const z0 = -sz / 2, z1 = sz / 2;
 
-  // [法線, その面の4隅] の順に並べる
+  // [法線, その面の4隅] の順に並べる（向きを付ける前の、箱の軸に沿った座標）
   const faces = [
     [0, 1, 0, [x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], // 上
     [0, 0, 1, [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], // 南
@@ -60,9 +61,12 @@ function pushBox(positions, normals, colors, cx, cy, cz, sx, sy, sz, r, g, b) {
     const q = [f[3], f[4], f[5], f[6]];
     // 面ごとに明るさを変えると、単色でも立体感が出る
     const shade = ny === 1 ? 1.15 : (nx !== 0 ? 0.82 : 0.95);
+    // 回す：箱の x 軸 → (c, sn)、z 軸 → (-sn, c)
+    const wnx = nx * c - nz * sn, wnz = nx * sn + nz * c;
     for (const k of [0, 1, 2, 0, 2, 3]) {
-      positions.push(q[k][0], q[k][1], q[k][2]);
-      normals.push(nx, ny, nz);
+      const lx = q[k][0], lz = q[k][2];
+      positions.push(cx + lx * c - lz * sn, q[k][1], cz + lx * sn + lz * c);
+      normals.push(wnx, ny, wnz);
       colors.push(r * shade, g * shade, b * shade);
     }
   }
@@ -103,9 +107,11 @@ function initPlaces() {
   refreshCities();
 }
 
-// 1フレームに建てる街の数。1都市ぶんの生成に30〜42msかかる（建物3.7万頂点＋
+// 1フレームに進める街の仕事の数。1都市ぶんの生成に30〜42msかかる（建物3.7万頂点＋
 // 街路7,800頂点）ので、圏内に入った街をその場で全部建てると、街に近づくたびに
 // 100ms超の引っかかりが出る。地形タイルと同じくキューに積んでフレームを分ける。
+// 1都市は「街路網と建物の並びを決める」（03j-city-layout.js、路地の多い街で最大50ms）・
+// 「建物と灯り」・「街路の舗装と橋」の3つの仕事に分けて、別々のフレームで進める。
 const CITY_BUILD_BUDGET = 1;
 let _cityWork = [];
 
@@ -117,8 +123,10 @@ function refreshCities() {
   _cityWork = [];
   for (const city of WORLD_CITIES) {
     const d = Math.hypot(city.x - cam.x, city.z - cam.z);
-    const built = EnvState.builtCities.has(city.id);
-    if (d < R && !built) _cityWork.push({ city, d });
+    const entry = EnvState.builtCities.get(city.id);
+    const built = !!entry;
+    // 建物まで建って街路がまだの街も戻す（列を作り直すと、残りの仕事が消えるため）
+    if (d < R && (!built || !entry.streets)) _cityWork.push({ city, d, plan: built ? true : null });
     else if (d >= R && built) disposeCityInstance(city.id);
   }
   // 近い街から建てる（見ている場所ほど早く出てほしい）
@@ -128,8 +136,17 @@ function refreshCities() {
 function updateCities() {
   let budget = CITY_BUILD_BUDGET;
   while (budget > 0 && _cityWork.length > 0) {
-    const w = _cityWork.shift();
-    if (!EnvState.builtCities.has(w.city.id)) buildCityInstance(w.city);
+    const w = _cityWork[0];
+    const entry = EnvState.builtCities.get(w.city.id);
+    if (!w.plan) {
+      if (entry) { _cityWork.shift(); continue; } // もう建っている
+      w.plan = cityBuildingPlan(w.city); // 街路網もここで作られる（街に持たせてある）
+    } else if (!entry) {
+      buildCityInstance(w.city, w.plan);
+    } else {
+      _cityWork.shift();
+      if (!entry.streets) addCityStreets(entry);
+    }
     budget--;
   }
 }
@@ -153,44 +170,19 @@ function disposeCityInstance(id) {
 
 // 都市1つぶんの建物メッシュと夜景の灯りを作る。
 // 頂点は街の中心からのローカル座標で持ち、位置はメッシュ側に入れる（遠方でのfloat32対策）。
-function buildCityInstance(city) {
-  const rand = placesRng(city.id);
+function buildCityInstance(city, plan) {
+  const rand = placesRng(city.id + ':lights');
   const radius = city.builtRadiusM;
-  // 街区に収まるようになったぶん、軒数を増やす。以前（90+size*430＝167〜520軒）は
-  // 半径3.5kmの街に230軒で、上空から見ると点が散らばっているだけだった。
-  const buildingCount = Math.round(240 + city.size * 1100);
+  plan = plan || cityBuildingPlan(city);
+  const buildingCount = plan.length;
 
   const positions = [], normals = [], colors = [];
   const lightPositions = [], lightColors = [];
 
-  const cosA = Math.cos(city.streetAngle), sinA = Math.sin(city.streetAngle);
-
-  for (let i = 0; i < buildingCount; i++) {
-    // 中心ほど密になるよう、半径方向の分布に偏りを付ける
-    const t = Math.pow(rand(), 0.65);
-    const ang = rand() * Math.PI * 2;
-    const dist = t * radius;
-
-    // 中心に近いほど高層になる
-    const h = (7 + rand() * 22) * (0.6 + city.size * 1.5) * (0.45 + (1 - t) * 1.5);
-    const fw = 11 + rand() * 26, fd = 11 + rand() * 26;
-
-    // **街区の中へ寄せる。** 街路の上に来たものを弾く作りにすると、
-    // 建物の間口（最大37m）ぶんの余白まで要るので街区の半分近くが使えなくなり、
-    // 1都市あたりの建物が230軒から124軒まで減ってしまう。
-    // 弾くのではなく、はみ出したぶんを街区の内側へ押し込む。
-    // 街路の位置の決め方は世界側の worldCityStreetDist と同じ（街路は blockM の倍数）。
-    const clear = CITY_STREET_HALF_W_M + CITY_STREET_CLEAR_M + Math.max(fw, fd) * 0.5;
-    const block = city.blockM;
-    const half = block * 0.5 - clear;
-    if (half <= 0) continue;
-    let u = Math.cos(ang) * dist * cosA + Math.sin(ang) * dist * sinA;
-    let v = -Math.cos(ang) * dist * sinA + Math.sin(ang) * dist * cosA;
-    const cu = (Math.floor(u / block) + 0.5) * block, cv = (Math.floor(v / block) + 0.5) * block;
-    u = cu + worldClamp(u - cu, -half, half);
-    v = cv + worldClamp(v - cv, -half, half);
-    const ox = u * cosA - v * sinA, oz = u * sinA + v * cosA;
-
+  // 建物の並び（どこに・どの向きで・どの大きさで）は 03j-city-layout.js が決める。
+  // いちばん近い街路に面して、その向きに揃えて建てる。
+  for (const bld of plan) {
+    const ox = bld.x, oz = bld.z;
     // 地形メッシュの上の高さを使う。worldHeightAt の値だと、
     // 地形が格子点の間を三角形で結んでいるぶんだけ建物が浮いたり埋まったりする。
     const ground = terrainSurfaceHeightAt(city.x + ox, city.z + oz);
@@ -198,14 +190,17 @@ function buildCityInstance(city) {
     // 川の中にも建てない。街は川の谷をまたいで広がるので、何もしないと
     // 130都市の88,443軒のうち350軒（イーゼンダール152・アルドミア121など4都市）が水の上に建っていた。
     // 間口の四隅まで見る（中心だけだと岸に半分かかった建物が水に浸かる）。
-    if (cityFootprintWet(city.x + ox, city.z + oz, fw, fd, ground)) continue;
+    // 向きを付けたぶん四隅は回るが、外接する正方形で見ておけば取りこぼさない。
+    const span = Math.max(bld.w, bld.d);
+    if (cityFootprintWet(city.x + ox, city.z + oz, span, span, ground)) continue;
     const localY = ground - city.groundY;
+    const h = bld.h;
 
-    const hex = CITY_BUILDING_COLORS[(rand() * CITY_BUILDING_COLORS.length) | 0];
+    const hex = bld.color;
     const r = ((hex >> 16) & 255) / 255, g = ((hex >> 8) & 255) / 255, b = (hex & 255) / 255;
 
     // 斜面で建物が浮かないよう、少し地面へ埋める
-    pushBox(positions, normals, colors, ox, localY - 3, oz, fw, h + 3, fd, r, g, b);
+    pushBox(positions, normals, colors, ox, localY - 3, oz, bld.w, h + 3, bld.d, r, g, b, bld.ang);
 
     for (let k = 0; k < 2; k++) {
       const warm = 0.70 + rand() * 0.30;
@@ -227,9 +222,6 @@ function buildCityInstance(city) {
     lightColors.push(warm, warm * 0.62, warm * 0.3);
   }
 
-  // 街路の舗装。建物と同じメッシュに混ぜてしまうと、夜に建物だけ発光させる
-  // （updatePlacesForDaylight）ときに舗装まで光ってしまうので、別のメッシュにする。
-  const streets = buildCityStreets(city);
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
@@ -260,148 +252,128 @@ function buildCityInstance(city) {
   lights.updateMatrix();
   EnvState.cityGroup.add(lights);
 
-  if (streets) {
-    streets.position.copy(buildings.position);
-    streets.matrixAutoUpdate = false;
-    streets.updateMatrix();
-    EnvState.cityGroup.add(streets);
-  }
-
-  EnvState.builtCities.set(city.id, { city, buildings, lights, streets });
+  // 街路は次の仕事（addCityStreets）で足す
+  EnvState.builtCities.set(city.id, { city, buildings, lights, streets: null });
 }
 
-// 街路の舗装。碁盤の目の線を市街地の円で切って、地形の上に帯として敷く。
+// 街路の舗装。建物と同じメッシュに混ぜてしまうと、夜に建物だけ発光させる
+// （updatePlacesForDaylight）ときに舗装まで光ってしまうので、別のメッシュにする。
+function addCityStreets(entry) {
+  const streets = buildCityStreets(entry.city);
+  if (!streets) return;
+  streets.position.copy(entry.buildings.position);
+  streets.matrixAutoUpdate = false;
+  streets.updateMatrix();
+  EnvState.cityGroup.add(streets);
+  entry.streets = streets;
+}
+
+// 街路の舗装。03j-city-layout.js の街路網（折れ線の集まり）を、地形の上に帯として敷く。
+// 建物もその街路網を見て並べているので、舗装と建物がずれることはない。
 //
-// 街路の位置は世界側の worldCityStreetDist と同じ決め方（blockM の倍数）。
-// 建物を建てない判定もそこを見ているので、舗装と建物がずれることはない。
-//
-// 地形は刻まない——街路の幅は14mで、いちばん細かいLODでも地形の頂点間隔は312m。
+// 地形は刻まない——街路の幅は9〜20mで、いちばん細かいLODでも地形の頂点間隔は312m。
 // 道路（03i-roads.js）と同じくデカールとして重ねる。
 function buildCityStreets(city) {
-  const R = city.builtRadiusM;
-  const b = city.blockM;
-  const w = CITY_STREET_HALF_W_M;
-  const cosA = Math.cos(city.streetAngle), sinA = Math.sin(city.streetAngle);
-  const kMax = Math.floor(R / b);
-
+  const net = cityStreetNetwork(city);
   const positions = [], normals = [], indices = [];
   let vi = 0;
-
-  // 帯を地形なりに置くため、線に沿って刻んで高さを拾う
-  const STEP = 90;
-  // 街路の端をきれいな円で切ると、上空から見て街の輪郭がコンパスで描いた円になる。
-  // 線ごとに長さをばらつかせて、外周をぎざぎざにする。
-  const erand = placesRng('edge:' + city.id);
-  // 橋の構造を作るための、線ごとの断面の列（橋の無い線は null）
+  // 橋の構造を作るための、街路ごとの断面の列（橋の無い街路は null）
   const bridgeRows = [];
-  const spanOfLine = new Map();
-  const addStrip = (alongU) => {
-    for (let k = -kMax; k <= kMax; k++) {
-      const off = k * b;
-      // 円で切る。線の中心からの弦の半分
-      const rk = R * (0.80 + 0.20 * erand());
-      const halfChord = Math.sqrt(Math.max(0, rk * rk - off * off))
-        * (0.82 + 0.18 * erand());
-      if (halfChord < STEP) continue;
-      const n = Math.max(2, Math.round((2 * halfChord) / STEP));
-      // 幅方向の単位ベクトル
-      const px = alongU ? -sinA : cosA, pz = alongU ? cosA : sinA;
-      // まず線に沿って刻み、地面の高さと「水の上か」を拾う
-      const smp = [];
-      for (let i = 0; i <= n; i++) {
-        const t = -halfChord + (2 * halfChord * i) / n;
-        // alongU: 線が u 方向に走る（横は v 方向）
-        const u = alongU ? t : off;
-        const v = alongU ? off : t;
-        const ox = u * cosA - v * sinA, oz = u * sinA + v * cosA;
-        const ground = terrainSurfaceHeightAt(city.x + ox, city.z + oz);
-        const wet = cityFootprintWet(city.x + ox, city.z + oz, 0, 0, ground);
-        const water = wet ? Math.max(worldWaterSurfaceAt(city.x + ox, city.z + oz) || 0, 0) : 0;
-        smp.push({ ox, oz, ground, wet, water, s: i * (2 * halfChord / n), prof: -Infinity, cut: false });
-      }
-      // **川を渡るところは橋にする。** 両側に陸がある水の区間だけ（線の端が水の中なら、
-      // そこは街の外の川岸なので、以前と同じく舗装を切る）。道路の橋と同じく、
-      // 桁は水面+CITY_BRIDGE_CLEARANCE_M、両岸は勾配 CITY_BRIDGE_RAMP_SLOPE でのぼる。
-      for (let i = 0; i < smp.length;) {
-        if (!smp[i].wet) { i++; continue; }
-        let j = i;
-        let waterY = 0;
-        while (j < smp.length && smp[j].wet) { waterY = Math.max(waterY, smp[j].water); j++; }
-        // 橋を架けるのは街路3本に1本だけ。全部に架けると150〜230mおきに橋が並ぶ。
-        // **川を横切る街路だけ**に架ける。川に沿って走る街路は、川の上を何百mも縦に渡っていた。
-        // 水の区間の真ん中から、街路と直角の向きへ区間の半分だけ出てみて、両方とも水なら
-        // 「川はこの街路の向きより直角の向きに広い」＝この街路は川を横切っている。
-        const runLen = (j < smp.length ? smp[j].s : smp[smp.length - 1].s) - (i > 0 ? smp[i - 1].s : 0);
-        let crosses = false;
-        if (i > 0 && j < smp.length && k % CITY_BRIDGE_EVERY === 0 && runLen <= CITY_BRIDGE_MAX_M) {
-          const m = smp[(i + j - 1) >> 1];
-          const d = runLen * 0.5;
-          const ax = city.x + m.ox + px * d, az = city.z + m.oz + pz * d;
-          const bx = city.x + m.ox - px * d, bz = city.z + m.oz - pz * d;
-          crosses = cityFootprintWet(ax, az, 0, 0, terrainSurfaceHeightAt(ax, az))
-            && cityFootprintWet(bx, bz, 0, 0, terrainSurfaceHeightAt(bx, bz));
-        }
-        if (!crosses) {
-          for (let k = i; k < j; k++) smp[k].cut = true;
-        } else {
-          const deckY = waterY + CITY_BRIDGE_CLEARANCE_M;
-          const s1 = smp[i - 1].s, s2 = smp[j].s;
-          for (let k = 0; k < smp.length; k++) {
-            const q = smp[k];
-            let prof;
-            if (q.s < s1) prof = deckY - (s1 - q.s) * CITY_BRIDGE_RAMP_SLOPE;
-            else if (q.s > s2) prof = deckY - (q.s - s2) * CITY_BRIDGE_RAMP_SLOPE;
-            else prof = deckY;
-            if (prof > q.prof) q.prof = prof;
-          }
-          spanOfLine.set(bridgeRows.length, (spanOfLine.get(bridgeRows.length) || []).concat([{ s1, s2 }]));
-        }
-        i = j;
-      }
-      let prev = -1; // 直前の点の頂点番号（切ったところなら -1）
-      const lineRows = [];
-      for (const q of smp) {
-        if (q.cut) { prev = -1; lineRows.push(null); continue; }
-        const yW = Math.max(q.ground + CITY_STREET_LIFT_M, q.prof); // 世界の高さ
-        const y = yW - city.groundY;
-        positions.push(q.ox + px * w, y, q.oz + pz * w);
-        positions.push(q.ox - px * w, y, q.oz - pz * w);
-        normals.push(0, 1, 0, 0, 1, 0);
-        // **巻き順は向きで入れ替える。** u方向とv方向では「進む向き×幅の向き」の
-        // 手前・奥が逆になるので、同じ順で三角形を張ると片方が裏を向いて
-        // 背面カリングで消える（実際、碁盤の目が一方向の縞にしか見えなかった）。
-        if (prev >= 0) {
-          const a = prev, c = a + 1, d = vi, e = vi + 1;
-          if (alongU) indices.push(a, d, c, c, d, e);
-          else indices.push(a, c, d, c, e, d);
-        }
-        prev = vi;
-        vi += 2;
-        lineRows.push({
-          x: city.x + q.ox, z: city.z + q.oz,
-          lx: city.x + q.ox + px * w, lz: city.z + q.oz + pz * w,
-          rx: city.x + q.ox - px * w, rz: city.z + q.oz - pz * w,
-          yl: yW, yr: yW, gl: q.ground, gr: q.ground, s: q.s, prof: q.prof,
-        });
-      }
-      if (spanOfLine.has(bridgeRows.length)) bridgeRows.push({ rows: lineRows, spans: spanOfLine.get(bridgeRows.length) });
-      else bridgeRows.push(null);
+
+  net.streets.forEach((st, lineNo) => {
+    const w = st.halfW;
+    const pts = st.pts;
+    // 点ごとの幅方向（進む向きの左）。前後の点から向きを取る
+    const smp = [];
+    let s = 0;
+    for (let i = 0; i < pts.length; i++) {
+      if (i > 0) s += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z);
+      const a = pts[Math.max(i - 1, 0)], b = pts[Math.min(i + 1, pts.length - 1)];
+      let tx = b.x - a.x, tz = b.z - a.z;
+      const tl = Math.hypot(tx, tz) || 1;
+      tx /= tl; tz /= tl;
+      const ox = pts[i].x, oz = pts[i].z;
+      const ground = terrainSurfaceHeightAt(city.x + ox, city.z + oz);
+      const wet = cityFootprintWet(city.x + ox, city.z + oz, 0, 0, ground);
+      const water = wet ? Math.max(worldWaterSurfaceAt(city.x + ox, city.z + oz) || 0, 0) : 0;
+      smp.push({ ox, oz, px: -tz, pz: tx, ground, wet, water, s, prof: -Infinity, cut: false });
     }
-  };
-  addStrip(true);
-  addStrip(false);
+    // **川を渡るところは橋にする。** 両側に陸がある水の区間だけ（線の端が水の中なら、
+    // そこは街の外の川岸なので、以前と同じく舗装を切る）。道路の橋と同じく、
+    // 桁は水面+CITY_BRIDGE_CLEARANCE_M、両岸は勾配 CITY_BRIDGE_RAMP_SLOPE でのぼる。
+    const spans = [];
+    for (let i = 0; i < smp.length;) {
+      if (!smp[i].wet) { i++; continue; }
+      let j = i;
+      let waterY = 0;
+      while (j < smp.length && smp[j].wet) { waterY = Math.max(waterY, smp[j].water); j++; }
+      // 橋を架けるのは大通りと、街路3本に1本だけ。全部に架けると150〜230mおきに橋が並ぶ。
+      // **川を横切る街路だけ**に架ける。川に沿って走る街路は、川の上を何百mも縦に渡っていた。
+      // 水の区間の真ん中から、街路と直角の向きへ区間の半分だけ出てみて、両方とも水なら
+      // 「川はこの街路の向きより直角の向きに広い」＝この街路は川を横切っている。
+      const runLen = (j < smp.length ? smp[j].s : smp[smp.length - 1].s) - (i > 0 ? smp[i - 1].s : 0);
+      let crosses = false;
+      if (i > 0 && j < smp.length && (st.major || lineNo % CITY_BRIDGE_EVERY === 0) && runLen <= CITY_BRIDGE_MAX_M) {
+        const m = smp[(i + j - 1) >> 1];
+        const d = runLen * 0.5;
+        const ax = city.x + m.ox + m.px * d, az = city.z + m.oz + m.pz * d;
+        const bx = city.x + m.ox - m.px * d, bz = city.z + m.oz - m.pz * d;
+        crosses = cityFootprintWet(ax, az, 0, 0, terrainSurfaceHeightAt(ax, az))
+          && cityFootprintWet(bx, bz, 0, 0, terrainSurfaceHeightAt(bx, bz));
+      }
+      if (!crosses) {
+        for (let k = i; k < j; k++) smp[k].cut = true;
+      } else {
+        const deckY = waterY + CITY_BRIDGE_CLEARANCE_M;
+        const s1 = smp[i - 1].s, s2 = smp[j].s;
+        for (const q of smp) {
+          let prof;
+          if (q.s < s1) prof = deckY - (s1 - q.s) * CITY_BRIDGE_RAMP_SLOPE;
+          else if (q.s > s2) prof = deckY - (q.s - s2) * CITY_BRIDGE_RAMP_SLOPE;
+          else prof = deckY;
+          if (prof > q.prof) q.prof = prof;
+        }
+        spans.push({ s1, s2 });
+      }
+      i = j;
+    }
+    let prev = -1; // 直前の点の頂点番号（切ったところなら -1）
+    const lineRows = [];
+    for (const q of smp) {
+      if (q.cut) { prev = -1; lineRows.push(null); continue; }
+      const yW = Math.max(q.ground + CITY_STREET_LIFT_M, q.prof); // 世界の高さ
+      const y = yW - city.groundY;
+      positions.push(q.ox + q.px * w, y, q.oz + q.pz * w);
+      positions.push(q.ox - q.px * w, y, q.oz - q.pz * w);
+      normals.push(0, 1, 0, 0, 1, 0);
+      // 左（進む向きの左）→右の順に積んでいるので、この巻き順で上を向く
+      if (prev >= 0) {
+        const a = prev, c = a + 1, d = vi, e = vi + 1;
+        indices.push(a, d, c, c, d, e);
+      }
+      prev = vi;
+      vi += 2;
+      lineRows.push({
+        x: city.x + q.ox, z: city.z + q.oz,
+        lx: city.x + q.ox + q.px * w, lz: city.z + q.oz + q.pz * w,
+        rx: city.x + q.ox - q.px * w, rz: city.z + q.oz - q.pz * w,
+        yl: yW, yr: yW, gl: q.ground, gr: q.ground, s: q.s, prof: q.prof,
+      });
+    }
+    bridgeRows.push(spans.length ? { rows: lineRows, spans } : null);
+  });
   if (!indices.length) return null;
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
   geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(normals), 3));
-  geo.setIndex(indices.length > 65000
+  geo.setIndex(vi > 65000
     ? new THREE.BufferAttribute(new Uint32Array(indices), 1)
     : new THREE.BufferAttribute(new Uint16Array(indices), 1));
   geo.computeBoundingSphere();
 
   const mesh = new THREE.Mesh(geo, EnvState.streetMaterial);
-  // 橋の構造（桁・欄干・橋脚・擁壁）。道路の橋と同じ作り（03i-roads.js）を線ごとに作ってまとめる
+  // 橋の構造（桁・欄干・橋脚・擁壁）。道路の橋と同じ作り（03i-roads.js）を街路ごとに作ってまとめる
   if (typeof buildBridgeStructure === 'function') {
     for (const line of bridgeRows) {
       if (!line) continue;
