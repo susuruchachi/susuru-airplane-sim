@@ -27,21 +27,23 @@ const ROAD_KEEP_TURN_DEG = 12;
 // 夜に道路が消えると、街と街のあいだが真っ暗になって世界が途切れて見える。
 // 建物を置くと重いので、街と同じ「加算で重ねる点」で灯りだけ出す。
 // 明るさは街明かりに合わせる（道路灯だけ目立つと高速道路の絵にならない）。
-// 実際に並んでいた間隔（平均916m）の3倍の密度にした（下の buildRoadLamps を参照）
-const ROAD_LAMP_SPACING_M = 300;   // 街灯の間隔
+// 実際に並んでいた間隔（平均916m）の3倍の密度にしたあと、「道路を街と同じくらいに
+// 見えるように明るく」で、もう一段詰めて濃くした（数字は下の説明）。
+const ROAD_LAMP_SPACING_M = 200;   // 街灯の間隔
 const ROAD_LAMP_Y = 9;             // 路面からの高さ
-const ROAD_LAMP_SIZE = 22;
-// 街灯を出す範囲。灯りは小さな点なので、道の帯より手前で切ってよい。
-const ROAD_LAMP_RADIUS_BASE = 26000;
+const ROAD_LAMP_SIZE = 26;         // 街の灯り（03d-places.js）と同じ大きさ
+// 街灯を出す範囲。道の帯と同じところまで出す（26kmで切っていたので、上空から
+// 見下ろすと遠くの道が暗い地面に溶けていた）。
+const ROAD_LAMP_RADIUS_BASE = 55000;
 // 街の灯りと同じ強さ（03d-places.js は opacity をそのまま 0〜1 で使っている）。
-// 1.0 だと点が白く飛んで高速道路というより滑走路の灯火に見えたので、少し落とす。
-const ROAD_LAMP_OPACITY = 0.75;
+const ROAD_LAMP_OPACITY = 1.0;
 // 街灯のにじみ。芯の何倍の大きさで、どれだけ薄く重ねるか（空港の灯火は2.8倍・0.10）。
-// 黄色がかった、うっすら見える程度にする。
 const ROAD_LAMP_GLOW_SCALE = 3.4;
-const ROAD_LAMP_GLOW_OPACITY = 0.16;
-// 夜の路面の明るさ（自己発光の色）。灯りに照らされた路面の、ほんのり暖かい色。
-const ROAD_NIGHT_EMISSIVE = 0x1c160c;
+const ROAD_LAMP_GLOW_OPACITY = 0.22;
+// 夜の路面の明るさ（自己発光の色）。灯りに照らされた路面の、暖かい色。
+// 遠くでは街灯の点が1画素より小さくなって消えるので、**路面そのものが光る線**として
+// 見えないと、上空からは道が地面に溶ける（ROAD_LAMP_* の説明の実測を参照）。
+const ROAD_NIGHT_EMISSIVE = 0x5a4424;
 
 function roadActiveRadius() {
   // 03h-env-quality.js はこのファイルより後に読まれるので、呼ばれる時点では
