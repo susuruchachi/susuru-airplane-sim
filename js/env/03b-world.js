@@ -2419,6 +2419,41 @@ function worldGenerateRoads() {
     // 最後の詰めを引き直せるよう、どの空港の支線かを覚えておく
     if (road) road.airportId = a.id;
   }
+
+  worldBuildRoadGrid();
+}
+
+// 道の区間を格子に入れる。「そこは道の上か（近いか）」を、木を生やすとき・
+// 道沿いに家を建てるときに引く。
+const ROAD_GRID_REACH_M = 400;
+let _worldRoadGrid = null;
+function worldBuildRoadGrid() {
+  _worldRoadGrid = makeWorldGrid(5000);
+  for (const r of WORLD_ROADS) {
+    const P = r.points;
+    for (let i = 1; i < P.length; i++) {
+      const a = P[i - 1], b = P[i];
+      const L = Math.hypot(b.x - a.x, b.z - a.z);
+      _worldRoadGrid.insert((a.x + b.x) / 2, (a.z + b.z) / 2, L / 2 + ROAD_GRID_REACH_M, {
+        ax: a.x, az: a.z, bx: b.x, bz: b.z, halfWidth: r.halfWidth, road: r,
+      });
+    }
+  }
+}
+
+// (x, z) から道の縁までの距離（道の上なら負）。近くに道が無ければ Infinity。
+// ROAD_GRID_REACH_M より遠い道は見ない。
+function worldRoadEdgeDistance(x, z) {
+  if (!_worldRoadGrid) return Infinity;
+  const segs = _worldRoadGrid.at(x, z);
+  if (!segs) return Infinity;
+  let best = Infinity;
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    const d = Math.sqrt(worldPointSegDist2(x, z, s.ax, s.az, s.bx, s.bz)) - s.halfWidth;
+    if (d < best) best = d;
+  }
+  return best;
 }
 
 // その地点が、どこかの空港の「舗装のある側」にどれだけ食い込んでいるか（0〜1）。
@@ -2679,7 +2714,7 @@ if (typeof module !== 'undefined' && module.exports) {
     worldNearestAirport, worldRegionAt, worldCountryById, worldCityById, worldAirportById,
     worldRangeCrestAt, worldRangeHeightAt, worldCityStreetDist,
     airportLocalToWorld, airportRunwayHalfSpan, worldAirportGateAt, worldAirportRoadBlock,
-    worldAirportRunwayCenter, worldBridgeProfileY, BRIDGE_CLEARANCE_M,
+    worldAirportRunwayCenter, worldBridgeProfileY, BRIDGE_CLEARANCE_M, worldRoadEdgeDistance,
     CITY_STREET_HALF_W_M, CITY_STREET_CLEAR_M,
   };
 }

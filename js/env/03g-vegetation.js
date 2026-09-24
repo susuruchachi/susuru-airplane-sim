@@ -21,6 +21,7 @@ function treeActiveRadius() {
   const scale = typeof envQualityPreset === 'function' ? envQualityPreset().distance : 1;
   return Math.max(TREE_ACTIVE_RADIUS_BASE * scale, TREE_ACTIVE_RADIUS_MIN);
 }
+const TREE_ROAD_CLEAR_M = 10;      // 道の縁からこれより近くには木を生やさない
 const TREE_SPACING_M = 16;         // 候補を置く間隔。実際に生えるかは密度で決まる
 const TREE_RECHECK_DIST = 150;     // カメラがこれだけ動いたらタイルを見直す
 
@@ -132,6 +133,10 @@ function buildTreeTile(ix, iz) {
       // 水面の上には生やさない
       const water = worldWaterSurfaceAt(x, z);
       if (water !== null && h <= water + 1.5) continue;
+
+      // 道の上にも生やさない（以前は道のまん中に木が立っていた）。
+      // 描く道は経路を間引いた弦なので、カーブではそのぶん経路から外へずれる。少し余裕をとる。
+      if (worldRoadEdgeDistance(x, z) < TREE_ROAD_CLEAR_M) continue;
 
       // 空港の敷地にも生やさない
       let onAirfield = false;
@@ -387,9 +392,10 @@ function scanFarForestCell(ix, iz, out) {
   const r3 = worldHash2i(ix + 31337, iz + 6971);
   if (r3 > density) return;
 
-  // 水面と空港の敷地には生やさない（木と同じ扱い）
+  // 水面・道・空港の敷地には生やさない（木と同じ扱い）
   const water = worldWaterSurfaceAt(x, z);
   if (water !== null && h <= water + 1.5) return;
+  if (worldRoadEdgeDistance(x, z) < FOREST_FAR_WIDTH * 0.5) return; // 塊は幅があるので半分ぶん離す
   for (const entry of EnvState.builtAirports.values()) {
     const d = entry.def;
     if (Math.hypot(x - d.x, z - d.z) < d.flatInnerR) return;

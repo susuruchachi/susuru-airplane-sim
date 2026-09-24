@@ -142,6 +142,185 @@ function buildBridgeStructure(rows, bridges, ox, oy, oz) {
   return mesh;
 }
 
+// --- 道沿いの家 ---------------------------------------------------------------
+//
+// 街と街のあいだが、道が1本通っているだけの無人の野原に見えないよう、道沿いに家を建てる。
+// 実際の街道と同じく、家は**村のまとまり**になって並び、そのあいだはぽつぽつと農家があるだけ。
+//   村 … 道に沿ったなめらかなノイズが高いところ。道の両側に HOUSE_STEP_M おきに高い確率で
+//   郊外 … 街の市街地のすぐ外。村と同じくらい建つ
+//   ほか … まれに1軒
+// 置き場所は道の経路（間引く前の点）とハッシュだけで決まるので、何度作り直しても同じ家が同じ所に建つ。
+// 水の上・橋のたもと・空港・ほかの道の上・急な斜面・街の市街地（街の建物がある）には建てない。
+const HOUSE_RADIUS_M = 14000;        // カメラからこれより遠い家は建てない（家は小さい）
+const HOUSE_STEP_M = 40;             // 道に沿って家を置く候補の間隔
+const HOUSE_SETBACK_M = 8;           // 道の縁から家までの最低の距離
+const HOUSE_VILLAGE_P = 0.7;         // 村・郊外で1候補に家が建つ確率
+const HOUSE_SCATTER_P = 0.025;       // 村の外で建つ確率
+const HOUSE_VILLAGE_NOISE = 0.64;    // 道に沿ったノイズがこれより高いところが村
+const HOUSE_VILLAGE_SCALE_M = 1400;  // 村の長さのめやす
+const HOUSE_SUBURB_M = 2500;         // 市街地の外のこの距離までは郊外
+const HOUSE_MAX_TILT_M = 2.5;        // 間口の四隅の高さの差がこれを超える斜面には建てない
+const HOUSE_LIGHT_OPACITY = 0.85;
+const HOUSE_WALL_COLORS = [0xb9b1a4, 0xc4bca9, 0xa9a397, 0xbdb3a0, 0x9f998d];
+const HOUSE_ROOF_COLORS = [0x8a4632, 0x6e3a2c, 0x55504a, 0x5d544a, 0x9a5a38];
+
+function buildRoadHouses(road, src, ox, oy, oz) {
+  if (!_roadHouseReady()) return null;
+  const cam = EnvState.camera.position;
+  const R2 = HOUSE_RADIUS_M * HOUSE_RADIUS_M;
+  const seed = _roadHash(road.id);
+  const pos = [], nrm = [], col = [], lights = [];
+
+  let s = 0, next = HOUSE_STEP_M * 0.5, k = 0;
+  for (let i = 1; i < src.length; i++) {
+    const a = src[i - 1], b = src[i];
+    const L = Math.hypot(b.x - a.x, b.z - a.z);
+    if (L < 1e-3) continue;
+    const dx = (b.x - a.x) / L, dz = (b.z - a.z) / L;
+    for (; next <= s + L; next += HOUSE_STEP_M, k++) {
+      const t = (next - s) / L;
+      const cx = a.x + (b.x - a.x) * t, cz = a.z + (b.z - a.z) * t;
+      if ((cx - cam.x) * (cx - cam.x) + (cz - cam.z) * (cz - cam.z) > R2) continue;
+      if (roadOnBridge(road, next, 120)) continue;
+      const p = _roadHouseChance(road, next, seed, cx, cz);
+      if (p <= 0) continue;
+      for (const side of [1, -1]) {
+        const h1 = worldHash2i(seed + k, side > 0 ? 17 : 41);
+        if (h1 >= p) continue;
+        const h2 = worldHash2i(seed + k, side > 0 ? 53 : 71);
+        const h3 = worldHash2i(seed + k, side > 0 ? 89 : 97);
+        const h4 = worldHash2i(seed + k, side > 0 ? 101 : 113);
+        const w = 8 + h2 * 6;          // 間口（道に沿った向き）
+        const d = 7 + h3 * 5;          // 奥行き
+        const wallH = 4.5 + h4 * 2.5;
+        const roofH = 2.4 + h2 * 1.4;
+        const off = road.halfWidth + HOUSE_SETBACK_M + d / 2 + h3 * 14;
+        const along = (h4 - 0.5) * 20;
+        const hx = cx + dx * along - dz * off * side;
+        const hz = cz + dz * along + dx * off * side;
+        const placed = _roadHousePlace(hx, hz, dx, dz, w, d);
+        if (placed === null) continue;
+        const wall = HOUSE_WALL_COLORS[(h2 * HOUSE_WALL_COLORS.length) | 0];
+        const roof = HOUSE_ROOF_COLORS[(h3 * HOUSE_ROOF_COLORS.length) | 0];
+        _pushHouse(pos, nrm, col, hx - ox, placed - oy, hz - oz, dx, dz, w, d, wallH, roofH, wall, roof);
+        if (h1 < p * 0.6) {
+          // 窓の灯り（道の側の壁の前に1つ）
+          lights.push(hx - ox + dz * side * (d / 2 + 0.6), placed - oy + 2.6, hz - oz - dx * side * (d / 2 + 0.6));
+        }
+      }
+    }
+    s += L;
+  }
+  if (!pos.length) return null;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nrm), 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(col), 3));
+  geo.computeBoundingSphere();
+  if (!EnvState.houseMaterial) {
+    EnvState.houseMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+    EnvState.houseLightMaterial = new THREE.PointsMaterial({
+      size: 14, map: _roadLampTexture, sizeAttenuation: true, color: 0xffcf8a,
+      transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, fog: true,
+    });
+    if (EnvState.roadDayFactor !== undefined) updateRoadsForDaylight(EnvState.roadDayFactor);
+  }
+  const mesh = new THREE.Mesh(geo, EnvState.houseMaterial);
+  mesh.position.set(ox, oy, oz);
+  mesh.matrixAutoUpdate = false;
+  mesh.updateMatrix();
+  if (lights.length) {
+    const lg = new THREE.BufferGeometry();
+    lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(lights), 3));
+    lg.computeBoundingSphere();
+    const pts = new THREE.Points(lg, EnvState.houseLightMaterial);
+    pts.renderOrder = ENV_ORDER.light;
+    pts.matrixAutoUpdate = false;
+    mesh.add(pts);
+  }
+  return mesh;
+}
+
+function _roadHouseReady() {
+  return typeof worldHash2i === 'function' && typeof worldRoadEdgeDistance === 'function';
+}
+
+function _roadHash(id) {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0) % 1000003;
+}
+
+// 経路に沿った距離 s のところに家が建つ確率（村・郊外・それ以外）。市街地の中は0
+function _roadHouseChance(road, s, seed, x, z) {
+  let suburb = false;
+  for (const c of WORLD_CITIES) {
+    const d = Math.hypot(x - c.x, z - c.z);
+    if (d < c.builtRadiusM) return 0;                     // 街の建物がある
+    if (d < c.builtRadiusM + HOUSE_SUBURB_M) suburb = true;
+  }
+  if (suburb) return HOUSE_VILLAGE_P;
+  const v = worldValueNoise(s / HOUSE_VILLAGE_SCALE_M + (seed % 997) * 0.37, (seed % 131) * 1.7);
+  return v > HOUSE_VILLAGE_NOISE ? HOUSE_VILLAGE_P : HOUSE_SCATTER_P;
+}
+
+// 家を建てられるなら土台の高さ（描かれている地面の、四隅のうち低いところ）を返す。だめなら null
+function _roadHousePlace(x, z, dx, dz, w, d) {
+  // ほかの道・同じ道の上にかからない（カーブの内側に置いた家が道にかかる）
+  if (worldRoadEdgeDistance(x, z) < Math.max(w, d) * 0.6 + 4) return null;
+  if (typeof worldAirportRoadBlock === 'function' && worldAirportRoadBlock(x, z, 250)) return null;
+  const near = worldNearestAirport(x, z);
+  if (near && near.airport && near.distanceM < near.airport.flatInnerR) return null;
+  let lo = Infinity, hi = -Infinity;
+  const hw = w / 2, hd = d / 2;
+  for (const [u, v] of [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd], [0, 0]]) {
+    const px = x + dx * u - dz * v, pz = z + dz * u + dx * v;
+    const g = roadGroundY(px, pz);
+    if (g <= 0.5) return null;                              // 海
+    const wtr = worldWaterSurfaceAt(px, pz);
+    if (wtr !== null && wtr > g - 0.3) return null;         // 川・湖
+    lo = Math.min(lo, g); hi = Math.max(hi, g);
+  }
+  if (hi - lo > HOUSE_MAX_TILT_M) return null;
+  return lo - 0.8; // 斜面で浮かないよう、低いほうの角より少し埋める
+}
+
+// 家1軒（箱の壁＋切妻屋根）。棟は道に沿った向き（dx, dz）。底面は描かない。
+function _pushHouse(pos, nrm, col, x, y, z, dx, dz, w, d, wallH, roofH, wallHex, roofHex) {
+  const px = -dz, pz = dx; // 奥行きの向き
+  const P = (u, v, h) => [x + dx * u + px * v, y + h, z + dz * u + pz * v];
+  const hw = w / 2, hd = d / 2;
+  const top = wallH + 0.8; // 土台を埋めたぶん
+  const tri = (a, b, c, hex, shade) => {
+    const r = ((hex >> 16) & 255) / 255 * shade, g = ((hex >> 8) & 255) / 255 * shade, bl = (hex & 255) / 255 * shade;
+    // 面の法線（外向きになるよう、呼ぶ側で反時計回りに並べる）
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
+    for (const q of [a, b, c]) { pos.push(q[0], q[1], q[2]); nrm.push(nx, ny, nz); col.push(r, g, bl); }
+  };
+  const quad = (a, b, c, e, hex, shade) => { tri(a, b, c, hex, shade); tri(a, c, e, hex, shade); };
+  const A = P(-hw, -hd, 0), B = P(hw, -hd, 0), C = P(hw, hd, 0), D = P(-hw, hd, 0);
+  const A2 = P(-hw, -hd, top), B2 = P(hw, -hd, top), C2 = P(hw, hd, top), D2 = P(-hw, hd, top);
+  // 壁4面（外から見て反時計回り）
+  quad(A, B, B2, A2, wallHex, 0.92);
+  quad(B, C, C2, B2, wallHex, 0.8);
+  quad(C, D, D2, C2, wallHex, 0.92);
+  quad(D, A, A2, D2, wallHex, 0.8);
+  // 屋根：棟は道に沿う。軒を少し出す
+  const eave = 0.6;
+  const R1 = P(-hw - eave, 0, top + roofH), R2 = P(hw + eave, 0, top + roofH);
+  const e1 = P(-hw - eave, -hd - eave, top - 0.4), e2 = P(hw + eave, -hd - eave, top - 0.4);
+  const e3 = P(hw + eave, hd + eave, top - 0.4), e4 = P(-hw - eave, hd + eave, top - 0.4);
+  quad(e1, e2, R2, R1, roofHex, 1.0);
+  quad(e3, e4, R1, R2, roofHex, 0.85);
+  // 妻壁（三角）
+  tri(P(hw, -hd, top), P(hw, hd, top), P(hw, 0, top + roofH - 0.2), wallHex, 0.8);
+  tri(P(-hw, hd, top), P(-hw, -hd, top), P(-hw, 0, top + roofH - 0.2), wallHex, 0.8);
+}
+
 function roadActiveRadius() {
   // 03h-env-quality.js はこのファイルより後に読まれるので、呼ばれる時点では
   // 必ずあるが、念のため（他の実体化半径と同じ書き方）
@@ -239,6 +418,11 @@ function disposeRoadInstance(id) {
   if (e.bridge) {
     EnvState.roadGroup.remove(e.bridge);
     e.bridge.geometry.dispose();
+  }
+  if (e.houses) {
+    EnvState.roadGroup.remove(e.houses);
+    e.houses.geometry.dispose();
+    for (const c of e.houses.children) c.geometry.dispose(); // 窓の灯り
   }
   EnvState.builtRoads.delete(id);
 }
@@ -487,9 +671,12 @@ function buildRoadInstance(road) {
   const bridge = rows ? buildBridgeStructure(rows, road.bridges, ox, oy, oz) : null;
   if (bridge) EnvState.roadGroup.add(bridge);
 
+  const houses = buildRoadHouses(road, src, ox, oy, oz);
+  if (houses) EnvState.roadGroup.add(houses);
+
   // 作り直しのときは、新しい帯ができてから古い帯を片付ける（一瞬道が消えないように）
   if (EnvState.builtRoads.has(road.id)) disposeRoadInstance(road.id);
-  EnvState.builtRoads.set(road.id, { strip: mesh, lamps, bridge });
+  EnvState.builtRoads.set(road.id, { strip: mesh, lamps, bridge, houses });
 }
 
 // 道に沿って街灯を置く。左右に振らず中央に1列（遠目には中央分離帯の灯りに見える）。
@@ -548,6 +735,7 @@ function updateRoadsForDaylight(dayFactor) {
   EnvState.roadLampMaterial.opacity = v * ROAD_LAMP_OPACITY;
   EnvState.roadLampGlowMaterial.opacity = v * ROAD_LAMP_GLOW_OPACITY;
   EnvState.roadMaterial.emissive.setHex(ROAD_NIGHT_EMISSIVE).multiplyScalar(v);
+  if (EnvState.houseLightMaterial) EnvState.houseLightMaterial.opacity = v * HOUSE_LIGHT_OPACITY;
   if (EnvState.roadGroup) {
     for (const e of EnvState.builtRoads.values()) {
       if (e.lamps) e.lamps.visible = v > 0.01;
