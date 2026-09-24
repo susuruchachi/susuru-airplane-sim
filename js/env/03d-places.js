@@ -28,6 +28,8 @@ const LABEL_KINDS = {
   airport: { fadeStart: 45000, fadeEnd: 160000, minOpacity: 0, screenPx: 16, fontPx: 40 },
   water: { fadeStart: 60000, fadeEnd: 200000, minOpacity: 0, screenPx: 15, fontPx: 38 },
   peak: { fadeStart: 90000, fadeEnd: 280000, minOpacity: 0, screenPx: 16, fontPx: 38 },
+  // 小さな峰（下の「近くの峰」）。近くを飛んでいるときだけ出す
+  minorPeak: { fadeStart: 9000, fadeEnd: 16000, minOpacity: 0, screenPx: 13, fontPx: 34 },
 };
 
 // 都市IDから決まる擬似乱数（世界側と同じ実装を使う）
@@ -416,17 +418,165 @@ function initPlaceLabels() {
   EnvState.labelGroup.visible = EnvState.env.labelsVisible !== false;
 }
 
+// --- 近くの峰 -------------------------------------------------------------------
+//
+// 「近くを飛んでいる時は、小さめだけど明らかに峰のある山は名前を表示して（標高2000m以上）」。
+// 名前付きの山（WORLD_PEAKS）は山脈ごとに突出度の大きいものを最大6座、22km以上離して
+// 選んであるので、そのあいだの2,000〜3,000m級の峰には名前が無い。遠くから見る分には
+// それでいい（全部に札を付けると上空が札だらけになる）が、近くを飛ぶと「この尖った山は
+// 何か」が知りたくなる。
+//
+// **世界の生成時には作らない。** 札は近くでしか出さないので、カメラのまわり48km四方だけを
+// そのつど探す（世界全体で探すと起動が0.5秒近く延びる）。
+//   ・2kmの格子（世界座標にそろえてあるので、どこから来ても同じ峰が見つかる）で
+//     8近傍より高い点を拾い、山登りで頂へ寄せる
+//   ・標高2,000m以上、かつ半径1.5kmの輪のどこよりも150m以上高い＝**尾根の肩ではなく峰**
+//   ・名前付きの山から6km以内と、ほかの小さな峰から3km以内（低いほう）は捨てる
+// 名前は頂の位置から作る乱数で決めるので、何度来ても同じ名前になる。
+const MINOR_PEAK_MIN_M = 2000;
+const MINOR_PEAK_GRID_M = 2000;
+const MINOR_PEAK_SCAN_HALF_M = 24000;
+const MINOR_PEAK_RESCAN_M = 8000;
+const MINOR_PEAK_RING_M = 1500;
+const MINOR_PEAK_RISE_M = 150;       // 輪のどこよりもこれだけ高ければ「峰」
+const MINOR_PEAK_MAJOR_GAP_M = 6000;
+const MINOR_PEAK_GAP_M = 3000;
+
+let _minorPeakAt = null;
+const _minorPeakLabels = new Map();   // key -> ラベル（EnvState.labels と同じ形）
+let _minorPeakUsedNames = null;
+
+function minorPeakClimb(x, z) {
+  let bx = x, bz = z, bh = worldHeightAt(x, z);
+  let step = MINOR_PEAK_GRID_M * 0.5;
+  for (let pass = 0; pass < 6; pass++) {
+    for (let guard = 0; guard < 20; guard++) {
+      let moved = false;
+      for (let k = 0; k < 8; k++) {
+        const a = (k / 8) * Math.PI * 2;
+        const nx = bx + Math.cos(a) * step, nz = bz + Math.sin(a) * step;
+        const nh = worldHeightAt(nx, nz);
+        if (nh > bh) { bx = nx; bz = nz; bh = nh; moved = true; }
+      }
+      if (!moved) break;
+    }
+    step *= 0.5;
+  }
+  return { x: bx, z: bz, h: bh };
+}
+
+function findMinorPeaksAround(cx, cz) {
+  const g = MINOR_PEAK_GRID_M;
+  const i0 = Math.floor((cx - MINOR_PEAK_SCAN_HALF_M) / g) - 1;
+  const j0 = Math.floor((cz - MINOR_PEAK_SCAN_HALF_M) / g) - 1;
+  const n = Math.ceil((2 * MINOR_PEAK_SCAN_HALF_M) / g) + 3;
+  const hs = new Float32Array(n * n);
+  let top = -Infinity;
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
+      const h = worldHeightAt((i0 + i) * g, (j0 + j) * g);
+      hs[j * n + i] = h;
+      if (h > top) top = h;
+    }
+  }
+  if (top < MINOR_PEAK_MIN_M) return [];
+
+  const found = [];
+  for (let j = 1; j < n - 1; j++) {
+    for (let i = 1; i < n - 1; i++) {
+      const h = hs[j * n + i];
+      if (h < MINOR_PEAK_MIN_M - 300) continue;   // 山登りで300m以上は伸びない
+      let isMax = true;
+      for (let dj = -1; dj <= 1 && isMax; dj++) {
+        for (let di = -1; di <= 1; di++) {
+          if ((di || dj) && hs[(j + dj) * n + i + di] > h) { isMax = false; break; }
+        }
+      }
+      if (!isMax) continue;
+      const t = minorPeakClimb((i0 + i) * g, (j0 + j) * g);
+      if (t.h < MINOR_PEAK_MIN_M) continue;
+      let ring = -Infinity;
+      for (let k = 0; k < 16; k++) {
+        const a = (k / 16) * Math.PI * 2;
+        ring = Math.max(ring, worldHeightAt(t.x + Math.cos(a) * MINOR_PEAK_RING_M,
+          t.z + Math.sin(a) * MINOR_PEAK_RING_M));
+      }
+      if (t.h - ring < MINOR_PEAK_RISE_M) continue;
+      let nearMajor = false;
+      for (const p of WORLD_PEAKS) {
+        if (Math.hypot(p.x - t.x, p.z - t.z) < MINOR_PEAK_MAJOR_GAP_M) { nearMajor = true; break; }
+      }
+      if (nearMajor) continue;
+      found.push(t);
+    }
+  }
+  // 近いものどうしは高いほうを残す
+  found.sort((a, b) => b.h - a.h);
+  const kept = [];
+  for (const t of found) {
+    if (kept.every((k) => Math.hypot(k.x - t.x, k.z - t.z) >= MINOR_PEAK_GAP_M)) kept.push(t);
+  }
+  return kept;
+}
+
+function minorPeakName(t) {
+  if (!_minorPeakUsedNames) {
+    // 名前付きの山と同じ名前にはしない
+    _minorPeakUsedNames = new Set(WORLD_PEAKS.map((p) => p.nameLatin.replace(/^Mt\. /, '')));
+  }
+  const country = worldCountryById(worldNearestCountryId(t.x, t.z));
+  const rand = worldRng('minorpeak:' + Math.round(t.x / 250) + ':' + Math.round(t.z / 250));
+  // 名前付きの山とだけ重ならなければいい（小さな峰どうしは、見える範囲がほとんど重ならない）
+  const used = new Set(_minorPeakUsedNames);
+  return worldMakePlaceName(country ? country.nameStyle : 'vestarian', rand, used);
+}
+
+function refreshMinorPeaks() {
+  const cam = EnvState.camera.position;
+  _minorPeakAt = { x: cam.x, z: cam.z };
+  const peaks = findMinorPeaksAround(cam.x, cam.z);
+  const keep = new Set();
+  for (const t of peaks) {
+    // 頂の位置は格子から山登りで決まるので、どこから探しても同じ点に落ちる。
+    // 念のため50mで丸めて同じ峰とみなす。
+    const key = Math.round(t.x / 50) + ':' + Math.round(t.z / 50);
+    keep.add(key);
+    if (_minorPeakLabels.has(key)) continue;
+    const nm = minorPeakName(t);
+    _minorPeakLabels.set(key, {
+      kind: 'minorPeak', text: 'Mt. ' + nm.nameLatin + '  ' + Math.round(t.h).toLocaleString() + 'm',
+      color: '#cfc9b8', x: t.x, y: t.h + 160, z: t.z, scale: 1, sprite: null,
+    });
+  }
+  for (const [key, entry] of _minorPeakLabels) {
+    if (keep.has(key)) continue;
+    if (entry.sprite) {
+      EnvState.labelGroup.remove(entry.sprite);
+      entry.sprite.material.map.dispose();
+      entry.sprite.material.dispose();
+    }
+    _minorPeakLabels.delete(key);
+  }
+}
+
 // ラベルを「画面上で一定の大きさ」に保ち、遠いものは薄くして消す。
 // スプライトは常にカメラを向くので向きの調整は要らない。
 function updatePlaceLabels() {
   if (!EnvState.labelGroup || !EnvState.labelGroup.visible) return;
+
+  {
+    const c = EnvState.camera.position;
+    if (!_minorPeakAt || Math.hypot(c.x - _minorPeakAt.x, c.z - _minorPeakAt.z) > MINOR_PEAK_RESCAN_M) {
+      refreshMinorPeaks();
+    }
+  }
 
   const cam = EnvState.camera;
   const vFov = THREE.MathUtils.degToRad(cam.fov);
   const viewH = EnvState.renderer.domElement.clientHeight || 1;
   const cx = cam.position.x, cy = cam.position.y, cz = cam.position.z;
 
-  for (const entry of EnvState.labels) {
+  for (const entry of placeLabelEntries()) {
     const k = LABEL_KINDS[entry.kind];
     const dx = entry.x - cx, dy = entry.y - cy, dz = entry.z - cz;
     const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
@@ -452,6 +602,12 @@ function updatePlaceLabels() {
     entry.sprite.material.opacity = opacity > 1 ? 1 : opacity;
     entry.sprite.visible = true;
   }
+}
+
+// 決まった地名と、いまカメラのまわりで見つけた小さな峰
+function* placeLabelEntries() {
+  yield* EnvState.labels;
+  yield* _minorPeakLabels.values();
 }
 
 function setLabelsVisible(visible) {

@@ -19,6 +19,10 @@ const WEATHER_GUST_TAU = 1.2;
 
 // 降水の粒。カメラを中心とした箱の中だけに置き、外へ出たら反対側から入れ直す。
 const PRECIP_BOX_M = 150;
+// 雲底で雨を切るとき、粒ごとにずらす幅（切り口が一枚の面に見えないように）
+const PRECIP_CEIL_JITTER_M = 30;
+// 雲底がこれより濃いときは深度も書く（ENV_ORDER の説明を参照）
+const DECK_DEPTH_WRITE_OPACITY = 0.5;
 const RAIN_MAX = 5000;
 const SNOW_MAX = 3500;
 const RAIN_FALL_MPS = 22;
@@ -311,7 +315,7 @@ function buildCloudDeck() {
   });
   EnvState.cloudDeck = new THREE.Mesh(buildDeckGeometry(), mat);
   EnvState.cloudDeck.frustumCulled = false;
-  EnvState.cloudDeck.renderOrder = ENV_ORDER.clouds; // 半透明なので海より後
+  EnvState.cloudDeck.renderOrder = ENV_ORDER.deck; // 海より後、こちら側の雲より前（ENV_ORDER）
   EnvState.cloudDeck.visible = false;
   EnvState.weatherGroup.add(EnvState.cloudDeck);
   EnvState.cloudDeckTexture = tex;
@@ -336,6 +340,9 @@ function buildPrecipitation() {
     color: 0xa8c4d8, transparent: true, opacity: 0.5, depthWrite: false, fog: true,
   }));
   EnvState.rain.frustumCulled = false;
+  // 雨は雲底より下にしか無い＝いつも雲底のこちら側なので、雲底より後に描く
+  // （先に描くと、見上げたとき手前の雨に雲底がかぶさる）
+  EnvState.rain.renderOrder = ENV_ORDER.clouds;
   EnvState.rain.visible = false;
   EnvState.weatherGroup.add(EnvState.rain);
 
@@ -349,6 +356,7 @@ function buildPrecipitation() {
     transparent: true, opacity: 0.85, depthWrite: false, fog: true,
   }));
   EnvState.snow.frustumCulled = false;
+  EnvState.snow.renderOrder = ENV_ORDER.clouds;
   EnvState.snow.visible = false;
   EnvState.weatherGroup.add(EnvState.snow);
 
@@ -406,22 +414,34 @@ function updatePrecipitation(dt, w, scale) {
   const sy = isRain ? (-vy / Math.hypot(vx, vy, vz)) * streak : 0;
   const sz = isRain ? (-vz / Math.hypot(vx, vy, vz)) * streak : 0;
 
+  // **雨と雪は雲底より下にしか降らない。** 粒の箱（カメラのまわり150m）は雲底をまたぐ
+  // ことがあるので、雲底より上にある粒は1粒ずつ描かない。切り口が水平な一枚の面に
+  // 見えないよう、粒ごとに0〜30m**下へだけ**ずらす（上へずらすと、雲の上から見下ろした
+  // とき雲底より上に残った粒が雲底の上に乗って見えた）。
+  const ceilLocal = w.cloudBaseM - cam.y;
+  let k = 0;
   for (let i = 0; i < count; i++) {
     const li = i * 3;
     _precipLocal[li] = wrap(_precipLocal[li] + vx * dt - cvx);
     _precipLocal[li + 1] = wrap(_precipLocal[li + 1] + vy * dt - cvy);
     _precipLocal[li + 2] = wrap(_precipLocal[li + 2] + vz * dt - cvz);
+    const jitter = -((i * 0.6180339887) % 1) * PRECIP_CEIL_JITTER_M;
+    // 雨は筋の上の端（sy だけ上）で見る
+    if (_precipLocal[li + 1] + (sy > 0 ? sy : 0) > ceilLocal + jitter) continue;
 
     if (isRain) {
-      const o = i * 6;
+      const o = k * 6;
       arr[o] = _precipLocal[li]; arr[o + 1] = _precipLocal[li + 1]; arr[o + 2] = _precipLocal[li + 2];
       arr[o + 3] = _precipLocal[li] + sx; arr[o + 4] = _precipLocal[li + 1] + sy; arr[o + 5] = _precipLocal[li + 2] + sz;
     } else {
-      arr[li] = _precipLocal[li]; arr[li + 1] = _precipLocal[li + 1]; arr[li + 2] = _precipLocal[li + 2];
+      const o = k * 3;
+      arr[o] = _precipLocal[li]; arr[o + 1] = _precipLocal[li + 1]; arr[o + 2] = _precipLocal[li + 2];
     }
+    k++;
   }
+  EnvState.weather.precipDrawn = k;   // 検証用（いま描いている粒の数）
 
-  _precipObject.geometry.setDrawRange(0, isRain ? count * 2 : count);
+  _precipObject.geometry.setDrawRange(0, isRain ? k * 2 : k);
   _precipPositions.needsUpdate = true;
   _precipObject.position.copy(cam);
 }
@@ -498,6 +518,11 @@ function applyWeatherToScene(dt) {
     const op = worldClamp(w.overcast * 1.08, 0, 1);
     deck.visible = op > 0.02;
     deck.material.opacity = op;
+    // べったり曇っているときは深度も書く。雲底より後に描くもの（こちら側の雲・煙・灯り）の
+    // うち、雲底の向こう側にある部分がそこで消える——積雲は雲底の面でちょうど切れ、
+    // 雲の上から見下ろしたときの滑走路の灯りは雲底の下に隠れる。
+    // 薄いときは書かない（書くと、薄い雲底の向こうの灯りや雲までまるごと消える）。
+    deck.material.depthWrite = op >= DECK_DEPTH_WRITE_OPACITY;
     const cam = EnvState.camera.position;
     deck.position.set(cam.x, w.cloudBaseM, cam.z);
     // メッシュを動かした分をUVで打ち消し、雲の模様がワールドに対して止まって見えるようにする
@@ -510,7 +535,10 @@ function applyWeatherToScene(dt) {
     );
   }
 
-  updatePrecipitation(dt, w, 1 - EnvState.weather.aboveDeck);
+  // 雲底より上の粒は updatePrecipitation が1粒ずつ落とすので、ここでは弱めない
+  // （以前は「雲底からの高さ×雲量」で全体を薄めていたので、雲量0.6なら雲の上でも
+  // 4割の雨が降っていた）。
+  updatePrecipitation(dt, w, 1);
 }
 
 // 夜、雲が月と星をふさぐぶんの減光（べた曇りでどれだけ落とすか）

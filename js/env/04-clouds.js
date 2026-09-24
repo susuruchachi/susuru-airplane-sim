@@ -106,11 +106,30 @@ function updateClouds(dt) {
   const cx = EnvState.camera.position.x, cz = EnvState.camera.position.z;
   const wrapRel = (v) => (((v + CLOUD_FIELD_HALF_SIZE) % box + box) % box) - CLOUD_FIELD_HALF_SIZE;
 
+  // 雲底（曇り空の天井）より向こう側にある雲は、雲底より先に描いて雲底をかぶせる。
+  // こちら側に少しでもかかる雲は雲底より後に描く（べったり曇っているときは雲底が深度を
+  // 書いているので、雲底より向こうへはみ出した部分はそこで切れる）。ENV_ORDER を参照。
+  const deck = EnvState.cloudDeck;
+  const deckOn = !!(deck && deck.visible);
+  const deckY = EnvState.cloudAltitude;
+  const camBelow = EnvState.camera.position.y < deckY;
+
   EnvState.cloudClusters.forEach((c) => {
     c.driftX += vx * dt;
     c.driftZ += vz * dt;
     c.group.position.x = cx + wrapRel(c.baseX + c.driftX - cx);
     c.group.position.z = cz + wrapRel(c.baseZ + c.driftZ - cz);
+    if (!c.group.visible) return;
+    for (const sprite of c.group.children) {
+      let order = ENV_ORDER.clouds;
+      if (deckOn) {
+        const y = c.group.position.y + sprite.position.y;
+        const half = sprite.scale.y * 0.5;
+        const near = camBelow ? (y - half < deckY) : (y + half > deckY);
+        if (!near) order = ENV_ORDER.cloudsFar;
+      }
+      sprite.renderOrder = order;
+    }
   });
 }
 

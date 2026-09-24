@@ -247,7 +247,23 @@ const _cam = {
   // 機体固定の視点。**機体から見た向き**を、方位・伏せ角・距離で持つ。
   // 0 なら真後ろ。ドラッグで動かすのはこの3つで、世界の向きは一切入らない。
   rigidYaw: 0, rigidPitch: 0, rigidDist: 0, rigidReady: false,
+  // コックピット視点の首の向き（機体に対して。0,0で正面）
+  headYaw: 0, headPitch: 0, headQ: new THREE.Quaternion(), headE: new THREE.Euler(0, 0, 0, 'YXZ'),
 };
+
+// --- コックピット視点で首を振る -------------------------------------------------
+// 「パイロット視点を、上、左右に首振れるようにして欲しい」。画面をドラッグすると
+// 首が回る（指でつかんだ景色がそのまま付いてくる向き）。ダブルクリック／ダブルタップで
+// 正面に戻す。首の向きは機体に対して持つので、機体が旋回しても横を見たまま。
+const HEAD_DRAG_PER_PX = 0.005;
+const HEAD_YAW_MAX = THREE.MathUtils.degToRad(150);   // 肩越しに後ろ近くまで
+const HEAD_PITCH_UP = THREE.MathUtils.degToRad(85);   // ほぼ真上（天井窓・旋回中の上）
+const HEAD_PITCH_DOWN = THREE.MathUtils.degToRad(60); // 計器盤と足もとの窓
+function cockpitCameraActive() {
+  const f = EnvState.flight;
+  return !!(f && f.active && f.cameraMode === 'cockpit');
+}
+function resetCockpitHead() { _cam.headYaw = 0; _cam.headPitch = 0; }
 
 // --- 機体固定の視点をドラッグで回す ------------------------------------------
 //
@@ -295,8 +311,18 @@ function setupRigidCameraDrag() {
   if (!el || el.dataset.rigidDragBound) return;
   el.dataset.rigidDragBound = '1';
 
+  let lastTap = null;
   el.addEventListener('pointerdown', (e) => {
-    if (!rigidCameraActive() || _rigidPtrs.size >= 2) return;
+    if (!(rigidCameraActive() || cockpitCameraActive()) || _rigidPtrs.size >= 2) return;
+    // ダブルタップで首を正面へ（タッチでは dblclick が来ない端末がある）
+    if (cockpitCameraActive()) {
+      const now = performance.now();
+      if (lastTap && now - lastTap.t < 320
+          && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 30) {
+        resetCockpitHead();
+        lastTap = null;
+      } else lastTap = { t: now, x: e.clientX, y: e.clientY };
+    }
     _rigidPtrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
     el.setPointerCapture(e.pointerId);
     // 2本目が下りた瞬間の指の間隔を、ピンチの基準にする
@@ -316,9 +342,18 @@ function setupRigidCameraDrag() {
   el.addEventListener('lostpointercapture', end);
   el.addEventListener('pointermove', (e) => {
     const p = _rigidPtrs.get(e.pointerId);
-    if (!p || !rigidCameraActive()) return;
+    if (!p) return;
     const dx = e.clientX - p.x, dy = e.clientY - p.y;
     p.x = e.clientX; p.y = e.clientY;
+    if (cockpitCameraActive()) {
+      if (_rigidPtrs.size >= 2) return;   // 2本指では振らない
+      _cam.headYaw = THREE.MathUtils.clamp(_cam.headYaw + dx * HEAD_DRAG_PER_PX,
+        -HEAD_YAW_MAX, HEAD_YAW_MAX);
+      _cam.headPitch = THREE.MathUtils.clamp(_cam.headPitch + dy * HEAD_DRAG_PER_PX,
+        -HEAD_PITCH_DOWN, HEAD_PITCH_UP);
+      return;
+    }
+    if (!rigidCameraActive()) return;
     if (_rigidPtrs.size >= 2) {
       // ピンチ。**指を広げたら近づく**（間隔が広がったぶんだけ距離を割る）
       const now = rigidPinchSpan();
@@ -333,6 +368,8 @@ function setupRigidCameraDrag() {
     _cam.rigidPitch = THREE.MathUtils.clamp(
       _cam.rigidPitch + dy * RIGID_DRAG_PER_PX, -RIGID_PITCH_MAX, RIGID_PITCH_MAX);
   });
+  // コックピット視点：ダブルクリック／ダブルタップで正面に戻す
+  el.addEventListener('dblclick', () => { if (cockpitCameraActive()) resetCockpitHead(); });
   el.addEventListener('wheel', (e) => {
     if (!rigidCameraActive()) return;
     e.preventDefault();
@@ -355,6 +392,7 @@ function setFlightCamera(id) {
   EnvState.orbitControls.maxPolarAngle = Math.PI * 0.495;
   // 入り直したら、いつもの「斜め後ろ上から」に戻す
   if (id === 'rigid') _cam.rigidReady = false;
+  if (id === 'cockpit') resetCockpitHead();   // 入り直したら正面から
   const sel = document.getElementById('envFlightCamera');
   if (sel && sel.value !== id) sel.value = id;
   announceFlight('視点：' + (FLIGHT_CAMERA_MODES.find((m) => m.id === id) || {}).label);
@@ -418,6 +456,10 @@ function updateFlightCamera(dt) {
     // 少し下を見下ろす配置ができる）。
     const look = _cam.q.copy(st.quaternion);
     if (m.eyeQuat) look.multiply(m.eyeQuat);
+    // 首の向き（ドラッグで振る）。座席の向きに対して、左右→上下の順に回す
+    if (_cam.headYaw || _cam.headPitch) {
+      look.multiply(_cam.headQ.setFromEuler(_cam.headE.set(_cam.headPitch, _cam.headYaw, 0, 'YXZ')));
+    }
     const fwd = _cam.want.set(0, 0, -1).applyQuaternion(look);
     cam.up.copy(_cam.up.set(0, 1, 0).applyQuaternion(look));
     cam.lookAt(_cam.look.copy(cam.position).add(fwd));

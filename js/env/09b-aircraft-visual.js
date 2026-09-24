@@ -1171,6 +1171,45 @@ const CONTRAIL_VORTEX_WET = 0.55;
 const CONTRAIL_VORTEX_G = 1.5;
 
 let _contrailTexture = null;
+// --- 煙と飛行機雲の消え方（霧散） ----------------------------------------------
+//
+// 「ロケットの噴煙と飛行機雲の消え方を、霧散していく感じでボワぁ…っと消えるように」。
+// 以前は、ロケットの煙は毎フレーム同じ割合で薄める（寿命の終わりでもまだ25%残っていて、
+// そこでぷつりと消える）、飛行機雲は出た直後からいちばん速く薄れる、という消え方で、
+// どちらも**同じ大きさのまま色だけ抜けていく**ように見えた。
+// 実際の煙は、しばらく形を保ったあと**ふわっと膨らみながら**薄くなり、ちぎれて散る。
+//   濃さ … 前半はゆっくり、後半は膨らむのと合わせてなめらかに0まで（途中で切らない）
+//   大きさ … 出たては速く広がり、終わりぎわにもう一度ふくらむ（ボワっと）
+//   位置 … 粒ごとに少しずつ別の向きへ流れて、筋がちぎれる（年を取るほど速く）
+const DISSIPATE_FADE_FROM = 0.45;   // 寿命のどこから本格的に薄れはじめるか
+const DISSIPATE_DECAY = 0.7;        // 前半のゆるい薄れ方（e^-0.7t）
+const DISSIPATE_BLOOM_FROM = 0.4;   // 終わりぎわの膨らみが始まるところ
+function smokeDissipateAlpha(t) {
+  return Math.exp(-DISSIPATE_DECAY * t)
+    * (1 - THREE.MathUtils.smoothstep(t, DISSIPATE_FADE_FROM, 1));
+}
+// 大きさの伸び（0〜1）。出たては速く、あとはゆっくり
+function smokeDissipateGrow(t) {
+  return 0.7 * (1 - Math.pow(1 - t, 1.8)) + 0.3 * t;
+}
+// 終わりぎわの膨らみ（1〜1+bloom）
+function smokeDissipateBloom(t, bloom) {
+  return 1 + bloom * THREE.MathUtils.smoothstep(t, DISSIPATE_BLOOM_FROM, 1);
+}
+// 粒ごとの流れ（霧散）。向きはばらばら、上へは少しだけ寄せる（暖かい排気は昇る）。
+function smokeDriftInto(arr, o, speed, rise) {
+  const u = Math.random() * 2 - 1, th = Math.random() * Math.PI * 2;
+  const r = Math.sqrt(1 - u * u) * speed * (0.4 + Math.random() * 0.6);
+  arr[o] = Math.cos(th) * r;
+  arr[o + 1] = u * speed * 0.5 + rise;
+  arr[o + 2] = Math.sin(th) * r;
+}
+const CONTRAIL_BLOOM = 0.45;        // 飛行機雲の終わりぎわの膨らみ
+const CONTRAIL_DRIFT = 0.30;        // 寿命のあいだに、消えるころの大きさの何割ぶん流れるか
+const SMOKE_BLOOM = 0.5;
+const SMOKE_DRIFT = 0.35;
+const SMOKE_RISE = 0.12;            // 流れのうち、上へ寄せるぶん
+
 function contrailTexture() {
   if (_contrailTexture) return _contrailTexture;
   const size = 64;
@@ -1230,6 +1269,7 @@ function buildContrail(model) {
   group.name = 'aircraft-contrail';
   group.add(points);
   return { group, points, emitters, age, strength, unit: Math.max(model.wingSpan, 2),
+    drift: new Float32Array(total * 3),   // 粒ごとの流れ（霧散、m/s）
     cursor: new Int32Array(emitters.length), dist: 0, life: CONTRAIL_LIFE_S };
 }
 
@@ -1485,6 +1525,8 @@ function buildRocketSmoke(model, meshUnit) {
     // **毎フレーム「ノズルからどれだけ離れたか」から出し直す**
     // （毎フレーム少しずつ引くやり方だと、コマ落ちしている機械で一気に抜ける）。
     hot0: new Float32Array(total), odo0: new Float32Array(total), odo: 0,
+    // 置いたときの濃さと、粒ごとの流れ（霧散、m/s）
+    a0: new Float32Array(total), drift: new Float32Array(total * 3),
     // 粒ごとに覚えておく「ぶつかる面の高さ」。置いたときに1回だけ引く
     // （毎フレーム全部引くと高すぎる。SMOKE_GROUND_REFRESH の説明を参照）。
     gy: new Float32Array(total).fill(-Infinity), gyScan: 0,
@@ -1696,7 +1738,12 @@ function updateRocketSmoke(ac, controls, state, dt) {
         pos[slot * 3] = _smWorld.x; pos[slot * 3 + 1] = _smWorld.y; pos[slot * 3 + 2] = _smWorld.z;
         sm.age[slot] = 0;
         alpha[slot] = SMOKE_ALPHA * power;
+        sm.a0[slot] = alpha[slot];
         size[slot] = em.radius * SMOKE_SIZE_FROM;
+        {
+          const sp = (em.radius * SMOKE_SIZE_TO * SMOKE_DRIFT) / Math.max(life, 1);
+          smokeDriftInto(sm.drift, slot * 3, sp, sp * SMOKE_RISE);
+        }
         // 出たてはノズルのすぐ後ろ＝炎に照らされている。離れるほど白い煙に戻る。
         sm.hot0[slot] = SMOKE_HOT_FROM * power;
         sm.odo0[slot] = sm.odo;
@@ -1729,10 +1776,19 @@ function updateRocketSmoke(ac, controls, state, dt) {
     sm.age[s] = na;
     if (na >= life) { alpha[s] = 0; continue; }
     const t = na / life;
-    // 出たては濃く小さく、時間とともに膨らみながら薄れる
-    alpha[s] *= Math.pow(1 - dt / life, 1.4);
+    // 出たては濃く小さく、しばらく形を保ってから、膨らみながら散って消える
+    // （以前は毎フレーム同じ割合で薄めていたので、寿命の終わりでも25%残っていて、
+    // そこでぷつりと消えた。smokeDissipateAlpha の説明を参照）
+    alpha[s] = sm.a0[s] * smokeDissipateAlpha(t);
     const em = sm.emitters[Math.floor(s / SMOKE_PER_ROCKET)] || sm.emitters[0];
-    size[s] = em.radius * (SMOKE_SIZE_FROM + (SMOKE_SIZE_TO - SMOKE_SIZE_FROM) * t);
+    size[s] = em.radius * (SMOKE_SIZE_FROM + (SMOKE_SIZE_TO - SMOKE_SIZE_FROM) * smokeDissipateGrow(t))
+      * smokeDissipateBloom(t, SMOKE_BLOOM);
+    {
+      const k = dt * (0.3 + t);
+      pos[s * 3] += sm.drift[s * 3] * k;
+      pos[s * 3 + 1] += sm.drift[s * 3 + 1] * k;
+      pos[s * 3 + 2] += sm.drift[s * 3 + 2] * k;
+    }
     // 噴射で押し出されたぶんだけ動かす。面を這っている粒は抵抗が小さい
     // （SMOKE_GROUND_DRAG の説明）ので、そのぶん遠くまで流れる。
     const vx = vel[s * 3], vy = vel[s * 3 + 1], vz = vel[s * 3 + 2];
@@ -1843,6 +1899,8 @@ function updateContrail(ac, controls, state, dt) {
     ct.age[slot] = 0;
     ct.strength[slot] = strength;
     sizeArr[slot] = ct.unit * CONTRAIL_SIZE_FROM_SPAN;
+    smokeDriftInto(ct.drift, slot * 3,
+      (ct.unit * CONTRAIL_SIZE_TO_SPAN * CONTRAIL_DRIFT) / Math.max(ct.life, 1), 0);
   }
 
   // 古いものを薄くして消す
@@ -1857,13 +1915,19 @@ function updateContrail(ac, controls, state, dt) {
     const na = a + dt;
     ct.age[s] = na;
     if (na >= life) { alphaArr[s] = 0; continue; }
-    // 出たてはすぐ濃くなり、そのあとゆっくり薄れて消える
+    // 出たてはすぐ濃くなり、しばらく形を保ってから、膨らみながら散って消える
+    // （smokeDissipateAlpha の説明を参照）
     const t = na / life;
-    const fade = Math.min(t * 12, 1) * (1 - t) * (1 - t);
+    const fade = Math.min(t * 12, 1) * smokeDissipateAlpha(t);
     alphaArr[s] = ct.strength[s] * CONTRAIL_MAX_ALPHA * fade;
-    // 広がりながら薄れる（実機の飛行機雲と同じ）
     sizeArr[s] = ct.unit * (CONTRAIL_SIZE_FROM_SPAN
-      + (CONTRAIL_SIZE_TO_SPAN - CONTRAIL_SIZE_FROM_SPAN) * t);
+      + (CONTRAIL_SIZE_TO_SPAN - CONTRAIL_SIZE_FROM_SPAN) * smokeDissipateGrow(t))
+      * smokeDissipateBloom(t, CONTRAIL_BLOOM);
+    // 粒ごとに少しずつ流れて筋がちぎれる。年を取るほど速く（散っていく）
+    const k = dt * (0.3 + t);
+    pos[s * 3] += ct.drift[s * 3] * k;
+    pos[s * 3 + 1] += ct.drift[s * 3 + 1] * k;
+    pos[s * 3 + 2] += ct.drift[s * 3 + 2] * k;
     live++;
   }
   geo.attributes.position.needsUpdate = true;
