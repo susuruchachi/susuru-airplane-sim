@@ -3862,5 +3862,51 @@ function autopilotFlight(opts) {
   flyOnce(hot, '推力8倍の練習機');
 }
 
+// (14) 旋回半径の大きい機体が、滑走路と関係ない向きから来ても着陸できること。
+//
+// 「一部の旋回の大きい機体が、降下から進入に入ると、回りきれないで永遠とやり直しになる」。
+// 降下もやり直しも最終進入開始点へまっすぐ向かっていたので、横や逆向きから着くと
+// 中心線に乗りきれず、やり直してまた同じ角度で着く、を繰り返していた
+// （実測：逆向きから入るとBoeing 747が17回・Concordeが19回やり直して着陸できなかった）。
+// 上の「大型機」（寸法4倍・重量150倍）で、東へ60km飛んで真横（滑走路0°）と
+// 逆向き（滑走路270°）から入る。直す前はそれぞれ2回・3回やり直していた。
+{
+  const big = defaultAircraftConfig();
+  big.modelWeightKg = 165000; big.modelMaxSpeedValue = 480; big.modelMaxSpeedUnit = 'kt';
+  const S = 4;
+  const scale = (v) => { v.x *= S; v.y *= S; v.z *= S; };
+  scale(big.cg);
+  for (const p of big.parts) {
+    scale(p.position);
+    if (p.props && p.props.corners) for (const k in p.props.corners) scale(p.props.corners[k]);
+    if (p.props && p.props.span) p.props.span *= S;
+    if (p.props && p.props.thrustKgf) p.props.thrustKgf *= 200;
+  }
+  for (const rwy of [0, 270]) {
+    const mw = buildAircraftModel(JSON.parse(JSON.stringify(big)));
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(mw, st, 0, 0, 90, flatGround);
+    settleAircraftOnGround(mw, st, flatGround);
+    const ap = createAutopilotState();
+    ap.full = true; ap.targetAltitudeM = 1500; ap.destAirportId = 'DST';
+    ap.phase = 'takeoff'; ap.takeoffHeadingDeg = 90;
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 60000, z: 0, elevationM: 0 },
+      { runwayLengthM: 3000, headingDeg: rwy }, 0);
+    let t = 0, goarounds = 0, prev = '', done = false, crashed = false;
+    for (; t < 3000; t += 1 / 60) {
+      stepAutopilot(mw, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+      advanceFlight(mw, st, c, noWind, flatGround, 1 / 60);
+      if (ap.phase !== prev) { if (ap.phase === 'goaround') goarounds++; prev = ap.phase; }
+      if (st.crashed) { crashed = true; break; }
+      if (ap.phase === 'done') { done = true; break; }
+    }
+    const label = `大型機が${rwy === 0 ? '真横' : '逆向き'}から滑走路へ入る`;
+    note(label, `${done ? '着陸' : (crashed ? '墜落' : '未着陸')} ${t.toFixed(0)}秒・やり直し${goarounds}回`
+      + '（直す前は' + (rwy === 0 ? '2' : '3') + '回）');
+    check(done && !crashed, label + '：着陸できる', done ? '着陸' : (crashed ? '墜落' : '未着陸'));
+    check(goarounds === 0, label + '：やり直さずに中心線へ乗る', goarounds + '回');
+  }
+}
+
 console.log(`\n${failures === 0 ? '✅ すべて通過' : `❌ ${failures} 件の失敗`}`);
 process.exit(failures === 0 ? 0 : 1);

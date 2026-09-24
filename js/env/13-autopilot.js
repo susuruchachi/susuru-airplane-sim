@@ -1289,6 +1289,118 @@ function apManageEngineGroups(model, state, controls, ap, spd, dt, env) {
   }
 }
 
+// --- 最終進入へのつなぎ（回りきれない機体のための「入口」） --------------------------
+//
+// 「一部の旋回の大きい機体が、降下から進入に入ると、回りきれないで永遠とやり直しになる」。
+// 降下もやり直しも**最終進入開始点（FAF）へまっすぐ**向かっていたので、滑走路の向きと
+// 関係ない方角から FAF に着く。そこから中心線に乗るには旋回が要るが、進入のバンクは20°までで、
+// 旋回半径は 200ktで約3km・300ktで約6.6km——FAFから滑走路まで9kmでは乗りきれず、
+// 「滑走路の4km手前で中心線から2km以上ずれている」でやり直し、またFAFへまっすぐ戻って
+// 同じ角度で着く、を繰り返していた（実測：逆向きから入るとBoeing 747が17回・Concordeが19回
+// やり直して着陸できず、TB1は進入のまま4000秒回り続けた）。
+//
+// FAFへまっすぐ向かって中心線から30°以内で着けるときは、これまでどおりまっすぐ行く
+// （正面から来る場合は何も変わらない）。そうでなければ、**中心線をさらに外へ延ばした
+// 「入口」**へまず向かい、そこで中心線から20°以内に入れたら（旋回半径の2.5倍以上外で）、
+// そこからFAFへ向かう。入口はFAFから旋回半径の3.3倍外に置くので、どの向きから来ても
+// 回りきるだけの距離が残る。FAFに着いたとき機首が滑走路の向きから45°以上ずれていたら、
+// 最終進入に入らずやり直す（入口からやり直す）。
+const AP_ENTRY_CONE_DEG = 30;     // FAFへまっすぐ向かってよい、中心線からの角度
+const AP_ENTRY_CAPTURE_RADII = 1.5; // 中心線に乗りにいってよい横ずれ（旋回半径の倍数）
+const AP_ENTRY_RADII = 2.5;       // 中心線に乗っていたい、FAFから外への距離（旋回半径の倍数）
+// 入口を置く、FAFから外への距離（旋回半径の倍数）。外向きに飛んできて入口で折り返すと、
+// 折り返しで旋回半径の2倍ぶん横へずれ、そこから中心線に乗るのにさらに2倍ほど要る。
+// 3.3倍では足りず、ConcordeがFAFに37°ずれて着いた。
+const AP_ENTRY_GATE_RADII = 4.5;
+const AP_ENTRY_ALIGN_DEG = 45;    // 最終進入に入るときに許す、機首と滑走路の向きのずれ
+const AP_ENTRY_MIN_M = 3000;
+// 入口から戻るときは、FAFの点ではなく**中心線に乗りにいく**。点へまっすぐ向かうと、
+// 入口で振り向いたぶんの横ずれを斜めに詰めながらFAFに着くので、機首が滑走路の向きから
+// 30〜46°ずれたまま着いていた（実測、Concorde）。横ずれが旋回半径1つぶんで45°の角度で
+// 寄せ、近づくほど浅くする。FAFまで旋回半径の2.5倍あるので、着くころには乗りきっている。
+const AP_ENTRY_CAPTURE_DEG = 45;
+
+// 旋回半径の見積もり。速さは**上昇の速度で頭打ち**にする——いまの速さそのままだと、
+// 巡航で加速するほど入口が遠ざかり、遠ざかるほど道のりが延びてまた加速する、
+// の繰り返しになった（実測でTB1が入口を追いかけて4,000ktを超え、3,000km飛んだ）。
+// 入口のまわりを回るのは降下ややり直しの速さなので、上昇の速度で見積もる。
+// （降下の速さをそこまで落とすのはやめた——上昇の速度が失速の1.35倍しかない機体
+// （TB1）や、失速24ktの機体で上昇32kt（三式戦闘機）では、そこまで落とすと降下で
+// 地面まで沈んだ。）
+//
+// バンクは**進入と同じ20°で見る**。巡航の上限（35°まで）で見積もると、実際には
+// そこまで傾けないので半径を半分ほどに見誤り（Boeing 747で1.8km、実際は3.4km）、
+// 入口がFAFのすぐ外に来て、その上を回っているうちに横から中心線をつかみにいっていた。
+const AP_ENTRY_BANK_DEG = 20;
+// 入口を回っているあいだの速さの上限（上昇・進入の速度の大きいほうの1.3倍）。
+// 見積もりにこの速さを使い、降下ややり直しでも実際にここまで落とす——見積もりより
+// 速く飛んでいると、入口のまわりを見積もりより大きな輪で回ってしまい、中心線に
+// 乗りにいく条件（横ずれが旋回半径の1.5倍以内）をいつまでも満たさなかった（TB2）。
+// 上昇の速度そのものにすると遅すぎる機体がある（三式戦闘機は失速24kt・上昇32kt）。
+function apEntrySpeedCapMps(spd) {
+  return Math.max(spd.climb || 0, spd.approach || 0) * 1.3;
+}
+function apTurnRadiusM(state, spd) {
+  const cap = apEntrySpeedCapMps(spd);
+  const v = Math.max(Math.min(state.airspeed, cap || state.airspeed), spd.approach || 0);
+  return (v * v) / (9.80665 * Math.tan((AP_ENTRY_BANK_DEG * Math.PI) / 180));
+}
+
+// いま向かう点（FAFか入口）と、そこを通ってFAFまでの道のり
+function apApproachNavTarget(plan, state, ap, spd, straightOnly) {
+  const faf = plan.faf, f = plan.forward, r = plan.right;
+  const dx = state.position.x - faf.x, dz = state.position.z - faf.z;
+  const dFaf = Math.hypot(dx, dz);
+  ap.entrySpeedLimitMps = undefined;
+  if (straightOnly) return { x: faf.x, z: faf.z, distM: dFaf };
+  const out = -(dx * f.x + dz * f.z);          // FAFから、進入してくる側へ何m出ているか
+  const cross = dx * r.x + dz * r.z;
+  const R = apTurnRadiusM(state, spd);
+  const sMin = Math.max(R * AP_ENTRY_RADII, AP_ENTRY_MIN_M);
+  const angDeg = (Math.atan2(Math.abs(cross), Math.max(out, 1e-3)) * 180) / Math.PI;
+  const inCone = (lim) => out >= sMin && angDeg <= lim;
+  const lg = sMin * (AP_ENTRY_GATE_RADII / AP_ENTRY_RADII);
+  const gx = faf.x - f.x * lg, gz = faf.z - f.z * lg;
+  const dGate = Math.hypot(state.position.x - gx, state.position.z - gz);
+  if (ap.navPlan !== plan) { ap.navPlan = plan; ap.navMode = undefined; }
+  if (ap.navMode === undefined) ap.navMode = inCone(AP_ENTRY_CONE_DEG) ? 'faf' : 'gate';
+  else if (ap.navMode === 'gate') {
+    // 入口の近くまで来て、**滑走路へ向かう向き（内向き）に飛んでいる**なら、中心線に乗りにいく。
+    // 外向きのまま入口を過ぎたら、入口へ戻ろうとして自然に折り返す（そのあとで内向きになる）。
+    // 「入口に着いたら」だけで切り替えると、外向きのまま中心線へ寄せはじめ、
+    // 折り返しの旋回ぶん横へずれたまま FAF に着いていた。
+    // 「内向き」は滑走路の向きから45°以内。90°以内にしていたら、中心線を真横に横切って
+    // いるところで切り替わり、寄せきれずにFAFへ横から着いて、入口とのあいだを往復した
+    // （実測でBoeing 747）。入口の上を回っているうちに、いずれこの向きになる。
+    const inbound = Math.abs(apWrap180(plan.heading - state.headingDeg)) <= AP_ENTRY_ALIGN_DEG;
+    // 中心線からの横ずれも旋回半径の1.5倍まで（それより離れていると、FAFまでに寄せきれない）
+    if (out >= sMin && Math.abs(cross) <= R * AP_ENTRY_CAPTURE_RADII && inbound) ap.navMode = 'capture';
+  }
+  if (ap.navMode === 'faf') return { x: faf.x, z: faf.z, distM: dFaf };
+  // 入口を回るときの速さの上限。入口まで残り dGate で、そこで上限の速さに落ちている速さ
+  // （巡航でも掛ける。巡航のまま数千ktで入口に着くと、何十kmもの輪で回って
+  // 中心線に乗れなかった：TB1）。中心線に乗りにいっている間は上限そのもの。
+  const cap = apEntrySpeedCapMps(spd);
+  if (ap.navMode === 'capture') {
+    ap.entrySpeedLimitMps = cap;
+    // 中心線へ寄せる向き（横ずれ1旋回半径で45°、近づくほど浅く）
+    const ang = apClamp((-cross / Math.max(R, 1)) * AP_ENTRY_CAPTURE_DEG,
+      -AP_ENTRY_CAPTURE_DEG, AP_ENTRY_CAPTURE_DEG);
+    // FAFを過ぎたら点そのものへ（最終進入の判定はFAFからの距離で行う）
+    if (out <= 0) return { x: faf.x, z: faf.z, distM: dFaf };
+    const hd = ((plan.heading + ang) * Math.PI) / 180;
+    const fx = Math.sin(hd), fz = -Math.cos(hd);
+    return { x: state.position.x + fx * 5000, z: state.position.z + fz * 5000, distM: dFaf };
+  }
+  ap.entrySpeedLimitMps = Math.sqrt(cap * cap + 2 * AP_DECEL_MPS2 * dGate);
+  return { x: gx, z: gz, distM: dGate + lg };
+}
+
+// 最終進入に入ってよいか（機首が滑走路の向きを向いているか）
+function apAlignedForFinal(plan, state) {
+  return Math.abs(apWrap180(plan.heading - state.headingDeg)) <= AP_ENTRY_ALIGN_DEG;
+}
+
 function apStepFull(model, state, controls, ap, spd, dt, env) {
   const plan = ap.plan;
   const say = (phase, text) => {
@@ -1299,6 +1411,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 前進切替から出たら、そこで覚えた高さと垂直エンジンの蓋を取り直す
     if (phase !== 'vtol_transition') { ap.vtolTransAltM = undefined; ap.vtolWean = undefined; }
     if (phase !== 'approach') { ap.apprThr = undefined; ap.apprFlapMax = undefined; }
+    // やり直すときは、FAFへまっすぐ戻るか入口を経由するかを決め直す
+    if (phase === 'goaround') { ap.navMode = undefined; ap.gaThr = undefined; }
     ap.phase = phase;
     ap.statusText = text;
     if (env && env.announce) env.announce('自動操縦：' + text);
@@ -1315,10 +1429,15 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   // 遅いグループだけに戻す（apManageEngineGroups）。
   apManageEngineGroups(model, state, controls, ap, spd, dt, env);
 
-  // 目的地までの距離（進入計画があれば最終進入開始点まで）
-  const tx = plan ? plan.faf.x : state.position.x;
-  const tz = plan ? plan.faf.z : state.position.z;
-  const distFaf = Math.hypot(state.position.x - tx, state.position.z - tz);
+  // 目的地までの距離（進入計画があれば最終進入開始点まで）。
+  // 最終進入開始点へ回りきれない向きから来るときは、中心線を延ばした入口を経由する
+  // （apApproachNavTarget）。そのときの距離は入口を通る道のり。
+  // 垂直着陸は中心線に乗る必要が無いので、まっすぐ向かう。
+  const navT = plan
+    ? apApproachNavTarget(plan, state, ap, spd, !!(ap.vtolLanding && model.hasVtol)) : null;
+  const tx = navT ? navT.x : state.position.x;
+  const tz = navT ? navT.z : state.position.z;
+  const distFaf = navT ? navT.distM : 0;
   ap.distanceM = distFaf;
 
   // 前方の地面から決まる「下回ってはいけない高度」。離陸から着陸まで、
@@ -1645,7 +1764,9 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
       return;
     }
     nav();
-    ap.targetSpeedMps = spd.cruise;
+    // 入口を経由しているときは、入口に着くまでに落とせる速さまで（apApproachNavTarget）
+    const cruiseV = ap.entrySpeedLimitMps > 0 ? Math.min(spd.cruise, ap.entrySpeedLimitMps) : spd.cruise;
+    ap.targetSpeedMps = cruiseV;
     // **目標高度より低いのに沈んでいるときは、速度超過中でも出力を残す**。
     // 出力は「巡航速度を保つぶん」だけで決めていたので、上のズームクライム
     // （climbの項を参照）がエネルギー切れで沈みに転じたあとにこの段へ
@@ -1655,9 +1776,17 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // ——二値の切り替えだと、沈み方がしきい値をまたぐたびに出力が飛んで
     // 昇降そのものが暴れる。
     const belowTarget = state.altitudeM < overTerrain(ap.targetAltitudeM);
-    const sinkUrgency = belowTarget
+    let sinkUrgency = belowTarget
       ? apClamp(-state.verticalSpeed / AP_CRUISE_SINK_URGENCY_MPS, 0, 1) : 0;
-    controls.throttle = Math.max(apThrottleForSpeed(state, controls, spd.cruise, dt), sinkUrgency);
+    // 入口へ向けて減速しているのに速すぎるあいだは、沈んでも出力では戻さない（姿勢で戻す）。
+    // 入口のまわりで深く傾けると沈むので、そこで全開にしてしまい、推力重量比325の
+    // TB1が6,000ktまで加速して入口のまわりを何十kmもの輪で回り続けた。
+    if (ap.entrySpeedLimitMps > 0 && state.airspeed > cruiseV * 1.05) sinkUrgency = 0;
+    controls.throttle = Math.max(apThrottleForSpeed(state, controls, cruiseV, dt), sinkUrgency);
+    // 入口に向けて落としきれないぶんはスポイラーで（降下と同じ）
+    if (cruiseV < spd.cruise && !terrainPushing) {
+      controls.spoiler = apSpoilerCommand(model, controls, state, cruiseV, 0);
+    }
     ap.vsCmd = overTerrainVs(apVsForAltitude(state, overTerrain(ap.targetAltitudeM), apClimbCap(state, spd), undefined, spd));
     controls.pitch = apElevatorForPitch(state, controls,
       apPitchForVs(state, ap.vsCmd, undefined, terrainPitchMax()), dt, spd, ap);
@@ -1696,6 +1825,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
       ap.descentSpeedCapMps = Math.max(state.airspeed, spd.approach);
     }
     ap.targetSpeedMps = Math.min(ap.descentSpeedCapMps, vAllowed);
+    // 入口を回っているあいだは、旋回半径を見積もった速さまで落とす
+    if (ap.entrySpeedLimitMps > 0) ap.targetSpeedMps = Math.min(ap.targetSpeedMps, ap.entrySpeedLimitMps);
     controls.throttle = apThrottleForSpeed(state, controls, ap.targetSpeedMps, dt);
     // 最終進入開始点の高度へ、一定の勾配で降りる
     const wantAlt = overTerrain(
@@ -1724,8 +1855,10 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.pitch = apElevatorForPitch(state, controls,
       apPitchForVs(state, ap.vsCmd, undefined, terrainPitchMax()), dt, spd, ap);
     if (distFaf < 2500) {
-      say(ap.vtolLanding && model.hasVtol ? 'vtol_approach' : 'approach',
-        ap.vtolLanding && model.hasVtol ? '最終進入（垂直着陸）' : '最終進入');
+      if (ap.vtolLanding && model.hasVtol) say('vtol_approach', '最終進入（垂直着陸）');
+      // 滑走路の向きを向いていなければ、最終進入に入らず入口からやり直す
+      else if (apAlignedForFinal(plan, state)) say('approach', '最終進入');
+      else say('goaround', 'やり直し（滑走路の向きに回りきれない）');
     }
     return;
   }
@@ -2131,6 +2264,29 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     const overCruise = state.airspeed - spd.cruise * 1.5;
     controls.throttle = overCruise > 0 ? apClamp(1 - overCruise * 0.1, 0, 1) : 1;
     nav();
+    // **高さが戻ったら、残りの道のりで進入速度まで落とせる速さにする**（降下と同じ式）。
+    // 全開のまま水平に飛んでいたので、入口を回って戻ってくるあいだに加速し、
+    // 最終進入に 299kt（Concordeの進入速度は177kt）で入って 10.7G で接地していた。
+    // 上がっているあいだは全開のまま（やり直しは、まず上がるのが先）。
+    // 上がりきる前でも、その速さを超えているなら絞る（推力の大きい機体は、上がりながら
+    // 600ktまで加速して旋回半径が倍になり、入口から中心線に乗りきれなかった。TB1）。
+    const gaAlt = plan.fafAltM + 150;
+    const vAllowed = Math.sqrt(spd.approach * spd.approach
+      + 2 * AP_DECEL_MPS2 * Math.max(distFaf, 0));
+    // 上限は上昇の速度ではなく巡航の速度（上昇の速度が失速の1.3倍ほどしかない機体
+    // ——三式戦闘機は失速24kt・上昇32kt——をそこまで落とすと、傾けられずに
+    // ゆっくり大回りするだけになり、中心線に乗れなかった）
+    const vWant = Math.min(spd.cruise, vAllowed,
+      ap.entrySpeedLimitMps > 0 ? ap.entrySpeedLimitMps : Infinity);
+    if (state.altitudeM > gaAlt - 150 || state.airspeed > vWant) {
+      // 出力の積分は別に持つ（controls.throttle は毎フレーム上で1に戻しているので、
+      // それを出発点に足し込むと下がらない。最終進入の apprThr と同じ理由）
+      if (ap.gaThr === undefined) ap.gaThr = controls.throttle;
+      const err = (vWant - state.airspeed) / Math.max(vWant, 1);
+      ap.gaThr = apClamp(ap.gaThr + err * (err > 0 ? AP_THR_KP_REL_UP : AP_THR_KP_REL) * dt, 0, 1);
+      controls.throttle = Math.min(controls.throttle, ap.gaThr);
+      if (!terrainPushing) controls.spoiler = apSpoilerCommand(model, controls, state, vWant, 0);
+    }
     // **やり直しも地形を見る**。ここだけ overTerrain/overTerrainVs を掛けて
     // いなかったので、山のそばの空港でやり直すと、最終進入開始点の高さまでしか
     // 上がらず山へ突っ込めた。逃げる動きなのだから、行き先の空港と同じだけ
@@ -2141,7 +2297,10 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.pitch = apElevatorForPitch(state, controls,
       apPitchForVs(state, ap.vsCmd, undefined, terrainPitchMax()), dt, spd, ap);
     // 最終進入開始点に戻って、高度も合っていれば進入をやり直す
-    if (distFaf < 2500 && Math.abs(state.altitudeM - wantAlt) < 250) say('approach', '最終進入');
+    if (distFaf < 2500 && Math.abs(state.altitudeM - wantAlt) < 250) {
+      if (apAlignedForFinal(plan, state)) say('approach', '最終進入');
+      else ap.navMode = 'gate';   // 向きが合っていないまま着いた：入口へ回り直す
+    }
     return;
   }
 
