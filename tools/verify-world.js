@@ -334,6 +334,35 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   summary('海を渡っていない道路', onLand, W.WORLD_ROADS.length);
   void gentler;
 
+  // 橋。水の上を通るところは必ず橋桁の上で、桁は水面から十分上にあるか。
+  // 道が川面の下へ潜って透けて見えるのを防ぐ（以前は27か所）。
+  {
+    let wetSamples = 0, covered = 0, bridges = 0, deckM = 0, longest = 0, minClear = Infinity;
+    for (const r of W.WORLD_ROADS) {
+      for (const b of r.bridges || []) {
+        bridges++; deckM += b.lengthM; longest = Math.max(longest, b.lengthM);
+        minClear = Math.min(minClear, b.deckY - b.waterY);
+      }
+      let s = 0;
+      for (let i = 1; i < r.points.length; i++) {
+        const a = r.points[i - 1], c = r.points[i];
+        const L = Math.hypot(c.x - a.x, c.z - a.z);
+        for (let d = 0; d < L; d += 20) {
+          const x = a.x + (c.x - a.x) * d / L, z = a.z + (c.z - a.z) * d / L;
+          const w = W.worldWaterSurfaceAt(x, z);
+          if (w !== null && w > W.worldHeightAt(x, z)) {
+            wetSamples++;
+            if (W.worldBridgeProfileY(r.bridges, s + d) >= w + W.BRIDGE_CLEARANCE_M - 0.01) covered++;
+          }
+        }
+        s += L;
+      }
+    }
+    console.log(`[  --  ] 橋 ${bridges}本 / 桁の総延長 ${(deckM / 1000).toFixed(1)}km / 最長 ${Math.round(longest)}m / 水面からの高さ 最小 ${minClear.toFixed(1)}m`);
+    summary('川・湖の上で橋桁の上にある道路（20mおき）', covered, wetSamples);
+    check(longest < 2000, '川に沿って水の上を縦に行く橋が無い', `最長 ${Math.round(longest)}m`);
+  }
+
   const pct = (v, f) => { const s = v.slice().sort((a, b) => a - b); return s[(s.length * f) | 0]; };
   const p90 = pct(slopes, 0.9), q90 = pct(straightSlopes, 0.9);
   console.log(`[  --  ] 最大傾斜の9割点: 探索した道 ${p90.toFixed(2)} / 直線 ${q90.toFixed(2)}`);

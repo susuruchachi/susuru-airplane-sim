@@ -45,6 +45,103 @@ const ROAD_LAMP_GLOW_OPACITY = 0.22;
 // 見えないと、上空からは道が地面に溶ける（ROAD_LAMP_* の説明の実測を参照）。
 const ROAD_NIGHT_EMISSIVE = 0x5a4424;
 
+// --- 橋 ---------------------------------------------------------------------
+// 位置と高さは世界側（03b-world.js の worldRoadBridges）が決める。ここは形だけ。
+const ROAD_STEP_BRIDGE_M = 60;       // 橋の中の頂点の間隔（間引かない）
+const BRIDGE_DECK_THICK_M = 2.2;     // 桁の厚み
+const BRIDGE_PARAPET_H_M = 1.1;      // 欄干の高さ
+const BRIDGE_PIER_SPACING_M = 48;    // 橋脚の間隔
+const BRIDGE_PIER_LEN_M = 3;         // 橋脚の厚み（道に沿った向き）
+const BRIDGE_COLOR = 0x6f6b64;       // コンクリート
+
+// 経路に沿った距離 s が、どれかの橋（取付け部を含む）から margin 以内か
+function roadOnBridge(road, s, margin) {
+  if (!road.bridges) return false;
+  for (const b of road.bridges) if (s >= b.s0 - margin && s <= b.s3 + margin) return true;
+  return false;
+}
+
+// 橋の構造（桁の厚み・欄干・橋脚・取付け部の擁壁）を1つのメッシュにまとめる。
+// 路面そのものは道の帯がそのまま橋の上を通る。
+//   rows … 道の帯の断面の列（中心・左右の縁・その高さ・縁の地面の高さ・距離 s）
+function buildBridgeStructure(rows, bridges, ox, oy, oz) {
+  const pos = [];
+  const quad = (a, b, c, d) => {
+    pos.push(a[0] - ox, a[1] - oy, a[2] - oz, b[0] - ox, b[1] - oy, b[2] - oz, c[0] - ox, c[1] - oy, c[2] - oz);
+    pos.push(a[0] - ox, a[1] - oy, a[2] - oz, c[0] - ox, c[1] - oy, c[2] - oz, d[0] - ox, d[1] - oy, d[2] - oz);
+  };
+  const deckOf = (s) => {
+    for (const b of bridges) if (s >= b.s1 - 0.01 && s <= b.s2 + 0.01) return b;
+    return null;
+  };
+  const elevated = (r) => r.prof > Math.min(r.gl, r.gr) + ROAD_LIFT_M + 0.3;
+
+  let pierNext = null;
+  for (let i = 0; i < rows.length - 1; i++) {
+    const a = rows[i], b = rows[i + 1];
+    const sm = (a.s + b.s) / 2;
+    // 材質は両面（DoubleSide）なので、面の向きはそろえなくてよい
+    const deck = deckOf(sm);
+    const up = deck || (elevated(a) || elevated(b));
+    if (!up) continue;
+    const AL = [a.lx, a.yl, a.lz], AR = [a.rx, a.yr, a.rz], BL = [b.lx, b.yl, b.lz], BR = [b.rx, b.yr, b.rz];
+    // 欄干（両側）
+    const H = BRIDGE_PARAPET_H_M;
+    quad(AL, BL, [b.lx, b.yl + H, b.lz], [a.lx, a.yl + H, a.lz]);
+    quad(AR, BR, [b.rx, b.yr + H, b.rz], [a.rx, a.yr + H, a.rz]);
+    if (deck) {
+      // 桁：側面2枚と裏面
+      const T = BRIDGE_DECK_THICK_M;
+      const aL = [a.lx, a.yl - T, a.lz], aR = [a.rx, a.yr - T, a.rz];
+      const bL = [b.lx, b.yl - T, b.lz], bR = [b.rx, b.yr - T, b.rz];
+      quad(AL, BL, bL, aL);
+      quad(AR, BR, bR, aR);
+      quad(aL, bL, bR, aR);
+      // 橋脚：桁の下から地面（川底）まで。水際の外（陸の上）にも同じ間隔で立てる
+      if (pierNext === null || pierNext < a.s - BRIDGE_PIER_SPACING_M) pierNext = deck.s1 + BRIDGE_PIER_SPACING_M * 0.5;
+      while (pierNext >= a.s && pierNext < b.s) {
+        const t = (pierNext - a.s) / ((b.s - a.s) || 1);
+        const cx = a.x + (b.x - a.x) * t, cz = a.z + (b.z - a.z) * t;
+        const top = (a.yl + a.yr) / 2 + ((b.yl + b.yr) / 2 - (a.yl + a.yr) / 2) * t - T;
+        const bottom = worldHeightAt(cx, cz) - 2;
+        if (top - bottom > 1) {
+          // 道の向きと横向き
+          let dx = b.x - a.x, dz = b.z - a.z;
+          const dl = Math.hypot(dx, dz) || 1; dx /= dl; dz /= dl;
+          const hw = Math.hypot(a.lx - a.rx, a.lz - a.rz) * 0.32; // 桁の幅の6割強
+          const hl = BRIDGE_PIER_LEN_M / 2;
+          const px = -dz, pz = dx;
+          const c = (u, v, y) => [cx + dx * u + px * v, y, cz + dz * u + pz * v];
+          const corners = [[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]];
+          for (let k = 0; k < 4; k++) {
+            const [u0, v0] = corners[k], [u1, v1] = corners[(k + 1) % 4];
+            quad(c(u0, v0, bottom), c(u1, v1, bottom), c(u1, v1, top), c(u0, v0, top));
+          }
+        }
+        pierNext += BRIDGE_PIER_SPACING_M;
+      }
+    } else {
+      // 取付け部（盛土）の擁壁：路面の縁から地面まで
+      quad(AL, BL, [b.lx, b.gl - 1, b.lz], [a.lx, a.gl - 1, a.lz]);
+      quad(AR, BR, [b.rx, b.gr - 1, b.rz], [a.rx, a.gr - 1, a.rz]);
+    }
+  }
+  if (!pos.length) return null;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  // 街（03d-places.js）が道路より先に作られることもあるので、材質はここで用意する
+  if (!EnvState.bridgeMaterial) {
+    EnvState.bridgeMaterial = new THREE.MeshLambertMaterial({ color: BRIDGE_COLOR, side: THREE.DoubleSide });
+  }
+  const mesh = new THREE.Mesh(geo, EnvState.bridgeMaterial);
+  mesh.position.set(ox, oy, oz);
+  mesh.matrixAutoUpdate = false;
+  mesh.updateMatrix();
+  return mesh;
+}
+
 function roadActiveRadius() {
   // 03h-env-quality.js はこのファイルより後に読まれるので、呼ばれる時点では
   // 必ずあるが、念のため（他の実体化半径と同じ書き方）
@@ -138,6 +235,10 @@ function disposeRoadInstance(id) {
   if (e.lamps) {
     EnvState.roadGroup.remove(e.lamps);
     e.lamps.geometry.dispose();   // マテリアルは道で共有しているので dispose しない
+  }
+  if (e.bridge) {
+    EnvState.roadGroup.remove(e.bridge);
+    e.bridge.geometry.dispose();
   }
   EnvState.builtRoads.delete(id);
 }
@@ -245,10 +346,13 @@ function buildRoadInstance(road) {
   // 車寄せ）は必ず残す。
   const keepTail = road.airportId ? 2 : 1;
   const base = [src[0]];
-  let acc = 0;
+  // 経路に沿った距離（橋の位置はこれで持っている。03b-world.js の worldRoadBridges）
+  const baseS = [0];
+  let acc = 0, sAll = 0;
   for (let i = 1; i < src.length; i++) {
     const a = src[i - 1], b = src[i];
     acc += Math.hypot(b.x - a.x, b.z - a.z);
+    sAll += Math.hypot(b.x - a.x, b.z - a.z);
     const d = Math.hypot(b.x - cam.x, b.z - cam.z);
     const want = d < 12000 ? ROAD_STEP_NEAR_M
       : ROAD_STEP_NEAR_M + (ROAD_STEP_FAR_M - ROAD_STEP_NEAR_M)
@@ -261,7 +365,11 @@ function buildRoadInstance(road) {
       if (dh > 180) dh = 360 - dh;
       turn = dh >= ROAD_KEEP_TURN_DEG;
     }
-    if (acc >= want || turn || i >= src.length - keepTail) { base.push(b); acc = 0; }
+    // 橋の中は間引かない（桁が弦で川岸をかすめないように）
+    const onBridge = roadOnBridge(road, sAll, 300);
+    if (acc >= want || turn || i >= src.length - keepTail || (onBridge && acc >= ROAD_STEP_BRIDGE_M)) {
+      base.push(b); baseS.push(sAll); acc = 0;
+    }
   }
   const nb = base.length;
   if (nb < 2) return;
@@ -291,9 +399,10 @@ function buildRoadInstance(road) {
   const ts = [];
   for (let i = 0; i < nb; i++) {
     const m = miter(i);
-    verts.push({ x: base[i].x, z: base[i].z, px: m.px * m.s, pz: m.pz * m.s });
+    verts.push({ x: base[i].x, z: base[i].z, px: m.px * m.s, pz: m.pz * m.s, s: baseS[i] });
     if (i === nb - 1) break;
     const a = base[i], b = base[i + 1];
+    const sa = baseS[i], sb = baseS[i + 1];
     // 区間の両端のうち細かいほうのLODで交点を取る（粗い格子線は細かい格子線に含まれる）
     const seg = Math.max(terrainLodAt(a.x, a.z), terrainLodAt(b.x, b.z));
     const step = TERRAIN_TILE_SIZE / seg;
@@ -303,6 +412,14 @@ function buildRoadInstance(road) {
     roadGridCrossings(a.x, a.z, b.x, b.z, step, ts);
     roadGridCrossings(a.x + qx, a.z + qz, b.x + qx, b.z + qz, step, ts);
     roadGridCrossings(a.x - qx, a.z - qz, b.x - qx, b.z - qz, step, ts);
+    // 橋の取付け部の始まり・桁の両端にも頂点を置く（高さの折れ目がちょうどそこに来るように）
+    if (road.bridges) {
+      for (const br of road.bridges) {
+        for (const sv of [br.s0, br.s1, br.s2, br.s3]) {
+          if (sv > sa && sv < sb) ts.push((sv - sa) / (sb - sa));
+        }
+      }
+    }
     ts.sort((u, v) => u - v);
     let last = 0;
     for (const t of ts) {
@@ -310,7 +427,7 @@ function buildRoadInstance(road) {
       last = t;
       verts.push({
         x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t,
-        px: -d.z, pz: d.x,
+        px: -d.z, pz: d.x, s: sa + (sb - sa) * t,
       });
     }
   }
@@ -321,13 +438,18 @@ function buildRoadInstance(road) {
   const positions = new Float32Array(n * 2 * 3);
   const normals = new Float32Array(n * 2 * 3);
 
+  const rows = road.bridges && road.bridges.length ? [] : null;
   for (let i = 0; i < n; i++) {
     const v = verts[i];
     const lx = v.x + v.px * w, lz = v.z + v.pz * w;
     const rx = v.x - v.px * w, rz = v.z - v.pz * w;
-    // その場所で実際に描かれているLODに合わせて、縁ごとに高さを取る
-    const yl = roadGroundY(lx, lz) + ROAD_LIFT_M;
-    const yr = roadGroundY(rx, rz) + ROAD_LIFT_M;
+    // その場所で実際に描かれているLODに合わせて、縁ごとに高さを取る。
+    // 橋と取付け部では、橋の高さの形（worldBridgeProfileY）のほうが高ければそちら。
+    const gl = roadGroundY(lx, lz), gr = roadGroundY(rx, rz);
+    const prof = rows ? worldBridgeProfileY(road.bridges, v.s) : -Infinity;
+    const yl = Math.max(gl + ROAD_LIFT_M, prof);
+    const yr = Math.max(gr + ROAD_LIFT_M, prof);
+    if (rows) rows.push({ x: v.x, z: v.z, lx, lz, rx, rz, yl, yr, gl, gr, s: v.s, prof });
 
     const li = i * 6, ri = i * 6 + 3;
     positions[li] = lx - ox; positions[li + 1] = yl - oy; positions[li + 2] = lz - oz;
@@ -359,12 +481,15 @@ function buildRoadInstance(road) {
 
   // 街灯は**帯と同じ折れ線（間引いたあと）の上**に置く。間引く前の経路に置いていたので、
   // 帯が弦で結んだカーブでは、街灯だけ道の外に立っていた。
-  const lamps = buildRoadLamps(road, base, ox, oy, oz);
+  const lamps = buildRoadLamps(road, base, baseS, ox, oy, oz);
   if (lamps) EnvState.roadGroup.add(lamps);
+
+  const bridge = rows ? buildBridgeStructure(rows, road.bridges, ox, oy, oz) : null;
+  if (bridge) EnvState.roadGroup.add(bridge);
 
   // 作り直しのときは、新しい帯ができてから古い帯を片付ける（一瞬道が消えないように）
   if (EnvState.builtRoads.has(road.id)) disposeRoadInstance(road.id);
-  EnvState.builtRoads.set(road.id, { strip: mesh, lamps });
+  EnvState.builtRoads.set(road.id, { strip: mesh, lamps, bridge });
 }
 
 // 道に沿って街灯を置く。左右に振らず中央に1列（遠目には中央分離帯の灯りに見える）。
@@ -374,7 +499,7 @@ function buildRoadInstance(road) {
 // **経路の頂点の上ではなく、線に沿って決まった間隔で置く。** 以前は間引いたあとの
 // 頂点の上にしか置けなかったので、間隔を260mにしたつもりが、経路の頂点間隔
 // （中央値878m）に引きずられて実際は平均916mおきだった。
-function buildRoadLamps(road, pts, ox, oy, oz) {
+function buildRoadLamps(road, pts, ptsS, ox, oy, oz) {
   const cam = EnvState.camera.position;
   const R = roadLampRadius();
   const positions = [];
@@ -387,7 +512,9 @@ function buildRoadLamps(road, pts, ox, oy, oz) {
       const t = d > 0 ? s / d : 0;
       const x = a.x + (b.x - a.x) * t, z = a.z + (b.z - a.z) * t;
       if (Math.hypot(x - cam.x, z - cam.z) > R) continue;
-      const y = roadGroundY(x, z) + ROAD_LAMP_Y;
+      // 橋の上では桁の上に立てる（地面の高さのままだと川面すれすれに灯りが浮く）
+      const prof = worldBridgeProfileY(road.bridges, ptsS[i - 1] + (ptsS[i] - ptsS[i - 1]) * t);
+      const y = Math.max(roadGroundY(x, z), prof - ROAD_LIFT_M) + ROAD_LAMP_Y;
       positions.push(x - ox, y - oy, z - oz);
     }
     next = s - d;

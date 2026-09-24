@@ -2161,6 +2161,7 @@ function worldRouteRoad(ax, az, bx, bz) {
 function worldAddRoad(id, ax, az, bx, bz, halfWidth, kind, tail) {
   const pts = worldRouteRoad(ax, az, bx, bz);
   if (!pts || pts.length < 2) return null;
+  worldRoadLeaveRiverBed(pts);
   if (tail) {
     // 取り付き点は経路の終点と同じ場所なので重複を避ける
     for (let i = 1; i < tail.length; i++) pts.push({ x: tail[i].x, z: tail[i].z });
@@ -2183,8 +2184,166 @@ function worldAddRoad(id, ax, az, bx, bz, halfWidth, kind, tail) {
   if (longestRun > ROAD_MAX_SEA_M) return null;
 
   const road = { id, points: pts, lengthM: len, halfWidth, kind, longestSeaM: longestRun };
+  road.bridges = worldRoadBridges(pts);
   WORLD_ROADS.push(road);
   return road;
+}
+
+// 川に沿って水の上を行く区間から、道を岸へ出す。
+//
+// 経路探索の格子は3.5km間隔なので、格子点がどちらも陸でも、そのあいだの角を落とした線が
+// 谷底の川に沿って水の上を走ることがある（実測で3.6km・2.4km・1.7km。橋にすると
+// 川の上を縦に行く高架になる）。水の上に ROAD_ALONG_WATER_MAX_M より長くいる点は、
+// 道と直角の向きで近いほうの岸（少し陸へ入ったところ）へずらす。
+// 川を横切るだけの区間（数百m）はそのまま——そこは橋になる。
+const ROAD_ALONG_WATER_MAX_M = 700;
+const ROAD_BANK_SEARCH_M = 2500;
+const ROAD_BANK_MARGIN_M = 60;
+function worldRoadLeaveRiverBed(pts) {
+  const wetAt = (x, z) => {
+    const w = worldWaterSurfaceAt(x, z);
+    return w !== null && w > worldHeightAt(x, z);
+  };
+  // 点ごとに「水の上か」と、その点を含む水の区間の長さ（経路に沿って10mおきに測る）
+  const n = pts.length;
+  const wet = pts.map((p) => wetAt(p.x, p.z));
+  let i = 1;
+  while (i < n - 1) {
+    if (!wet[i]) { i++; continue; }
+    let j = i;
+    while (j < n - 1 && wet[j + 1]) j++;
+    // 区間の長さ：前後の陸の点のあいだ（水際までは測らない。上限の目安なので十分）
+    let len = 0;
+    for (let k = Math.max(i - 1, 0); k < Math.min(j + 1, n - 1); k++) {
+      len += Math.hypot(pts[k + 1].x - pts[k].x, pts[k + 1].z - pts[k].z);
+    }
+    if (len > ROAD_ALONG_WATER_MAX_M * 2) {
+      for (let k = i; k <= j; k++) {
+        const a = pts[Math.max(k - 1, 0)], b = pts[Math.min(k + 1, n - 1)];
+        let dx = b.x - a.x, dz = b.z - a.z;
+        const dl = Math.hypot(dx, dz) || 1; dx /= dl; dz /= dl;
+        const px = -dz, pz = dx;
+        const p = pts[k];
+        for (let d = 50; d <= ROAD_BANK_SEARCH_M; d += 50) {
+          let moved = false;
+          for (const sgn of [1, -1]) {
+            const x = p.x + px * d * sgn, z = p.z + pz * d * sgn;
+            const x2 = p.x + px * (d + ROAD_BANK_MARGIN_M) * sgn, z2 = p.z + pz * (d + ROAD_BANK_MARGIN_M) * sgn;
+            if (!wetAt(x, z) && !wetAt(x2, z2) && worldHeightAt(x2, z2) > 0) {
+              p.x = x2; p.z = z2; moved = true; break;
+            }
+          }
+          if (moved) break;
+        }
+      }
+    }
+    i = j + 1;
+  }
+}
+
+// --- 橋 ---------------------------------------------------------------------
+//
+// 道が水（川・湖・海）の上を通るところに橋を架ける。以前は道の帯が地形に沿って
+// 川底へ下り、半透明の川面の下に透けて見えていた。
+//
+// 岸が水面より十分高ければそのまま渡せるが、平地の川は谷の斜面が0.03しかなく、
+// 27か所のうち多くで、岸から800m離れても地面が水面+8mに届かなかった。
+// そこで橋桁は「水面+BRIDGE_CLEARANCE_M」（岸が高ければ低いほうの岸の高さ）に水平に置き、
+// 両岸は勾配 BRIDGE_RAMP_SLOPE の取付け部（盛土）で地面からのぼる。
+// 道の高さは「地面」と「橋の高さの形」の高いほう（描画側 03i-roads.js）。
+//
+// 位置は道の経路に沿った距離 s で持つ：
+//   s0 … 取付け部ののぼり始め   s1 … 橋桁の始まり（水際の少し手前）
+//   s2 … 橋桁の終わり           s3 … 取付け部のくだり終わり
+const BRIDGE_CLEARANCE_M = 6;     // 水面から路面までの高さ
+const BRIDGE_RAMP_SLOPE = 0.06;   // 取付け部の勾配
+const BRIDGE_OVERHANG_M = 20;     // 橋桁を水際からどれだけ陸へ延ばすか
+const BRIDGE_MERGE_GAP_M = 150;   // これより短い陸地をはさむ水は1本の橋で渡す
+const BRIDGE_SAMPLE_M = 10;
+const BRIDGE_BANK_PROBE_M = 60;   // 岸の高さをどれだけ陸へ入ったところで測るか
+const BRIDGE_MAX_RAISE_M = 25;    // 岸に合わせて桁を上げるのは水面からここまで
+
+function worldRoadBridges(pts) {
+  // 経路に沿った距離と、その距離での位置
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) {
+    cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z));
+  }
+  const total = cum[cum.length - 1];
+  let seg = 1;
+  const at = (s) => {
+    s = worldClamp(s, 0, total);
+    if (seg >= cum.length || cum[seg - 1] > s) seg = 1;
+    while (seg < cum.length - 1 && cum[seg] < s) seg++;
+    const a = pts[seg - 1], b = pts[seg];
+    const t = (s - cum[seg - 1]) / ((cum[seg] - cum[seg - 1]) || 1);
+    return { x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t };
+  };
+  // 水の上か。水面（海は0）を返す。陸なら null。
+  // 道は全部で1万4千kmあり、10mおきに地面の高さを引くと世界の生成が3倍遅くなる。
+  // 川・湖は格子を引くだけの worldWaterSurfaceAt で先にふるい、地面の高さは
+  // 水の近くか、海かもしれない低い所（経路の点の高さで見る）でだけ引く。
+  const low = pts.some((p) => worldHeightAt(p.x, p.z) < 30);
+  const waterAt = (s) => {
+    const p = at(s);
+    const w = worldWaterSurfaceAt(p.x, p.z);
+    if (w === null && !low) return null;
+    const g = worldHeightAt(p.x, p.z);
+    if (w !== null && w > g) return w;
+    if (g <= 0) return 0;
+    return null;
+  };
+  const groundAt = (s) => { const p = at(s); return worldHeightAt(p.x, p.z); };
+
+  // 水の上にいる区間を拾い、近いものはまとめる
+  const runs = [];
+  let cur = null;
+  for (let s = 0; s <= total; s += BRIDGE_SAMPLE_M) {
+    const w = waterAt(s);
+    if (w !== null) {
+      if (cur && s - cur.end <= BRIDGE_MERGE_GAP_M) { cur.end = s; cur.waterY = Math.max(cur.waterY, w); }
+      else { cur = { start: s, end: s, waterY: w }; runs.push(cur); }
+    }
+  }
+
+  const out = [];
+  for (const r of runs) {
+    // 道の端（街の中心）が水の上のこともある（イーゼンダールは中心から98mを川が流れる）。
+    // そのときは端から橋桁で始める（取付け部は無い）。
+    const s1 = Math.max(r.start - BRIDGE_OVERHANG_M, 0);
+    const s2 = Math.min(r.end + BRIDGE_OVERHANG_M, total);
+    // 岸が高い（谷が深い）ときは、低いほうの岸の高さまで桁を上げて、岸から急に
+    // 下って渡ることがないようにする。ただし水面+BRIDGE_MAX_RAISE_M まで——岸を測った所が
+    // たまたま小高いと、反対側で地面が下がって取付け部が1km近くになった。
+    const bankA = groundAt(r.start - BRIDGE_BANK_PROBE_M);
+    const bankB = groundAt(r.end + BRIDGE_BANK_PROBE_M);
+    const deckY = Math.max(r.waterY + BRIDGE_CLEARANCE_M,
+      Math.min(bankA, bankB, r.waterY + BRIDGE_MAX_RAISE_M));
+    // 取付け部：勾配でのぼる線が地面と交わるところまで
+    let s0 = s1;
+    while (s0 > 0 && groundAt(s0) < deckY - (s1 - s0) * BRIDGE_RAMP_SLOPE) s0 -= BRIDGE_SAMPLE_M;
+    let s3 = s2;
+    while (s3 < total && groundAt(s3) < deckY - (s3 - s2) * BRIDGE_RAMP_SLOPE) s3 += BRIDGE_SAMPLE_M;
+    out.push({
+      s0: Math.max(s0, 0), s1, s2, s3: Math.min(s3, total), deckY, waterY: r.waterY,
+      lengthM: s2 - s1,
+    });
+  }
+  return out;
+}
+
+// 橋の高さの形：経路に沿った距離 s での路面の高さ（橋でなければ -Infinity）。
+// 道の高さは、これと「地面＋少し」の高いほう。
+function worldBridgeProfileY(bridges, s) {
+  if (!bridges) return -Infinity;
+  for (let i = 0; i < bridges.length; i++) {
+    const b = bridges[i];
+    if (s < b.s0 || s > b.s3) continue;
+    if (s < b.s1) return b.deckY - (b.s1 - s) * BRIDGE_RAMP_SLOPE;
+    if (s > b.s2) return b.deckY - (s - b.s2) * BRIDGE_RAMP_SLOPE;
+    return b.deckY;
+  }
+  return -Infinity;
 }
 
 function worldGenerateRoads() {
@@ -2520,7 +2679,7 @@ if (typeof module !== 'undefined' && module.exports) {
     worldNearestAirport, worldRegionAt, worldCountryById, worldCityById, worldAirportById,
     worldRangeCrestAt, worldRangeHeightAt, worldCityStreetDist,
     airportLocalToWorld, airportRunwayHalfSpan, worldAirportGateAt, worldAirportRoadBlock,
-    worldAirportRunwayCenter,
+    worldAirportRunwayCenter, worldBridgeProfileY, BRIDGE_CLEARANCE_M,
     CITY_STREET_HALF_W_M, CITY_STREET_CLEAR_M,
   };
 }
