@@ -116,6 +116,11 @@ const AP_VTOL_SETTLE_MPS = 0.5;  // 接地したあと弾んで浮いたとき�
 // ——押さえつけるだけだと、留まれても動かせない道具になってしまう。
 const AP_HOVER_ALT_KP = 0.4;   // 高さのずれ1mあたりの目標昇降率(m/s)
 const AP_HOVER_VS_MAX = 3;     // ホバリング中に使う昇降率の上限(m/s)
+// ホバリング中に高さを上げ下げする速さ(m/s)。保つ輪の昇降率の上限（3m/s）より少しだけ
+// 遅くしておく——速くすると目標だけが先へ逃げていき、離したあと追いつくまで上がり続ける。
+const AP_HOVER_ADJ_MPS = 2.5;
+// 地面からこれより下へは目標を下げない（着地はホバリングではなく垂直レバーか垂直着陸で）
+const AP_HOVER_MIN_AGL_M = 3;
 // **止まるまでは持ち場を追いかけない**。押した場所へ戻ろうとすると、進入速度の
 // まま入ったときに何kmも行き過ぎてから引き返すことになり、傾きの上限（10°）に
 // 張り付いたまま行ったり来たりを繰り返す——実測でサンダーバード1号を300ktで
@@ -1095,8 +1100,10 @@ function apMakeApproachPlan(airport, settings, windDirectionDeg) {
   // 進入端（手前側の末端）。
   // **空港の中心ではなく「実際に使う滑走路の中心」から測る** ——平行滑走路のある
   // 空港では、空港の中心は滑走路と滑走路のあいだの草地にあたる。
+  // 向きは**いまの設定のもの**を使う（UIで回した空港で、定義の向きのまま測ると
+  // 平行滑走路のあいだの草地を狙う）。
   const rc = typeof worldAirportRunwayCenter === 'function'
-    ? worldAirportRunwayCenter(airport) : { x: airport.x, z: airport.z };
+    ? worldAirportRunwayCenter(airport, settings.headingDeg) : { x: airport.x, z: airport.z };
   const thrX = rc.x - f.x * half;
   const thrZ = rc.z - f.z * half;
   const aimX = thrX + f.x * AP_TOUCHDOWN_M;
@@ -1465,10 +1472,16 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 全開のまま滑走させると数秒で音速を何倍も超える**——実測でサンダーバード1号
     // （推力重量比325）が離陸から20秒で2277ktに達し、目標高度を突き抜けて
     // そのまま降下に入り、進入までに落としきれず永久にやり直していた。
-    // 滑走中は全開のまま。浮いたあとは上昇の速度で頭打ちにする。
-    const over = state.airspeed - spd.climb;
+    // 滑走中は全開のまま。浮いたあとは**上昇の段と同じ基準**（曲がれる速さの1.5倍）で
+    // 頭打ちにする。以前は「上昇の速度」を超えたら絞っていたが、浮いた時点で
+    // たいてい上昇の速度を超えている（引き起こしの速度のほうが速い機体が多い）ので、
+    // 浮いた瞬間に出力を落とし、上昇の段に渡ったとたん全開へ戻していた——
+    // 「自動操縦で離陸するとき、一瞬エンジンの出力を弱める」の正体。
+    // 実測で、浮いてから1秒以内に三式戦闘機・TB1・TB2が0%、Concordeが67%まで落ちていた。
+    // 桁外れな機体の加速は上昇の段と同じく 1.5倍 で止まる。
+    const over = state.airspeed - spd.cruise * 1.5;
     controls.throttle = (state.onGround || over <= 0) ? 1
-      : apClamp(1 - over / Math.max(spd.climb * 0.5, 10), 0, 1);
+      : apClamp(1 - over * 0.1, 0, 1);
     controls.brake = 0;
     controls.gearDown = true;
     // 前輪で滑走路の方位を保つ
@@ -2235,6 +2248,13 @@ function apStepHover(model, state, controls, ap, spd, dt, env) {
   controls.gearDown = true;
 
   // 高さ。垂直レバーを手で動かしているあいだは任せる。
+  // 出力のキー（Shift/Ctrl）かタッチの▲▼を押しているあいだは、保つ高さそのものを
+  // 上げ下げする（レバーを直接動かすより、上げ下げのあとそこでぴたりと止まる）。
+  if (manual.hoverAlt && !manual.vtol) {
+    const ground = state.altitudeM - (state.altitudeAglM || 0);
+    ap.hoverAltM = Math.max(ap.hoverAltM + apClamp(manual.hoverAlt, -1, 1) * AP_HOVER_ADJ_MPS * dt,
+      ground + AP_HOVER_MIN_AGL_M);
+  }
   if (manual.vtol) {
     ap.hoverAltM = state.altitudeM;
   } else {
@@ -2525,6 +2545,9 @@ function setupAutopilotUI() {
     alt.value = ap.targetAltitudeM;
     alt.addEventListener('input', () => {
       ap.targetAltitudeM = parseFloat(alt.value);
+      // ホバリング中は、保つ高さをそのまま動かす（ホバリングは毎コマ targetAltitudeM を
+      // 自分の高さで上書きするので、目標高度だけ変えても戻されてしまう）
+      if (ap.hover) ap.hoverAltM = ap.targetAltitudeM;
       updateAutopilotUI();
     });
     alt.addEventListener('change', onEnvSettingsChanged);

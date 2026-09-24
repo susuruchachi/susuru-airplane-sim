@@ -29,7 +29,10 @@ let _flightKeyHandlersBound = false;
 // 押さえるか」を決めるのに使う。**controls の値では判定できない**——自動操縦が
 // 前のコマに書いた値がばね戻りの出発点になるので、手を離しても数フレームは
 // 残ってしまう。押されているキー／触れているレバーそのものを見る。
-const _flightManual = { pitch: false, roll: false, yaw: false, vtol: false };
+// hoverAlt はホバリング中の高さの上げ下げ（-1〜1）。前へ進む出力のキー（Shift/Ctrl）と
+// タッチの「▲高度／▼高度」から来る。ホバリング中は前へ進むエンジンを使わないので、
+// 出力のキーを高さに回しても取り合いにならない。
+const _flightManual = { pitch: false, roll: false, yaw: false, vtol: false, hoverAlt: 0 };
 function flightManualAxes() { return _flightManual; }
 
 // キーの割り当て。1つの操作に複数のキーを当てておく（矢印とWASDのどちらでも飛ばせる）
@@ -209,6 +212,8 @@ function updateFlightInput(dt) {
 
   // 出力レバーは画面側が controls を直接書くので、ここではキーぶんを足すだけでいい
   const dThrottle = (_keyDown(FLIGHT_KEYMAP.throttleUp) ? 1 : 0) - (_keyDown(FLIGHT_KEYMAP.throttleDown) ? 1 : 0);
+  const hoverTouch = touch('hoverAlt');
+  _flightManual.hoverAlt = hoverTouch !== null ? hoverTouch : dThrottle;
   if (dThrottle !== 0) {
     c.throttle = THREE.MathUtils.clamp(c.throttle + dThrottle * FLIGHT_THROTTLE_RATE * dt, 0, 1);
     if (c.throttle > 0.02) c.parkingBrake = false; // 出力を入れたら駐機ブレーキは外す
@@ -456,7 +461,7 @@ function initFlightHUD() {
       <div class="hud-tile"><span class="k">昇降</span><b id="hudVs">--</b><span class="u">fpm</span></div>
     </div>
     <div class="hud-row hud-bottom">
-      <div class="hud-tile sm"><span class="k">出力</span><b id="hudThr">0</b><span class="u">%</span></div>
+      <div class="hud-tile sm"><span class="k">出力</span><b id="hudThr">0</b><span class="u" id="hudThrUnit">%</span></div>
       <div class="hud-tile sm" id="hudVtolTile" hidden><span class="k">垂直</span><b id="hudVtol">0</b><span class="u">%</span></div>
       <div class="hud-tile sm"><span class="k">トリム</span><b id="hudTrim">0</b><span class="u">%</span></div>
       <div class="hud-tile sm"><span class="k">フラップ</span><b id="hudFlap">0</b><span class="u">%</span></div>
@@ -616,7 +621,17 @@ function updateFlightHUD() {
   set('hudAlt', Math.round(s.altitudeM * 3.28084).toLocaleString());
   set('hudHdg', String(Math.round(s.headingDeg)).padStart(3, '0'));
   set('hudVs', Math.round(s.verticalSpeed * 196.85).toLocaleString());
-  set('hudThr', Math.round(c.throttle * 100));
+  // 空中でレバーを絞りきっても、エンジンはアイドルで回っている（engineFlightIdleLever）。
+  // 0%と出すと「エンジンが止まった」と読めるので、アイドルと出す。
+  const thrModel = f.aircraft && f.aircraft.model;
+  const idleGroup = thrModel && typeof engineGroupLadder === 'function'
+    ? engineGroupLadder(thrModel, c)[0] : null;
+  const atIdle = !s.onGround && idleGroup && typeof engineFlightIdleLever === 'function'
+    && (c.vtolThrottle || 0) <= 0.01
+    && c.throttle <= engineFlightIdleLever(thrModel, idleGroup.id) + 0.005;
+  set('hudThr', atIdle ? 'アイドル' : Math.round(c.throttle * 100));
+  const thrUnit = document.getElementById('hudThrUnit');
+  if (thrUnit) thrUnit.hidden = !!atIdle;
   const vtolTile = document.getElementById('hudVtolTile');
   const hasVtol = !!(f.aircraft && f.aircraft.model && f.aircraft.model.hasVtol);
   if (vtolTile) vtolTile.hidden = !hasVtol;

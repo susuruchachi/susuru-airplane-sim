@@ -462,8 +462,14 @@ function airportLocalToWorld(a, lx, lz) {
 // 空港の中心 (a.x, a.z) は、平行滑走路があるときは滑走路の「あいだの草地」なので、
 // そこを狙うと離陸も着陸も草の上になる。ターミナル側の1本を使う。
 // 滑走路が1本なら空港の中心と同じ値を返す。
-function worldAirportRunwayCenter(a) {
-  return airportLocalToWorld(a, 0, airportRunwayHalfSpan(a));
+//
+// headingDeg を渡すと、その向きに回した空港で測る。**UIで滑走路の向きを変えた空港では
+// 必ず今の向きを渡すこと**——定義の向きのまま測ると、ターミナル側へずらす向きが
+// 回したぶんだけ狂い、2本の空港なら滑走路のあいだの草地（240m横）を狙ってしまう。
+function worldAirportRunwayCenter(a, headingDeg) {
+  const frame = headingDeg === undefined || headingDeg === a.headingDeg
+    ? a : Object.assign({}, a, { headingDeg });
+  return airportLocalToWorld(frame, 0, airportRunwayHalfSpan(a));
 }
 
 // 道路が空港へ入る場所（ターミナルの車寄せ）

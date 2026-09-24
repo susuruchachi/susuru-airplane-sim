@@ -204,6 +204,23 @@ function engineGroupKind(g) {
   return best ? best.kind : 'jet';
 }
 
+// **飛行中のアイドル。** 空中ではエンジンを止めず、レバーを絞りきってもアイドルで回す
+// （実機のフライトアイドルと同じ）。レバー0で推力も0にしていたので、降下と進入のあいだ
+// 全エンジンが0%のまま——実測で1回の飛行につき6〜138秒——になっていた。
+// 垂直離陸用エンジンが回っているあいだは、そちらが回っているので前のエンジンは0まで絞れる。
+// アイドルの推力は「最大の5%」か「機体の重さの3%」の小さいほう。
+// 推力重量比が桁外れな機体（サンダーバード1号は325）に5%を残すと、アイドルだけで
+// 重さの16倍の推力になって降りられない。
+const ENGINE_FLIGHT_IDLE = 0.05;
+const ENGINE_FLIGHT_IDLE_TW = 0.03;
+function engineFlightIdleLever(model, groupId) {
+  const w = (model.massKg || 0) * 9.81;
+  let t = 0;
+  for (const e of model.engines || []) if (!e.lift && e.group === groupId) t += e.thrustN;
+  if (t <= 0) return 0;
+  return Math.min(ENGINE_FLIGHT_IDLE, (ENGINE_FLIGHT_IDLE_TW * w) / t);
+}
+
 // レバーの指示を、スプールアップのぶんだけ遅らせて `state.enginePower` に入れる。
 // キーは グループID（前へ進むエンジン）と 'lift'（垂直離陸用）。
 function spoolEnginePower(model, state, controls, dt) {
@@ -219,10 +236,18 @@ function spoolEnginePower(model, state, controls, dt) {
   };
   const ladder = engineGroupLadder(model, controls);
   const lever = THREE.MathUtils.clamp(controls.throttle || 0, 0, 1);
+  // 垂直離陸用エンジンが回っているあいだは、それが「止まっていないエンジン」なので
+  // 前へ進むエンジンをアイドルに残さない（ホバリング中に前へ押されてしまう）。
+  const liftRunning = (controls.vtolThrottle || 0) > 0.01 || (power.lift || 0) > 0.01;
+  const idleOn = !state.onGround && !liftRunning;
   for (const g of (model.engineGroups || [])) {
     const i = ladder.findIndex((x) => x.id === g.id);
     // 止めているグループ（はしごに居ない）は0へ落とす
-    chase(g.id, i < 0 ? 0 : ladderLever(ladder.length, i, lever), engineGroupKind(g));
+    let want = i < 0 ? 0 : ladderLever(ladder.length, i, lever);
+    // 空中では、はしごのいちばん下（最初に回る）グループをアイドルより下げない。
+    // 自分で止めたグループは止めたまま（止めるのは操縦者の意思）。
+    if (i === 0 && idleOn) want = Math.max(want, engineFlightIdleLever(model, g.id));
+    chase(g.id, want, engineGroupKind(g));
   }
   const liftKind = (model.engines || []).find((e) => e.lift);
   chase('lift', THREE.MathUtils.clamp(controls.vtolThrottle || 0, 0, 1),

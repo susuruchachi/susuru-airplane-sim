@@ -697,5 +697,25 @@ if (process.argv.includes('--list')) {
   }
 }
 
+// --- 向きを変えた空港でも、実際に使う滑走路の中心が滑走路の上にある ---
+// UIで向きを変えた空港を、定義の向きのまま測っていたので、2本の空港では
+// 滑走路のあいだの草地（240m横）を狙って着陸していた。
+{
+  let n = 0, ok = 0, worst = 0;
+  for (const a of W.WORLD_AIRPORTS.filter((q) => q.runwayCount > 1)) {
+    for (const dh of [30, 90, 135, 200]) {
+      const hd = (a.headingDeg + dh) % 360;
+      const rc = W.worldAirportRunwayCenter(a, hd);
+      const t = ((90 - hd) * Math.PI) / 180, c = Math.cos(t), s = Math.sin(t);
+      const dx = rc.x - a.x, dz = rc.z - a.z;
+      const lx = dx * c - dz * s, lz = dx * s + dz * c;
+      const off = Math.hypot(lx, lz - W.airportRunwayHalfSpan(a));
+      n++; if (off < 0.5) ok++; worst = Math.max(worst, off);
+    }
+  }
+  summary('向きを変えた平行滑走路の空港で、使う滑走路の中心が滑走路の上', ok, n,
+    `最大 ${worst.toFixed(1)}m`);
+}
+
 console.log(`\n${failures === 0 ? '✅ すべて通過' : `❌ ${failures} 件の失敗`}`);
 process.exit(failures === 0 ? 0 : 1);

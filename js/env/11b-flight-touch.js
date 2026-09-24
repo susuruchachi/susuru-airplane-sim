@@ -74,6 +74,8 @@ function initFlightTouch() {
       <button type="button" class="ft-btn" data-tap="flapDown">FLAP ▼</button>
       <button type="button" class="ft-btn" data-tap="flapUp">FLAP ▲</button>
       <button type="button" class="ft-btn" id="ftHover" data-tap="hover" hidden>ホバリング</button>
+      <button type="button" class="ft-btn" id="ftHoverUp" data-hold="hoverUp" hidden>▲ 高度</button>
+      <button type="button" class="ft-btn" id="ftHoverDown" data-hold="hoverDown" hidden>▼ 高度</button>
       <button type="button" class="ft-btn" id="ftSpoiler" data-tap="spoiler" hidden>スポイラー</button>
       <button type="button" class="ft-btn" id="ftReverse" data-hold="reverse" hidden>逆噴射</button>
       ${[1, 2, 3, 4].map((n) => `<button type="button" class="ft-btn ft-eng" id="ftEng${n}" data-tap="eng${n}" hidden>E${n}</button>`).join('')}
@@ -112,6 +114,7 @@ function releaseFlightTouch() {
   t.hold.pitch = t.hold.roll = t.hold.brake = t.hold.reverse = false;
   t.hold.vtolLever = false;
   t.hold.yaw = 0;
+  t.hold.hoverAlt = 0;
   t.pitch = t.roll = 0;
   if (_flightTouch.el) {
     paintAxisLever(_flightTouch.el.querySelector('#ftElevator'), 0);
@@ -233,6 +236,9 @@ function bindFlightTouchHold(btn) {
     else if (what === 'reverse') t.hold.reverse = on;
     else if (what === 'yawLeft') t.hold.yaw = on ? -1 : 0;
     else if (what === 'yawRight') t.hold.yaw = on ? 1 : 0;
+    // ホバリングの高さ（押しているあいだ上げ下げ）
+    else if (what === 'hoverUp') t.hold.hoverAlt = on ? 1 : 0;
+    else if (what === 'hoverDown') t.hold.hoverAlt = on ? -1 : 0;
   };
   btn.addEventListener('pointerdown', (e) => {
     if (pointer !== null) return;
@@ -279,6 +285,7 @@ function flightTouchOverride(name) {
   if (name === 'reverse') return t.hold.reverse ? 1 : null;
   // 「垂直レバーに触れているか」だけ知りたい（値はレバーが直接書いている）
   if (name === 'vtolLever') return t.hold.vtolLever ? 1 : null;
+  if (name === 'hoverAlt') return t.hold.hoverAlt ? t.hold.hoverAlt : null;
   return null;
 }
 
@@ -296,6 +303,12 @@ function updateFlightTouchReadout() {
   if (hovBtn) {
     hovBtn.hidden = !(model && model.hasVtol);
     hovBtn.classList.toggle('on', !!(f.autopilot && f.autopilot.hover));
+  }
+  // 高さの上げ下げは、ホバリングしているあいだだけ出す
+  const hovering = !!(f.autopilot && f.autopilot.hover);
+  for (const id of ['#ftHoverUp', '#ftHoverDown']) {
+    const b = t.el.querySelector(id);
+    if (b) b.hidden = !hovering;
   }
   // 減速装置のボタンは、積んでいる機体にだけ出す
   const spoilerBtn = t.el.querySelector('#ftSpoiler');

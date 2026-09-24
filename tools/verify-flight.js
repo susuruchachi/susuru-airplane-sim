@@ -3811,5 +3811,56 @@ function autopilotFlight(opts) {
   check(ms3 / N < 2.0, '当たり判定点があっても十分速い（低空・毎フレーム全点判定）', (ms3 / N).toFixed(3) + 'ms');
 }
 
+// (13) 飛行中のアイドルと、離陸で出力を落とさないこと。
+//
+// 「飛行中に全てのエンジンの出力が0%になることはないようにして」「自動操縦で離陸する時、
+// 一瞬エンジンの出力を弱める」という報告。レバー0で推力も0にしていたので、降下と進入の
+// あいだ全エンジンが0%だった（1回の飛行で6〜138秒）。離陸は「上昇の速度」を超えたら
+// 絞っていたが、浮いた時点でたいてい超えているので、浮いた瞬間に絞って上昇の段で戻していた。
+{
+  const flyOnce = (cfg, label) => {
+    const m = buildAircraftModel(cfg);
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(m, st, 0, 0, 90, flatGround);
+    settleAircraftOnGround(m, st, flatGround);
+    const ap = createAutopilotState();
+    ap.full = true; ap.targetAltitudeM = 1500; ap.destAirportId = 'DST';
+    ap.phase = 'takeoff'; ap.takeoffHeadingDeg = 90;
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 40000, z: 0, elevationM: 0 },
+      { runwayLengthM: 3000, headingDeg: 90 }, 0);
+    let t = 0, tAir = null, minTakeoffLever = 1, zeroAir = 0, done = false, crashed = false;
+    let maxIdleTW = 0;
+    for (; t < 3000; t += 1 / 60) {
+      stepAutopilot(m, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+      advanceFlight(m, st, c, noWind, flatGround, 1 / 60);
+      if (!st.onGround && tAir === null) tAir = t;
+      if (tAir !== null && t < tAir + 15) minTakeoffLever = Math.min(minTakeoffLever, c.throttle);
+      if (!st.onGround) {
+        const pw = st.enginePower || {};
+        const fwd = Object.keys(pw).filter((k) => k !== 'lift').map((k) => pw[k]);
+        if ((fwd.length ? Math.max(...fwd) : 0) <= 1e-6 && (pw.lift || 0) <= 0.01) zeroAir += 1 / 60;
+        // アイドルに落ちきったところで測る（絞った直後はまだ回転が落ちていく途中）
+        const idle = ctx.engineFlightIdleLever(m, m.engineGroups[0].id);
+        if (c.throttle === 0 && fwd.length && Math.abs(Math.max(...fwd) - idle) < 1e-9) {
+          maxIdleTW = Math.max(maxIdleTW, st.thrustN / (m.massKg * 9.80665));
+        }
+      }
+      if (st.crashed) { crashed = true; break; }
+      if (ap.phase === 'done') { done = true; break; }
+    }
+    note(label, `浮いてから15秒の最小レバー ${(minTakeoffLever * 100).toFixed(0)}%`
+      + ` / 空中で全エンジン0% ${zeroAir.toFixed(1)}秒 / アイドル推力 重さの${(maxIdleTW * 100).toFixed(1)}%`);
+    check(done && !crashed, label + '：着陸まで飛べる', crashed ? '墜落' : (done ? '着陸' : '未完了'));
+    check(minTakeoffLever >= 0.99, label + '：浮いた直後に出力を絞らない', (minTakeoffLever * 100).toFixed(0) + '%');
+    check(zeroAir === 0, label + '：空中で全エンジンが0%にならない', zeroAir.toFixed(1) + '秒');
+    check(maxIdleTW <= 0.031, label + '：アイドルの推力は重さの3%まで', (maxIdleTW * 100).toFixed(1) + '%');
+  };
+  flyOnce(defaultAircraftConfig(), '内蔵の練習機');
+  // 推力重量比の大きい機体（引き起こしより上昇の速度が遅く、浮いた時点で超えている）
+  const hot = defaultAircraftConfig();
+  for (const p of hot.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 8;
+  flyOnce(hot, '推力8倍の練習機');
+}
+
 console.log(`\n${failures === 0 ? '✅ すべて通過' : `❌ ${failures} 件の失敗`}`);
 process.exit(failures === 0 ? 0 : 1);

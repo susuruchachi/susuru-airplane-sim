@@ -197,7 +197,7 @@ function resetFlightToRunway() {
   const rad = THREE.MathUtils.degToRad(heading);
   const fx = Math.sin(rad), fz = -Math.cos(rad);
   const back = st.runwayLengthM * 0.5 - 40;
-  const rc = worldAirportRunwayCenter(def);
+  const rc = worldAirportRunwayCenter(def, st.headingDeg); // いまの向きで（UIで回した空港）
   const x = rc.x - fx * back;
   const z = rc.z - fz * back;
 
