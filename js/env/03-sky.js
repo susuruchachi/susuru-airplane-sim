@@ -27,14 +27,18 @@ function initSky() {
   uniforms['mieCoefficient'].value = 0.006;
   uniforms['mieDirectionalG'].value = 0.8;
 
-  // 太陽の見た目（光源とは別に、球として描画する）
-  const sunMat = new THREE.MeshBasicMaterial({ color: 0xfff2d0, fog: false });
+  // 太陽の見た目（光源とは別に、球として描画する）。
+  // 深度は無限遠（applyAtInfinity）。18km先のまま描くと、それより遠い山や雲底の手前に出てしまう。
+  // 空のドームより後に描く（ドームも最遠に描かれ、深度を書かないので、先に描くと上から塗られる）。
+  const sunMat = applyAtInfinity(new THREE.MeshBasicMaterial({ color: 0xfff2d0, fog: false }));
   EnvState.sunMesh = new THREE.Mesh(new THREE.SphereGeometry(270, 16, 16), sunMat);
+  EnvState.sunMesh.renderOrder = 1;
   EnvState.celestial.add(EnvState.sunMesh);
 
   // 月
-  const moonMat = new THREE.MeshBasicMaterial({ color: 0xcfd6e6, fog: false });
+  const moonMat = applyAtInfinity(new THREE.MeshBasicMaterial({ color: 0xcfd6e6, fog: false }));
   EnvState.moonMesh = new THREE.Mesh(new THREE.SphereGeometry(180, 16, 16), moonMat);
+  EnvState.moonMesh.renderOrder = 1;
   EnvState.celestial.add(EnvState.moonMesh);
 
   // 星（夜間のみフェードインする点群。地表付近は不要なので上半球寄りに分布）
@@ -51,10 +55,12 @@ function initSky() {
   const starGeo = new THREE.BufferGeometry();
   starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
   // 距離で縮ませると天球の半径では点が消えてしまうので、画面上で一定の大きさにする
-  const starMat = new THREE.PointsMaterial({
+  const starMat = applyAtInfinity(new THREE.PointsMaterial({
     color: 0xffffff, size: 2, sizeAttenuation: false, transparent: true, opacity: 0, fog: false,
-  });
+  }));
   EnvState.stars = new THREE.Points(starGeo, starMat);
+  // 半透明のなかでいちばん先に描く（霞・雲底・雲がその上から重なる）
+  EnvState.stars.renderOrder = ENV_ORDER.haze - 1;
   EnvState.celestial.add(EnvState.stars);
 
   // ライト（太陽＝主光源、月＝夜間の弱い補助光、半球光＝全体の底上げ）

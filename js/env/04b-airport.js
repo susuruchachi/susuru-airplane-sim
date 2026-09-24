@@ -538,6 +538,13 @@ function buildAirportLights(L, W, taxi, offsets) {
     blending: THREE.AdditiveBlending,
   });
   const core = new THREE.Points(geo, mat);
+  // 描く順番は雲底のあと、こちら側の積雲と同じ組（ENV_ORDER.clouds）。
+  // 同じ組のなかは three.js が遠い順に並べるので、空港より手前の雲は灯りに重なり、
+  // 向こうの雲は灯りの下になる。雲底は不透明に近いときは深度を書くので、
+  // 雲の上から見下ろせば灯りは隠れる。
+  // 以前は何も指定せず（0）、にじみは -1 だったので、半透明のなかで最初に描かれて、
+  // 手前にあっても雲底や霞に上から塗られ、雲底の向こうにあるように見えた。
+  core.renderOrder = ENV_ORDER.clouds;
 
   // **にじみ（ブルーム）**。画面ぜんぶに後処理を掛けるやり方（EffectComposer +
   // UnrealBloomPass）は取らない——(1) CDNから5本も追加で読むことになり、
@@ -552,7 +559,7 @@ function buildAirportLights(L, W, taxi, offsets) {
     blending: THREE.AdditiveBlending,
   });
   const glow = new THREE.Points(geo, glowMat);
-  glow.renderOrder = -1; // 芯より先に描く（芯が上に乗る）
+  glow.renderOrder = ENV_ORDER.clouds; // 芯と同じ組（加算なので芯との前後は見た目に響かない）
   core.add(glow);
   core.userData.glow = glow;
   return core;

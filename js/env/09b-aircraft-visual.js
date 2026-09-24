@@ -313,10 +313,17 @@ function buildAircraftLights(config, model, modelParent, bodyParent) {
     // なく「光らせたいものにだけ薄い光の玉を重ねる」（04b-airport.js の
     // AIRPORT_GLOW_SCALE の説明を参照）。カメラのほうを向き続ける板なので、
     // どの角度から見ても丸いにじみになる。
-    const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+    //
+    // 深度は玉の半径ぶんカメラ寄りに引く（applyDepthPull）。板はカメラを向いた平面なので、
+    // そのままだと灯りのまわりの機体の面（翼端灯なら翼の上面）に下半分が隠れて、
+    // にじみが機体にめり込んで見えた。灯りそのものが機体の陰にあるときは、
+    // updateNavLightOcclusion が見つけてにじみを消す。
+    const scale = parent === modelParent
+      ? Math.max(modelParent.scale.x, modelParent.scale.y, modelParent.scale.z) : 1;
+    const glow = new THREE.Sprite(applyDepthPull(new THREE.SpriteMaterial({
       color: info.color, map: navLightGlowTexture(), transparent: true,
       opacity: 0, depthWrite: false, fog: false, blending: THREE.AdditiveBlending,
-    }));
+    }), 0, 0, 0, NAV_LIGHT_GLOW_SIZE * 0.5 * scale));
     glow.scale.setScalar(NAV_LIGHT_GLOW_SIZE);
     glow.position.copy(mesh.position);
     glow.renderOrder = ENV_ORDER.light - 1;
@@ -324,6 +331,8 @@ function buildAircraftLights(config, model, modelParent, bodyParent) {
     const props = (part && part.props) || {};
     out.push({
       mesh, glow, kind, blink: info.blink,
+      // 機体の陰にあるか（updateNavLightOcclusion）。取付面に当たったぶんは陰とみなさない
+      occluded: false, glowVis: 1, coreRadius: 0.09 * scale,
       name: (part && part.name) || kind,
       // 着陸灯の向きと広がり。**パーツの回転をそのまま向きに使う**
       // （エンジンの推力と同じ約束。Builderで傾けて付ければ、その向きへ照らす）。
@@ -977,10 +986,11 @@ function buildEnginePlumes(model, parent, meshUnit) {
     // 炎のにじみ。ノズルの口に光の玉を1つ置く。
     const glowColor = (e.kind === 'jet_ab') ? PLUME_AB.glow : look.glow;
     if (glowColor) {
-      const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+      // 航行灯のにじみと同じく、玉の半径ぶん深度を手前へ引いて、ナセルにめり込ませない
+      const glow = new THREE.Sprite(applyDepthPull(new THREE.SpriteMaterial({
         color: glowColor, map: navLightGlowTexture(), transparent: true,
         opacity: 0, depthWrite: false, fog: false, blending: THREE.AdditiveBlending,
-      }));
+      }), 0, 0, 0, r * PLUME_GLOW_SIZE * 0.5));
       glow.position.copy(e.position).addScaledVector(dir, r * 0.5);
       glow.renderOrder = ENV_ORDER.effect;
       glow.visible = false;
@@ -1935,6 +1945,75 @@ function updateContrail(ac, controls, state, dt) {
   ct.points.visible = live > 0;
 }
 
+// 灯りが機体の陰にあるかを、1フレームに1灯ずつ調べる（カメラから灯りへ光線を飛ばす）。
+//
+// にじみは深度を玉の半径ぶん手前へ引いてあるので、そのままだと灯りが胴体の陰に入っても、
+// 胴体の縁からにじみだけがはみ出して見える（灯りは見えないのにブルームが見える）。
+// 本物のにじみはレンズの中で起きるので、灯りが見えていなければ出ない。
+//
+// 三角形が多すぎる機体（読み込んだGLB）では光線が重くなるので調べない（以前と同じ見え方）。
+const NAV_GLOW_OCCLUSION_MAX_TRIS = 80000;
+const _occRay = new THREE.Raycaster();
+const _occPos = new THREE.Vector3();
+const _occDir = new THREE.Vector3();
+function navLightOccluders(ac) {
+  if (ac._occluders !== undefined) return ac._occluders;
+  const skip = new Set();
+  for (const l of ac.lights) { skip.add(l.mesh); if (l.glow) skip.add(l.glow); }
+  const list = [];
+  let tris = 0;
+  ac.group.traverse((o) => {
+    if (!o.isMesh || skip.has(o) || o.userData.landingPool) return;
+    const m = Array.isArray(o.material) ? o.material[0] : o.material;
+    if (!m || m.transparent) return; // 窓・円盤・炎・光の筋は陰を作らない
+    const g = o.geometry;
+    if (!g || !g.attributes.position) return;
+    tris += g.index ? g.index.count / 3 : g.attributes.position.count / 3;
+    list.push(o);
+  });
+  ac._occluders = tris <= NAV_GLOW_OCCLUSION_MAX_TRIS ? list : null;
+  return ac._occluders;
+}
+
+// 芯の玉の中心と、画面で見た上下左右の縁（カメラ寄りに半径ぶん寄せた点）の5点のうち、
+// どれか1つでも見えていれば「見えている」。中心だけで見ると、翼端に半分埋まって
+// 外側半分が顔を出している灯りを、斜めから見たときに陰と間違える（上から見た翼端灯がそうだった）。
+const _occRight = new THREE.Vector3();
+const _occUp = new THREE.Vector3();
+const _occPt = new THREE.Vector3();
+const _occRayDir = new THREE.Vector3();
+const OCCLUSION_OFFSETS = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]];
+function updateNavLightOcclusion(ac) {
+  if (!ac.lights.length || !EnvState.camera) return;
+  const occ = navLightOccluders(ac);
+  if (!occ) return;
+  ac._occIndex = ((ac._occIndex || 0) + 1) % ac.lights.length;
+  const l = ac.lights[ac._occIndex];
+  const cam = EnvState.camera.position;
+  l.mesh.getWorldPosition(_occPos);
+  _occDir.subVectors(cam, _occPos);
+  if (_occDir.lengthSq() < 1e-6) { l.occluded = false; return; }
+  _occDir.normalize(); // 灯り → カメラ
+  _occRight.set(0, 1, 0).cross(_occDir);
+  if (_occRight.lengthSq() < 1e-6) _occRight.set(1, 0, 0);
+  _occRight.normalize();
+  _occUp.crossVectors(_occDir, _occRight);
+  const r = l.coreRadius;
+  let visible = false;
+  for (const [a, b] of OCCLUSION_OFFSETS) {
+    _occPt.copy(_occPos).addScaledVector(_occRight, a * r * 0.9).addScaledVector(_occUp, b * r * 0.9);
+    if (a || b) _occPt.addScaledVector(_occDir, r * 0.5);
+    _occRayDir.subVectors(_occPt, cam);
+    const d = _occRayDir.length();
+    _occRay.set(cam, _occRayDir.divideScalar(d));
+    _occRay.near = 0;
+    _occRay.far = d;
+    const hit = _occRay.intersectObjects(occ, false);
+    if (!hit.length || hit[0].distance >= d - 0.02) { visible = true; break; }
+  }
+  l.occluded = !visible;
+}
+
 // 航行灯のにじみ。玉の直径(m)と、芯に対する濃さ。
 const NAV_LIGHT_GLOW_SIZE = 1.6;
 const NAV_LIGHT_GLOW_OPACITY = 0.5;
@@ -1990,8 +2069,11 @@ function updateAircraftVisual(ac, controls, state, dt, elapsed) {
     // 着陸灯は別扱い。消しているときは玉も暗くする。
     if (l.kind === 'landing') on = controls.landingLight ? 1 : 0.05;
     l.mesh.material.opacity = on;
-    if (l.glow) l.glow.material.opacity = on * NAV_LIGHT_GLOW_OPACITY;
+    // 灯りが機体の陰に入ったら、にじみもすっと消す（芯は深度で隠れる）
+    l.glowVis += ((l.occluded ? 0 : 1) - l.glowVis) * Math.min(1, dt * 14);
+    if (l.glow) l.glow.material.opacity = on * NAV_LIGHT_GLOW_OPACITY * l.glowVis;
   }
+  updateNavLightOcclusion(ac);
 
   // GLBに舵のボーンがあれば、操縦に合わせて振る（09c-aircraft-bones.js）
   if (typeof updateAircraftBones === 'function') updateAircraftBones(ac, controls, dt);

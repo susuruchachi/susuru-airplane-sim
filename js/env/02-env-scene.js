@@ -45,6 +45,32 @@ function applyDepthPull(material, pull, rank, slopePx, absM) {
   return material;
 }
 
+// 太陽・月・星を「無限遠」に描く（深度を最遠の1.0にする）。
+//
+// 天球はカメラに追従させて18〜24km先に置いてあるので、ふつうに深度を付けると、
+// それより遠い山や雲底より**手前**になり、低い太陽や月が地面・雲底を透かして見えた。
+// 深度を最遠に揃えれば、地形でも雲底でも、描かれているものの向こうにしか出ない。
+// 空のドーム（THREE.Sky）も最遠に描かれ深度を書かないので、それより後に描くこと（renderOrder）。
+function applyAtInfinity(material) {
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader.replace('#include <logdepthbuf_vertex>', [
+      '#include <logdepthbuf_vertex>',
+      '#if !defined( USE_LOGDEPTHBUF_EXT )',
+      '  gl_Position.z = gl_Position.w;',
+      '#endif',
+    ].join('\n'));
+    shader.fragmentShader = shader.fragmentShader.replace('#include <logdepthbuf_fragment>', [
+      '#include <logdepthbuf_fragment>',
+      '#if defined( USE_LOGDEPTHBUF ) && defined( USE_LOGDEPTHBUF_EXT )',
+      '  gl_FragDepthEXT = 1.0;',
+      '#endif',
+    ].join('\n'));
+  };
+  material.customProgramCacheKey = () => 'atInfinity';
+  material.depthWrite = false;
+  return material;
+}
+
 function initEnvScene() {
   const canvas = document.getElementById('envViewport');
   const centerEl = document.getElementById('envCenter');
