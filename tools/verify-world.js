@@ -169,6 +169,44 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
     console.log(`[  --  ] 川の長さ: 最長${lens[0].toFixed(0)}km 中央${lens[Math.floor(lens.length / 2)].toFixed(0)}km 最短${lens[lens.length - 1].toFixed(0)}km`);
   }
   check(W.WORLD_RIVERS.length >= 20, '川が十分な数ある', String(W.WORLD_RIVERS.length));
+
+  // 源流は山（山脈の中）か丘にある。以前は谷底を遡る途中の小さな高まりで止まり、
+  // 源流の標高は中央値393m（陸全体の中央値とほぼ同じ）、25本が300m未満の平野だった。
+  {
+    const hs = [];
+    let inRange = 0;
+    for (const r of W.WORLD_RIVERS) {
+      const p = r.points[0];
+      hs.push(W.worldBaseHeightAt(p.x, p.z));
+      if (W.worldInRangeAt(p.x, p.z)) inRange++;
+    }
+    hs.sort((a, b) => a - b);
+    const med = hs[hs.length >> 1];
+    console.log(`[  --  ] 源流の標高: 最低${hs[0].toFixed(0)}m 中央${med.toFixed(0)}m 最高${hs[hs.length - 1].toFixed(0)}m / 山脈の中 ${inRange}/${hs.length}本`);
+    check(hs[0] >= 300, '平野の真ん中から始まる川が無い（源流が標高300m以上）', `最低 ${hs[0].toFixed(0)}m`);
+    check(med >= 600, '源流の標高の中央が600m以上', `${med.toFixed(0)}m`);
+    check(inRange * 2 >= hs.length, '半分以上の川が山脈の中から始まる', `${inRange}/${hs.length}`);
+  }
+
+  // 川面が地面から浮かない。川面は川床+5mに張るので、地面が川床より低く削られていると
+  // そこだけ水面が宙に浮く。谷の斜面を一律0.03にしていたころは、山の中の急な川で
+  // 下流の区間の谷が上流の川床を割り、1128点で川床より5m以上（最大558m）削られていた。
+  // 湖の中（湖の水面が引き受ける）と、河口の先の海面以下は数えない。
+  {
+    let n = 0, floating = 0, worst = 0;
+    for (const r of W.WORLD_RIVERS) {
+      for (const p of r.points) {
+        if (p.bedH + W.RIVER_WATER_DEPTH_M <= 0 || W.worldLakeFootprintAt(p.x, p.z)) continue;
+        n++;
+        const under = p.bedH - W.worldHeightAt(p.x, p.z);
+        if (under > 5) floating++;
+        worst = Math.max(worst, under);
+      }
+    }
+    check(floating <= n * 0.002 && worst < 80, '川面が地面から浮かない（川床より5m以上削られた点が0.2%以下）',
+      `${floating}/${n}点・最大${worst.toFixed(0)}m`);
+    if (floating) console.log(`[  --  ] 川床より5m以上削られた点: ${floating}/${n}（最大${worst.toFixed(0)}m）`);
+  }
 }
 
 // --- 河口 ---

@@ -72,6 +72,7 @@ const EnvState = {
   waterGroup: null,
   builtWater: null,     // Map(川/湖のid -> Mesh)
   waterMaterial: null,
+  riverWaterMaterial: null,
 
   // 天候。気象の場（03b-world.js）と気候から、雲量・視程・降水・突風を決める。
   weatherGroup: null,

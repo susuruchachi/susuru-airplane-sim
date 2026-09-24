@@ -19,6 +19,12 @@ const RIVER_BANK_MARGIN_M = RIVER_WATER_DEPTH_M / RIVER_VALLEY_SLOPE;
 // 岸の斜面が水面より2mほど上にあるので、どちらも表には出ない。
 const LAKE_SHORE_RAYS = 240;
 
+// 川面の深度の寄せ方（applyDepthPull）。距離1kmあたり RIVER_DEPTH_PULL*1000 m、
+// 画面1画素ぶんの深度の変化の RIVER_DEPTH_SLOPE_PX 倍、それに RIVER_DEPTH_ABS_M
+const RIVER_DEPTH_PULL = 2e-3;
+const RIVER_DEPTH_SLOPE_PX = 2;
+const RIVER_DEPTH_ABS_M = 4;
+
 function initWater() {
   EnvState.waterGroup = new THREE.Group();
   EnvState.scene.add(EnvState.waterGroup);
@@ -35,6 +41,12 @@ function initWater() {
   EnvState.waterMaterial.polygonOffset = true;
   EnvState.waterMaterial.polygonOffsetFactor = -4;
   EnvState.waterMaterial.polygonOffsetUnits = -4;
+  // 川だけは深度を手前へ寄せる。山の中の急な川（勾配0.1なら310mで31m下る）では、
+  // 地形のLODが310m以上の格子を直線でつなぐぶんの誤差が水深5mを超え、地形が
+  // 傾いた川面を斜めに横切って、水面の縁がのこぎりの歯のように欠けて見えた。
+  // 湖は岸の線で水面を切っているので寄せない（寄せると岸の斜面に水がにじむ）。
+  EnvState.riverWaterMaterial = applyDepthPull(EnvState.waterMaterial.clone(),
+    RIVER_DEPTH_PULL, 1, RIVER_DEPTH_SLOPE_PX, RIVER_DEPTH_ABS_M);
 
   refreshWater();
 }
@@ -197,7 +209,7 @@ function buildRiverInstance(river) {
   geo.setIndex(new THREE.BufferAttribute(indices, 1));
   geo.computeBoundingSphere();
 
-  const mesh = new THREE.Mesh(geo, EnvState.waterMaterial);
+  const mesh = new THREE.Mesh(geo, EnvState.riverWaterMaterial);
   mesh.position.set(ox, oy, oz);
   mesh.renderOrder = ENV_ORDER.water; // 海より先、地形より後
   mesh.matrixAutoUpdate = false;
@@ -256,9 +268,11 @@ function buildLakeInstance(lake) {
 // 夜は水面も暗くする（03-sky.js の updateSkyForSunDirection から呼ばれる）
 function updateWaterForDaylight(dayFactor, warmth) {
   if (!EnvState.waterMaterial) return;
-  const mat = EnvState.waterMaterial;
   const night = new THREE.Color(0x050c14);
   const day = new THREE.Color(0x14303f).lerp(new THREE.Color(0x1d4055), warmth * 0.5);
-  mat.color.copy(night).lerp(day, dayFactor);
-  mat.specular.setHex(0x6f93ad).multiplyScalar(0.25 + dayFactor * 0.75);
+  for (const mat of [EnvState.waterMaterial, EnvState.riverWaterMaterial]) {
+    if (!mat) continue;
+    mat.color.copy(night).lerp(day, dayFactor);
+    mat.specular.setHex(0x6f93ad).multiplyScalar(0.25 + dayFactor * 0.75);
+  }
 }

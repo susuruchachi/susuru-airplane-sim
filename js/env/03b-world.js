@@ -1333,6 +1333,10 @@ function worldTraceRiverFromMouth(mx, mz) {
     walkH = best.h;
   }
 
+  // 山に届かないうちに止まったら、山脈の稜線へ向けてさらに遡る
+  const up = worldClimbRiverToRange(back);
+  for (let i = 0; i < up.length; i++) back.push(up[i]);
+
   // 上流→河口の順に直してから角を落とす
   back.reverse();
   const smooth = worldChaikinPath(back, 2);
@@ -1347,6 +1351,273 @@ function worldTraceRiverFromMouth(mx, mz) {
     pts.push({ x: p.x, z: p.z, h: bed });
   }
   return pts;
+}
+
+// --- 源流を山の中へ ----------------------------------------------------------
+//
+// 谷底を遡る歩き方は、なだらかにした地形の「小さな頂」でも止まる。平野の中の
+// 高まりで止まった川は、平野の真ん中からいきなり湧き出して見える——実測で68本の
+// 源流の標高は中央値393m（陸全体の中央値333mとほとんど同じ）、25本が300m未満だった。
+// 源流から25km以内に標高1000m超の山がある川も多いのに、そこまで登っていなかった。
+//
+// 止まったところがまだ山の中でなければ、いちばん近い山脈の稜線へ向けて遡りを続ける。
+// 選び方は谷底を遡るときと同じ「高い隣のうち、低いところ」に、稜線へ近づくぶんの
+// 得点を足したもの。鞍部を越えるための少しの下りは許す（下流側の川床は上流の最小値で
+// 入れるので、そのぶん尾根を刻んで通る）。山に着けなかったら、元の源流のまま。
+const RIVER_SOURCE_UPLIFT = 0.3;      // 山脈の盛り上がりがその山脈の高さのこの割合を超えたら「山の中」
+const RIVER_SOURCE_MIN_M = 400;       // …かつ盛り上がりも標高もこの高さ以上
+const RIVER_TO_RANGE_MAX_M = 200000;  // これより遠い山脈へは向かわない
+const RIVER_TO_RANGE_STEPS = 160;
+const RIVER_TO_RANGE_PULL = 0.12;     // 稜線へ1m近づくごとに、高さ何mぶん有利にするか
+const RIVER_SADDLE_DROP_M = 40;       // 1歩で下ってよい高さ（なだらかにした地形で）
+const RIVER_SADDLE_BUDGET_M = 160;    // 下ってよい高さの合計
+// 素の地形で、それまでに通ったいちばん高い点よりこれ以上低いところへは行かない。
+// 下流の川床は「上流の最小値」で入れるので、尾根を越えてから谷へ下りると、
+// 越えた尾根がその差だけ刻まれる。なだらかにした地形の上だけで歩かせたら、
+// 489mの谷の上流で1250mの尾根を越えていて、尾根を761m刻んだ峡谷ができた。
+const RIVER_CUT_MAX_M = 150;
+const RIVER_KEEP_APART_M = 6000;      // ほかの川にこれより近づかない
+// それでも源流がこれより低い川は引かない（別の河口を探す）。山も丘も遠い海岸平野の
+// 真ん中から湧き出す川になる
+const RIVER_SOURCE_REJECT_M = 300;
+const RIVER_CLIMB_KEEP_M = 200;       // 山に着けなくても、元の源流よりこれだけ高く登れたら使う
+const RIVER_HIGHLAND_R_M = 60000;     // 山脈が遠いとき、丘陵の頂を探す範囲
+const RIVER_HIGHLAND_ARRIVE_M = 4000; // 丘陵の頂にこれだけ近づいたら着いたとする
+
+// その地点での山脈の盛り上がり（いちばん大きい山脈のもの）
+function worldRangeUpliftAt(x, z) {
+  let best = 0, range = null;
+  const ranges = _worldRangeGrid ? _worldRangeGrid.at(x, z) : WORLD_RANGES;
+  if (ranges) {
+    for (let i = 0; i < ranges.length; i++) {
+      const m = worldRangeHeightAt(x, z, ranges[i]);
+      if (m > best) { best = m; range = ranges[i]; }
+    }
+  }
+  return { m: best, range };
+}
+
+function worldInRangeAt(x, z) {
+  const u = worldRangeUpliftAt(x, z);
+  // 盛り上がりは海岸に近いほど薄めて足される（worldBaseHeightAt の inland）ので、
+  // 実際の標高も見る。見ないと、盛り上がり426mの山すそで標高286mの所が「山の中」になった
+  return !!u.range && u.m >= RIVER_SOURCE_MIN_M && u.m >= u.range.height * RIVER_SOURCE_UPLIFT
+    && worldBaseHeightAt(x, z) >= RIVER_SOURCE_MIN_M;
+}
+
+// 山脈の稜線を点列にしたもの。端は山が低い（長軸の RANGE_END_FLAT より外で落ちていく）
+// ので、中ほどだけ。端まで入れると、稜線のすぐ脇に着いても「山の中」にならなかった。
+let _worldRangeCrests = null;
+function worldRangeCrestPoints() {
+  if (_worldRangeCrests) return _worldRangeCrests;
+  _worldRangeCrests = [];
+  for (const r of WORLD_RANGES) {
+    for (let t = -0.6; t <= 0.6; t += 0.01) _worldRangeCrests.push(worldRangeCrestAt(r, t));
+  }
+  return _worldRangeCrests;
+}
+
+function worldNearestCrestDist(x, z) {
+  const pts = worldRangeCrestPoints();
+  let best = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const dx = pts[i].x - x, dz = pts[i].z - z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < best) best = d2;
+  }
+  return Math.sqrt(best);
+}
+
+// 山脈が遠い海岸平野の川は、近くでいちばん高いところ（丘陵）を目指す
+function worldNearestHighland(x, z) {
+  let best = null;
+  const R = RIVER_HIGHLAND_R_M, step = 4000;
+  for (let dx = -R; dx <= R; dx += step) {
+    for (let dz = -R; dz <= R; dz += step) {
+      if (dx * dx + dz * dz > R * R) continue;
+      const h = worldBaseHeightAt(x + dx, z + dz);
+      if (!best || h > best.h) best = { x: x + dx, z: z + dz, h };
+    }
+  }
+  return best;
+}
+
+// 遡っている川の、いまの先端のそば以外の点に近いか
+const RIVER_SELF_APART_M = 1200;
+function worldNearOwnPath(x, z, back, out) {
+  const all = back.length + out.length;
+  const r2 = RIVER_SELF_APART_M * RIVER_SELF_APART_M;
+  for (let i = 0; i < all - 2; i++) {
+    const p = i < back.length ? back[i] : out[i - back.length];
+    const dx = p.x - x, dz = p.z - z;
+    if (dx * dx + dz * dz < r2) return true;
+  }
+  return false;
+}
+
+// ほかの川（すでに引いたもの）の点にどれだけ近いか
+function worldNearOtherRiver(x, z, apart) {
+  for (const r of WORLD_RIVERS) {
+    const pts = r.points;
+    for (let i = 0; i < pts.length; i += 2) {
+      const dx = pts[i].x - x, dz = pts[i].z - z;
+      if (dx * dx + dz * dz < apart * apart) return true;
+    }
+  }
+  return false;
+}
+
+// back は河口→上流の順の点列。続きの点（上流へ向かう順）を返す。
+// 山の中（丘陵を目指したときはその頂の近く）に着けば全部、着けなくても
+// 元の源流より RIVER_CLIMB_KEEP_M 以上高いところまで登れていればそこまで、
+// どちらでもなければ空（元の源流のまま）。
+function worldClimbRiverToRange(back) {
+  const head = back[back.length - 1];
+  if (worldInRangeAt(head.x, head.z)) return [];
+  const headB = worldBaseHeightAt(head.x, head.z);
+
+  // 目指す先。稜線が近ければ稜線、遠ければ近くの丘陵の頂
+  let distTo, arrived;
+  if (worldNearestCrestDist(head.x, head.z) <= RIVER_TO_RANGE_MAX_M) {
+    distTo = worldNearestCrestDist;
+    arrived = (x, z) => worldInRangeAt(x, z);
+  } else {
+    const peak = worldNearestHighland(head.x, head.z);
+    if (!peak || peak.h < headB + RIVER_CLIMB_KEEP_M) return [];
+    distTo = (x, z) => Math.hypot(x - peak.x, z - peak.z);
+    arrived = (x, z) => Math.hypot(x - peak.x, z - peak.z) < RIVER_HIGHLAND_ARRIVE_M
+      || worldBaseHeightAt(x, z) > peak.h - RIVER_CUT_MAX_M;
+  }
+  let goalD = distTo(head.x, head.z);
+
+  const seen = new Set();
+  for (const p of back) seen.add(Math.round(p.x / 100) + ',' + Math.round(p.z / 100));
+  const prev = back.length > 1 ? back[back.length - 2] : head;
+  let dirX = (head.x - prev.x) / RIVER_STEP_M, dirZ = (head.z - prev.z) / RIVER_STEP_M;
+  let x = head.x, z = head.z;
+  let walkH = worldSmoothHeightAt(x, z);
+  let dropLeft = RIVER_SADDLE_BUDGET_M;
+  let topH = -Infinity;
+  for (const p of back) topH = Math.max(topH, worldBaseHeightAt(p.x, p.z));
+  const out = [];
+  // 登れたうちでいちばん高い点（着けなかったときはそこまでを使う）
+  let bestKeep = -1, bestKeepH = headB + RIVER_CLIMB_KEEP_M;
+
+  for (let i = 0; i < RIVER_TO_RANGE_STEPS; i++) {
+    // 先に安く測れる点数で8方向を並べ、良い順に条件を確かめて最初に通ったものを採る
+    // （途中の尾根・空港・ほかの川を全方向で測ると、世界の生成が0.7秒遅くなった）
+    const cands = [];
+    for (let a = 0; a < 8; a++) {
+      const ang = (a / 8) * Math.PI * 2;
+      const cx = Math.cos(ang), cz = Math.sin(ang);
+      const nx = x + cx * RIVER_STEP_M, nz = z + cz * RIVER_STEP_M;
+      if (seen.has(Math.round(nx / 100) + ',' + Math.round(nz / 100))) continue;
+      const nh = worldSmoothHeightAt(nx, nz);
+      const drop = walkH - nh;
+      if (drop > RIVER_SADDLE_DROP_M || drop > dropLeft) continue;
+      const nd = distTo(nx, nz);
+      const score = nh - (goalD - nd) * RIVER_TO_RANGE_PULL - (cx * dirX + cz * dirZ) * 22;
+      cands.push({ x: nx, z: nz, h: nh, d: nd, score, cx, cz });
+    }
+    cands.sort((p, q) => p.score - q.score);
+    let best = null;
+    for (const c of cands) {
+      // 1歩（1.5km）のあいだにも尾根がある。途中も測って、越えた高まりに数える
+      let midTop = topH, cut = false;
+      for (let q = 1; q <= 4 && !cut; q++) {
+        const hq = worldBaseHeightAt(x + c.cx * RIVER_STEP_M * q / 4, z + c.cz * RIVER_STEP_M * q / 4);
+        if (hq < midTop - RIVER_CUT_MAX_M) cut = true;
+        if (hq > midTop) midTop = hq;
+      }
+      if (cut) continue;
+      const nb = worldBaseHeightAt(c.x, c.z);
+      if (nb <= 0) continue; // 海へ出ない
+      let blocked = false;
+      for (let k = 0; k < WORLD_AIRPORTS.length && !blocked; k++) {
+        const ap = WORLD_AIRPORTS[k];
+        const r = ap.flatOuterR + 2000;
+        if ((c.x - ap.x) * (c.x - ap.x) + (c.z - ap.z) * (c.z - ap.z) < r * r) blocked = true;
+      }
+      // 街の均し（街の下を街の標高へ寄せる）も避ける。均した地面が川床より低くなり、
+      // 川面が街の上に浮く（ヴェスピウム川が山へ遡る途中でカスティアを通り、25点で浮いた）
+      for (let k = 0; k < WORLD_CITIES.length && !blocked; k++) {
+        const ct = WORLD_CITIES[k];
+        const r = ct.flatOuterR + 1500;
+        if ((c.x - ct.x) * (c.x - ct.x) + (c.z - ct.z) * (c.z - ct.z) < r * r) blocked = true;
+      }
+      if (blocked || worldNearOtherRiver(c.x, c.z, RIVER_KEEP_APART_M)) continue;
+      // 自分の通ったところへ折り返さない。すぐそばを通る下流の谷が上流の川床を削り、
+      // 川面が浮いた（ステンベルク川は5km遡ったところで源流の1点目のそばへ戻っていた）
+      if (worldNearOwnPath(c.x, c.z, back, out)) continue;
+      c.b = nb; c.top = midTop;
+      best = c;
+      break;
+    }
+    if (!best) break;
+    if (best.h < walkH) dropLeft -= walkH - best.h;
+    out.push({ x: best.x, z: best.z });
+    seen.add(Math.round(best.x / 100) + ',' + Math.round(best.z / 100));
+    x = best.x; z = best.z; walkH = best.h; goalD = best.d;
+    topH = best.top;
+    dirX = best.cx; dirZ = best.cz;
+    if (best.b > bestKeepH) { bestKeepH = best.b; bestKeep = out.length; }
+    if (arrived(x, z)) return out;
+  }
+  return bestKeep > 0 ? out.slice(0, bestKeep) : [];
+}
+
+// ほかの川（すでに引いたもの）のすぐそばを、川床の高さの違うまま通るか。
+// 谷は2.4km先まで刻むので、低いほうの谷が高いほうの川床を削り、川面が浮く
+// （アヌアヴァ川の下流がマリイカ川の上流の150mそばを83m低く通っていた）。
+// 谷底（600m）と谷壁で守れるのは離れているときだけなので、近すぎる川は引かない。
+const RIVER_CROWD_M = 1200;
+const RIVER_CROWD_DROP_M = 30;
+function worldPathBounds(pts, pad) {
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (const p of pts) {
+    if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x;
+    if (p.z < z0) z0 = p.z; if (p.z > z1) z1 = p.z;
+  }
+  return { x0: x0 - pad, x1: x1 + pad, z0: z0 - pad, z1: z1 + pad };
+}
+
+function worldRiverCrowds(pts) {
+  const r2 = RIVER_CROWD_M * RIVER_CROWD_M;
+  const bb = worldPathBounds(pts, RIVER_CROWD_M);
+  for (const r of WORLD_RIVERS) {
+    if (!r._bounds) r._bounds = worldPathBounds(r.points, 0);
+    const o = r._bounds;
+    if (o.x1 < bb.x0 || o.x0 > bb.x1 || o.z1 < bb.z0 || o.z0 > bb.z1) continue;
+    for (let i = 0; i < pts.length; i += 2) {
+      const p = pts[i];
+      for (let j = 0; j < r.points.length; j += 2) {
+        const q = r.points[j];
+        const dx = q.x - p.x, dz = q.z - p.z;
+        if (dx * dx + dz * dz < r2 && Math.abs(q.h - p.h) > RIVER_CROWD_DROP_M) return true;
+      }
+    }
+  }
+  return false;
+}
+
+// 川床の角を丸める。
+//
+// 川床は「上流の素の地形の最小値」なので、山の中では平らな区間と急に落ちる区間が
+// 交互に来る階段になる（カスターン川は1380mのまま1.9km平らで、そこから1.1kmで174m落ちる）。
+// 地形のLODは近くでも約310m間隔で、落ち始めの角を直線でつなぐので、そこだけ地面が
+// 川面（川床+5m）より上に出て、水面が横に切れて見えた。前後 RIVER_BED_SMOOTH_PTS 点の
+// 平均と元の値の小さいほうにする。下り一方の列の移動平均も下り一方で、その小さいほうも
+// 下り一方なので、川床は上らない。角は削る側に丸まるので、地形より上にも出ない。
+const RIVER_BED_SMOOTH_PTS = 4;
+function worldSmoothRiverBed(pts) {
+  const n = pts.length, W = RIVER_BED_SMOOTH_PTS;
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    let sum = 0, cnt = 0;
+    for (let j = Math.max(0, i - W); j <= Math.min(n - 1, i + W); j++) { sum += pts[j].h; cnt++; }
+    out[i] = { x: pts[i].x, z: pts[i].z, h: Math.min(pts[i].h, sum / cnt) };
+  }
+  return out;
 }
 
 // 河口の候補は「汀線の近く（素の地形が-60〜+25m）」から選ぶので、海岸平野の
@@ -1484,10 +1755,12 @@ function worldGenerateRivers() {
       }
       if (clash) continue;
 
-      const pts = worldExtendRiverToSea(worldTraceRiverFromMouth(mouth.x, mouth.z));
+      const pts = worldSmoothRiverBed(worldExtendRiverToSea(worldTraceRiverFromMouth(mouth.x, mouth.z)));
       let length = 0;
       for (let i = 1; i < pts.length; i++) length += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z);
       if (length < RIVER_MIN_LENGTH_M) continue;
+      if (worldBaseHeightAt(pts[0].x, pts[0].z) < RIVER_SOURCE_REJECT_M) continue;
+      if (worldRiverCrowds(pts)) continue;
 
       const nm = worldMakePlaceName(country.nameStyle, rand, usedNames);
       WORLD_RIVERS.push({
@@ -1642,6 +1915,7 @@ function worldDepositDeltas(x, z, h) {
 // 経路（worldGenerateRivers）と河口の種類（worldShapeRiverMouths）が決まったあとに呼ぶ。
 function worldBuildRiverGrid() {
   _worldRiverGrid = makeWorldGrid(20000);
+  _worldRiverPointGrid = null;
 
   for (const r of WORLD_RIVERS) {
     const pts = r.points;
@@ -1683,7 +1957,8 @@ function worldBuildRiverGrid() {
   for (const r of WORLD_RIVERS) {
     const pts = r.points;
     const n = pts.length;
-    for (let i = 1; i < n; i++) worldInsertRiverSegment(pts[i - 1], pts[i]);
+    const walls = worldRiverValleyWalls(r);
+    for (let i = 1; i < n; i++) worldInsertRiverSegment(pts[i - 1], pts[i], walls[i]);
 
     // 三角州の分流。本流の河口の幅・川床が決まってから作る。
     r.mouthBranches = r.mouthKind === 'delta' ? worldBuildDeltaBranches(r) : null;
@@ -1780,13 +2055,128 @@ function worldFitRiversToLakes() {
   }
 }
 
-function worldInsertRiverSegment(a, b) {
+function worldInsertRiverSegment(a, b, wall) {
   const segLen = Math.hypot(b.x - a.x, b.z - a.z);
-  _worldRiverGrid.insert((a.x + b.x) / 2, (a.z + b.z) / 2, segLen / 2 + RIVER_MAX_INFLUENCE, {
+  _worldRiverGrid.insert((a.x + b.x) / 2, (a.z + b.z) / 2, segLen / 2 + RIVER_MAX_INFLUENCE,
+    worldRiverSegItem(a, b, wall));
+}
+
+function worldRiverSegItem(a, b, wall) {
+  return {
     ax: a.x, az: a.z, ah: a.bedH,
     bx: b.x, bz: b.z, bh: b.bedH,
     halfWidth: Math.max(a.halfWidth, b.halfWidth),
-  });
+    side: wall ? wall.side : RIVER_VALLEY_SLOPE,
+    cap: wall ? wall.cap : 0,
+    floor: wall ? wall.floor : RIVER_VALLEY_FLOOR_M,
+  };
+}
+
+// 地点 (x, z) が区間 s から見てどこにあるか。影響の外なら false。
+//   _worldSegGeo.base … 谷の断面を足す前の高さ（川床。上流側の端より先は s.cap で上げたもの）
+//   _worldSegGeo.e    … 川幅の外へどれだけ出ているか（横の距離 − 半幅）
+//   _worldSegGeo.up   … 上流側の端より先へ、流れの向きにどれだけ離れているか
+const _worldSegGeo = { base: 0, e: 0, up: 0 };
+function worldRiverSegGeom(s, x, z) {
+  const vx = s.bx - s.ax, vz = s.bz - s.az;
+  const wx = x - s.ax, wz = z - s.az;
+  const len2 = vx * vx + vz * vz;
+  const len = Math.sqrt(len2) || 1;
+  const t = len2 > 0 ? (wx * vx + wz * vz) / len2 : 0;
+  let bed, lat, up = 0;
+  if (t > 1) {
+    // 下流側の端の先は端からの距離で（その先は下流の区間のほうが低く刻む）
+    const dx = x - s.bx, dz = z - s.bz;
+    lat = Math.sqrt(dx * dx + dz * dz);
+    bed = s.bh;
+  } else {
+    lat = Math.abs(wx * vz - wz * vx) / len;
+    if (t < 0) { up = -t * len; bed = s.ah; } else bed = s.ah + (s.bh - s.ah) * t;
+  }
+  if (lat * lat + up * up >= RIVER_MAX_INFLUENCE * RIVER_MAX_INFLUENCE) return false;
+  _worldSegGeo.base = bed + up * s.cap;
+  _worldSegGeo.e = lat - s.halfWidth;
+  _worldSegGeo.up = up;
+  return true;
+}
+
+// 谷の断面：川幅の外 e での高さ（川床から）。谷底 floor までは RIVER_VALLEY_SLOPE、その外は side
+function worldRiverValleyProfile(e, floor, side) {
+  if (e <= 0) return 0;
+  return RIVER_VALLEY_SLOPE * Math.min(e, floor) + side * Math.max(0, e - floor);
+}
+
+// 区間 s が地点 (x, z) の地面をどこまで下げるか（影響の外なら Infinity）
+function worldRiverSegTarget(s, x, z) {
+  if (!worldRiverSegGeom(s, x, z)) return Infinity;
+  return _worldSegGeo.base + worldRiverValleyProfile(_worldSegGeo.e, s.floor, s.side);
+}
+
+// 区間ごとの谷の形：谷壁の傾き（side）、上流側の端の先の傾き（cap）、谷底の幅（floor）。
+//
+// 谷の斜面を一律 RIVER_VALLEY_SLOPE（0.03）にしていると、縦の勾配がそれより急な川では、
+// 下流の区間が掘る谷が**上流の川床より下まで**地面を削る。川面は川床+5mに張るので、
+// そこでは水面が地面から浮く。まっすぐ下る川でも、区間の端から先の谷が上流側へ
+// 2.4km届くので、勾配0.14の川なら上流を最大264m削る。蛇行して近づく下流も同じで、
+// 源流から約3kmで420m下るオーバートン川の源流は、1.8km離れた下流の区間の谷で
+// 川床より368m低く削られていた（変更前でも40本・1128点で川床より5m以上、最大558m）。
+//
+// ただし谷全体を急にしてはいけない。地形のLODは近くでも約310m間隔なので、狭いV字の谷は
+// 表せず、地形が川面を横切って水面がちぎれて見えた。川から RIVER_VALLEY_FLOOR_M までは
+// 0.03の谷底のまま残し、影響の届く範囲にある上流の点（別の川の点も）の川床を割らないように
+//   1) 上流側の端の先（cap）を、流れの向きに上げる（まっすぐ下る川）
+//   2) 谷底より外の谷壁（side）を急にする（蛇行して近づく下流）
+//   3) 谷壁を最大にしても届かない（きつい曲がり）ときだけ、谷底を狭める
+//      （RIVER_VALLEY_FLOOR_MIN_M まで。水面の岸は谷底の中に収まる）
+const RIVER_VALLEY_FLOOR_M = 600;
+const RIVER_VALLEY_FLOOR_MIN_M = RIVER_WATER_DEPTH_M / RIVER_VALLEY_SLOPE + 5;
+const RIVER_VALLEY_SLOPE_MAX = 0.8;
+let _worldRiverPointGrid = null;
+function worldRiverValleyWalls(r) {
+  // 全部の川の点を、谷の届く範囲ごと格子に入れておく（最初の1回だけ）
+  if (!_worldRiverPointGrid) {
+    _worldRiverPointGrid = makeWorldGrid(5000);
+    for (const q of WORLD_RIVERS) {
+      q.points.forEach((p, j) => _worldRiverPointGrid.insert(p.x, p.z, RIVER_MAX_INFLUENCE + 400,
+        { x: p.x, z: p.z, bedH: p.bedH, river: q, j }));
+    }
+  }
+  const pts = r.points;
+  const n = pts.length;
+  const walls = new Array(n);
+  const MAX = RIVER_VALLEY_SLOPE_MAX, K = RIVER_VALLEY_SLOPE;
+  for (let k = 1; k < n; k++) {
+    const s = worldRiverSegItem(pts[k - 1], pts[k], null);
+    const near = (_worldRiverPointGrid.at((s.ax + s.bx) / 2, (s.az + s.bz) / 2) || []).filter((p) =>
+      // 同じ川の、この区間とその下流は川床が低いので見なくてよい
+      !(p.river === r && p.j >= k - 1) && p.bedH > Math.min(s.ah, s.bh));
+
+    // 1) 上流側の端の先
+    for (const p of near) {
+      if (!worldRiverSegGeom(s, p.x, p.z) || _worldSegGeo.up <= 1) continue;
+      const short = p.bedH - (_worldSegGeo.base + worldRiverValleyProfile(_worldSegGeo.e, s.floor, K));
+      if (short > 0) s.cap = Math.min(s.cap + short / _worldSegGeo.up, MAX);
+    }
+    // 2)(3) 谷壁と谷底：守る点ごとに「断面の高さ ≥ 要る高さ」
+    const need = [];
+    for (const p of near) {
+      if (!worldRiverSegGeom(s, p.x, p.z)) continue;
+      const rise = p.bedH - _worldSegGeo.base;
+      if (rise > worldRiverValleyProfile(_worldSegGeo.e, s.floor, K)) need.push({ e: _worldSegGeo.e, rise });
+    }
+    for (const c of need) {
+      // 谷壁を最大にしても届かないなら、届く幅まで谷底を狭める
+      if (K * Math.min(c.e, s.floor) + MAX * Math.max(0, c.e - s.floor) < c.rise) {
+        s.floor = Math.max(RIVER_VALLEY_FLOOR_MIN_M, Math.min(s.floor, (MAX * c.e - c.rise) / (MAX - K)));
+      }
+    }
+    for (const c of need) {
+      if (c.e > s.floor + 1) s.side = Math.max(s.side, (c.rise - K * s.floor) / (c.e - s.floor));
+    }
+    s.side = Math.min(s.side, MAX);
+    walls[k] = { side: s.side, cap: s.cap, floor: s.floor };
+  }
+  return walls;
 }
 
 // 三角州の分流。河口から扇形に開いて海へ向かう水路を DELTA_BRANCHES 本作る。
@@ -2260,6 +2650,7 @@ const BRIDGE_RAMP_SLOPE = 0.06;   // 取付け部の勾配
 const BRIDGE_OVERHANG_M = 20;     // 橋桁を水際からどれだけ陸へ延ばすか
 const BRIDGE_MERGE_GAP_M = 150;   // これより短い陸地をはさむ水は1本の橋で渡す
 const BRIDGE_SAMPLE_M = 10;
+const BRIDGE_FINE_SAMPLE_M = 2;  // 水の上だった区間の水面を測り直す刻み
 const BRIDGE_BANK_PROBE_M = 60;   // 岸の高さをどれだけ陸へ入ったところで測るか
 const BRIDGE_MAX_RAISE_M = 25;    // 岸に合わせて桁を上げるのは水面からここまで
 
@@ -2308,6 +2699,14 @@ function worldRoadBridges(pts) {
 
   const out = [];
   for (const r of runs) {
+    // 水面は10mおきにしか見ていない。勾配のある川を斜めに渡ると、そのあいだで水面が
+    // 上がっていることがある（桁と水面の差が5.95mになった所があった）。
+    // 水の上だった区間だけ細かく測り直して、いちばん高い水面を取る。
+    for (let s = Math.max(r.start - BRIDGE_SAMPLE_M, 0); s <= Math.min(r.end + BRIDGE_SAMPLE_M, total);
+      s += BRIDGE_FINE_SAMPLE_M) {
+      const w = waterAt(s);
+      if (w !== null && w > r.waterY) r.waterY = w;
+    }
     // 道の端（街の中心）が水の上のこともある（イーゼンダールは中心から98mを川が流れる）。
     // そのときは端から橋桁で始める（取付け部は無い）。
     const s1 = Math.max(r.start - BRIDGE_OVERHANG_M, 0);
@@ -2535,12 +2934,7 @@ function worldCarveRivers(x, z, h) {
   if (!segs) return h;
   for (let i = 0; i < segs.length; i++) {
     const s = segs[i];
-    const d2 = worldPointSegDist2(x, z, s.ax, s.az, s.bx, s.bz);
-    if (d2 >= RIVER_MAX_INFLUENCE * RIVER_MAX_INFLUENCE) continue;
-    const d = Math.sqrt(d2);
-    // 線分上のどこかで川床の高さが変わるので、その位置で補間する
-    const bed = s.ah + (s.bh - s.ah) * _worldSegT.t;
-    const target = d < s.halfWidth ? bed : bed + (d - s.halfWidth) * RIVER_VALLEY_SLOPE;
+    const target = worldRiverSegTarget(s, x, z);
     if (target < h) h = target;
   }
   return h;
@@ -2707,6 +3101,7 @@ if (typeof module !== 'undefined' && module.exports) {
     WORLD_CITY_DATA, WORLD_AIRPORT_DATA,
     WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, WORLD_ROADS, WORLD_PEAKS,
     worldLakeAt, worldRiverAt, worldWaterSurfaceAt, worldLakeFootprintAt, worldLakeRimScale,
+    worldRangeUpliftAt, worldInRangeAt, worldNearestCrestDist,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
     worldClamp, worldSmooth01, worldValueNoise, worldFbm,
     initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt,
