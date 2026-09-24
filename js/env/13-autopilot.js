@@ -1134,14 +1134,15 @@ function apMakeApproachPlan(airport, settings, windDirectionDeg) {
   const heading = apPickRunwayHeading(settings.headingDeg, windDirectionDeg);
   const f = apForward(heading);
   const half = settings.runwayLengthM * 0.5;
-  const elev = airport.elevationM || 0;
+  let elev = airport.elevationM || 0;
 
   // 進入端（手前側の末端）。
   // **空港の中心ではなく「実際に使う滑走路の中心」から測る** ——平行滑走路のある
   // 空港では、空港の中心は滑走路と滑走路のあいだの草地にあたる。
   // 向きは**いまの設定のもの**を使う（UIで回した空港で、定義の向きのまま測ると
   // 平行滑走路のあいだの草地を狙う）。
-  const rc = typeof worldAirportRunwayCenter === 'function'
+  // 地図で選んだ平地（airport.isField）は、帯の中心がそのまま滑走路の中心
+  const rc = typeof worldAirportRunwayCenter === 'function' && !airport.isField
     ? worldAirportRunwayCenter(airport, settings.headingDeg) : { x: airport.x, z: airport.z };
   const thrX = rc.x - f.x * half;
   const thrZ = rc.z - f.z * half;
@@ -1150,14 +1151,26 @@ function apMakeApproachPlan(airport, settings, windDirectionDeg) {
   const fafX = thrX - f.x * AP_FINAL_M;
   const fafZ = thrZ - f.z * AP_FINAL_M;
   const glide = Math.tan(AP_GLIDE_DEG * Math.PI / 180);
+  // 平地は平らではない（勾配1.2%まで）。降下の経路は接地を狙う点の地面の高さへ引く。
+  // 帯の中心の高さへ引いていたので、勾配0.67%・長さ5kmの帯でTB1が端の643m手前に接地し、
+  // 帯の外の地面を413ktで走るうちに向きが180°回って、横へ1.4km飛び出した。
+  if (airport.isField && Number.isFinite(airport.elevA)) {
+    const ff = apForward(airport.headingDeg);
+    const along = (aimX - airport.x) * ff.x + (aimZ - airport.z) * ff.z;
+    elev = (airport.elevA + airport.elevB) * 0.5 + (along / settings.runwayLengthM) * (airport.elevB - airport.elevA);
+  }
 
   return {
     airportId: airport.id,
+    label: airport.isField ? '選んだ地点' : airport.id,
     heading, forward: f, right: apRight(heading),
     elevationM: elev,
     runwayLengthM: settings.runwayLengthM,
     aim: { x: aimX, z: aimZ },
     threshold: { x: thrX, z: thrZ },
+    // 垂直着陸で真下へ降りる点。空港は進入端、地図で選んだ平地は帯の中心
+    // （進入端にすると、長さ600mの帯の端に降りていた）
+    pad: airport.isField ? { x: rc.x, z: rc.z } : { x: thrX, z: thrZ },
     faf: { x: fafX, z: fafZ },
     fafAltM: elev + (AP_FINAL_M + AP_TOUCHDOWN_M) * glide,
     glide,
@@ -1576,8 +1589,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   // 「進入速度から静止まで」だけ。その手前までは降下に任せる。
   if (plan && ap.vtolLanding && model.hasVtol
       && (ap.phase === 'cruise' || ap.phase === 'descent')) {
-    const padM = Math.hypot(state.position.x - plan.threshold.x,
-      state.position.z - plan.threshold.z);
+    const padM = Math.hypot(state.position.x - plan.pad.x,
+      state.position.z - plan.pad.z);
     const brakeM = (state.groundSpeed * state.groundSpeed)
       / (2 * apVtolBrakeDecel(model, controls));
     if (padM < Math.min(brakeM + AP_VTOL_STOP_MARGIN_M, AP_VTOL_STOP_MAX_M)) {
@@ -2002,13 +2015,13 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
 
   // ---- 垂直着陸：着地点の上空へ寄せる（滑走路は要らないので中心線は気にしない） -----
   if (ap.phase === 'vtol_approach') {
-    const want = apBearingTo(state.position.x, state.position.z, plan.threshold.x, plan.threshold.z);
+    const want = apBearingTo(state.position.x, state.position.z, plan.pad.x, plan.pad.z);
     ap.targetHeadingDeg = want;
     controls.roll = apAileronForTrack(state, want, spd.bankMax, spd);
     controls.yaw = apRudderForCoordination(state);
 
     const distToTouchdown = Math.hypot(
-      state.position.x - plan.threshold.x, state.position.z - plan.threshold.z);
+      state.position.x - plan.pad.x, state.position.z - plan.pad.z);
     ap.distanceM = distToTouchdown;
 
     controls.gearDown = true;
@@ -2084,7 +2097,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.throttle = 0;
 
     const distToTouchdown = Math.hypot(
-      state.position.x - plan.threshold.x, state.position.z - plan.threshold.z);
+      state.position.x - plan.pad.x, state.position.z - plan.pad.z);
     ap.distanceM = distToTouchdown;
 
     // 位置と速度は機体の傾きで詰める（垂直降下と同じ仕掛け）。
@@ -2095,7 +2108,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 落ちて34.4Gを記録した。速いうちは水平のまま逆噴射で削り、遅くなるほど
     // 傾けられるようにする。
     const slowFrac = apClamp(1 - state.airspeed / Math.max(spd.stall, 1), 0, 1);
-    const hover = apVtolHoverAngles(state, plan.threshold.x, plan.threshold.z,
+    const hover = apVtolHoverAngles(state, plan.pad.x, plan.pad.z,
       AP_VTOL_TILT_MAX * slowFrac, ap);
     controls.pitch = apElevatorForPitch(state, controls, hover.wantPitchDeg, dt, spd, ap);
     controls.roll = apAileronForBank(state, hover.wantBankDeg, spd);
@@ -2144,7 +2157,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 低いところでは位置を直すより、水平に降りることを優先する。
     const tiltMax = AP_VTOL_TILT_MAX
       * apClamp(state.altitudeAglM / AP_VTOL_LEVEL_AGL_M, 0.15, 1);
-    const hover = apVtolHoverAngles(state, plan.threshold.x, plan.threshold.z, tiltMax, ap);
+    const hover = apVtolHoverAngles(state, plan.pad.x, plan.pad.z, tiltMax, ap);
     controls.pitch = apElevatorForPitch(state, controls, hover.wantPitchDeg, dt, spd, ap);
     controls.roll = apAileronForBank(state, hover.wantBankDeg, spd);
     controls.yaw = apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP, -1, 1);
@@ -2213,7 +2226,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     if (state.groundSpeed < 1.5) {
       controls.brake = 0;
       controls.parkingBrake = true;
-      say('done', `${plan.airportId} に着陸しました`);
+      say('done', `${plan.label || plan.airportId} に着陸しました`);
       ap.full = false;
     }
     return;
@@ -2561,7 +2574,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
       controls.reverse = 0;
       controls.parkingBrake = true;
       controls.yaw = 0;
-      say('done', `${plan.airportId} に着陸しました`);
+      say('done', `${plan.label || plan.airportId} に着陸しました`);
       ap.full = false;
     }
     return;
@@ -2879,16 +2892,72 @@ function flightAutopilot() {
   return f.autopilot;
 }
 
-// 目的地の空港（選ばれていなければ null）
+// 目的地の空港（選ばれていなければ null）。地図で平地を選んだときは、その帯を
+// 滑走路1本の「空港」に見立てたもの（isField）。進入・引き起こし・着陸滑走はそのまま使える
 function autopilotDestination() {
   const ap = flightAutopilot();
+  if (ap.destField) return apFieldAirport(ap.destField);
   if (!ap.destAirportId) return null;
   return worldAirportById(ap.destAirportId);
 }
 
+function apFieldAirport(field) {
+  return {
+    id: 'FIELD', name: '地図で選んだ平地', isField: true,
+    x: field.x, z: field.z, elevationM: field.elevationM, elevA: field.elevA, elevB: field.elevB,
+    runwayLengthM: field.lengthM, headingDeg: field.headingDeg,
+  };
+}
+
+// 目的地の滑走路の設定（長さと向き）。平地は探した帯そのもの
+function apDestinationSettings(dest) {
+  if (dest.isField) return { runwayLengthM: dest.runwayLengthM, headingDeg: dest.headingDeg };
+  return getAirportSettings(dest.id);
+}
+
+// 平地に降りるのに要る長さ。接地までの空中の距離（600m）と、進入速度から
+// 1.8m/s²で止まるまでの距離。2.5m/s²・400mで見積もっていたら、747が長さ1886mの帯の
+// 端を251m走り越した（空港とちがって逆噴射で止まりきる前に帯が終わる）。
+// いまの見積もりは練習機970m・747 2664m・Concorde 2897m・TB2 1682m・TB1 5000m（上限）。
+// 垂直着陸なら狙いの点（末端の200m先）に真下へ降りるが、そこから200mほど行き過ぎて
+// 止まるので、600mとる。
+const AP_FIELD_DECEL = 1.8;
+const AP_FIELD_AIR_M = 600;
+const AP_FIELD_MIN_M = 900;
+const AP_FIELD_MAX_M = 5000;
+const AP_FIELD_VTOL_M = 600;
+function apFieldLengthFor(model, vtolLanding) {
+  if (vtolLanding && model.hasVtol) return AP_FIELD_VTOL_M;
+  const v = apSpeedSchedule(model, 80000).approach;
+  return apClamp(AP_FIELD_AIR_M + (v * v) / (2 * AP_FIELD_DECEL), AP_FIELD_MIN_M, AP_FIELD_MAX_M);
+}
+
+// 地図で選んだ地点 (x, z) のそばの平地を探して、目的地にする。見つかれば true
+function apPickLandingField(x, z) {
+  const f = EnvState.flight;
+  const ap = flightAutopilot();
+  if (!f.active || !f.aircraft) { announceFlight('先に飛行を始めてください'); return false; }
+  const L = apFieldLengthFor(f.aircraft.model, ap.vtolLanding);
+  const field = worldFindLandingField(x, z, L);
+  if (!field) {
+    const hint = f.aircraft.model.hasVtol && !ap.vtolLanding ? '（垂直着陸を入れると、600mの平地で降りられます）' : '';
+    announceFlight(`近くに降りられる平地（長さ${Math.round(L)}m）が見つかりませんでした${hint}`);
+    return false;
+  }
+  ap.destField = field;
+  ap.destAirportId = null;
+  if (ap.full) {
+    const d = autopilotDestination();
+    ap.plan = apMakeApproachPlan(d, apDestinationSettings(d), EnvState.env.windDirectionDeg);
+  }
+  announceFlight(`着陸地点：選んだ所から${(field.searchR / 1000).toFixed(1)}km・長さ${Math.round(L)}m・標高${Math.round(field.elevationM)}m`);
+  updateAutopilotUI();
+  return true;
+}
+
 // 着陸したあとの地上走行の道筋を計画に付ける（空港の誘導路を知っている画面側だけ）
 function apAttachTaxi(plan, dest) {
-  if (typeof airportTaxiRouteWorld !== 'function') return;
+  if (typeof airportTaxiRouteWorld !== 'function' || dest.isField) return;
   plan.taxi = airportTaxiRouteWorld(dest, getAirportSettings(dest.id));
 }
 
@@ -2905,7 +2974,7 @@ function startFullAutopilot() {
     return false;
   }
 
-  ap.plan = apMakeApproachPlan(dest, getAirportSettings(dest.id), EnvState.env.windDirectionDeg);
+  ap.plan = apMakeApproachPlan(dest, apDestinationSettings(dest), EnvState.env.windDirectionDeg);
   apAttachTaxi(ap.plan, dest);
   ap.full = true;
   ap.altHold = false;
@@ -2923,7 +2992,7 @@ function startFullAutopilot() {
   ap.climbLastV = undefined;
   ap.climbAccel = 0;
   ap.statusText = f.state.onGround ? '離陸' : '巡航';
-  announceFlight(`自動操縦：${dest.id} ${dest.name} へ — ${ap.statusText}`);
+  announceFlight(`自動操縦：${dest.isField ? '' : dest.id + ' '}${dest.name} へ — ${ap.statusText}`);
   updateAutopilotUI();
   return true;
 }
@@ -3040,11 +3109,13 @@ function setupAutopilotUI() {
     }
     dest.value = ap.destAirportId || '';
     dest.addEventListener('change', () => {
+      if (dest.value === '__field') return; // 地図で選んだ平地のまま
       ap.destAirportId = dest.value || null;
+      ap.destField = null;
       // 飛んでいる途中で行き先を変えたら、経路も引き直す
       if (ap.full && ap.destAirportId) {
         const d = worldAirportById(ap.destAirportId);
-        if (d) { ap.plan = apMakeApproachPlan(d, getAirportSettings(d.id), EnvState.env.windDirectionDeg); apAttachTaxi(ap.plan, d); }
+        if (d) { ap.plan = apMakeApproachPlan(d, apDestinationSettings(d), EnvState.env.windDirectionDeg); apAttachTaxi(ap.plan, d); }
       }
       updateAutopilotUI();
       onEnvSettingsChanged();
@@ -3053,6 +3124,15 @@ function setupAutopilotUI() {
       dest.blur();
     });
   }
+
+  // 地図で着陸地点を選ぶ。押したあとに右の地図をクリックすると、そのそばの平地を探す
+  const pick = document.getElementById('envApPickField');
+  if (pick) pick.addEventListener('click', () => {
+    EnvState.flight.pickingField = !EnvState.flight.pickingField;
+    if (EnvState.flight.pickingField) announceFlight('右の地図をクリックすると、そのそばの平地を探して着陸地点にします');
+    updateAutopilotUI();
+    pick.blur();
+  });
 
   const alt = document.getElementById('envApAltitude');
   if (alt) {
@@ -3126,8 +3206,28 @@ function updateAutopilotUI() {
       : 'この機体には垂直離着陸用エンジンがありません。';
   }
 
+  // 地図で平地を選んだら、セレクトはその項目を指す（無ければ足す）
+  const destSel = document.getElementById('envApDestination');
+  if (destSel) {
+    let opt = destSel.querySelector('option[value="__field"]');
+    if (ap.destField && !opt) {
+      opt = document.createElement('option');
+      opt.value = '__field'; opt.textContent = '（地図で選んだ平地）';
+      destSel.insertBefore(opt, destSel.children[1] || null);
+    }
+    if (opt) opt.hidden = !ap.destField;
+    destSel.value = ap.destField ? '__field' : (ap.destAirportId || '');
+  }
+  const pick = document.getElementById('envApPickField');
+  if (pick) pick.textContent = EnvState.flight.pickingField ? '地図をクリックしてください（もう一度押すと取りやめ）' : '🗺 地図で着陸地点を選ぶ';
+
   const out = document.getElementById('envApReadout');
   if (out) out.textContent = autopilotStatusLine();
+}
+
+// 目的地の呼び方（空港ならコードと名前）
+function apDestinationLabel(dest) {
+  return dest.isField ? dest.name : `${dest.id} ${dest.name}`;
 }
 
 // いま何をしているかの1行
@@ -3136,7 +3236,7 @@ function autopilotStatusLine() {
   const dest = autopilotDestination();
   if (ap.full) {
     const km = ap.distanceM > 0 ? `残り ${(ap.distanceM / 1000).toFixed(1)} km` : '';
-    return `${dest ? dest.id + ' へ' : ''} ${ap.statusText}　${km}`.trim();
+    return `${dest ? (dest.isField ? '選んだ平地' : dest.id) + ' へ' : ''} ${ap.statusText}　${km}`.trim();
   }
   if (ap.hover) return `ホバリング中（高度 ${Math.round(ap.hoverAltM).toLocaleString()} m）`;
   if (ap.altHold) return `高度 ${Math.round(ap.targetAltitudeM).toLocaleString()} m を維持中`;
@@ -3144,9 +3244,9 @@ function autopilotStatusLine() {
   const f = EnvState.flight;
   if (f.state) {
     const d = Math.hypot(f.state.position.x - dest.x, f.state.position.z - dest.z) / 1000;
-    return `${dest.id} ${dest.name} まで ${d.toFixed(0)} km`;
+    return `${apDestinationLabel(dest)} まで ${d.toFixed(0)} km`;
   }
-  return `${dest.id} ${dest.name}`;
+  return apDestinationLabel(dest);
 }
 
 // HUDに出す短い表示（11-flight-ui.js が呼ぶ）

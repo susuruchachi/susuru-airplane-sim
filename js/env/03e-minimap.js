@@ -387,6 +387,21 @@ function updateMinimap() {
   drawMinimapSymbols(ctx, L.symbols);
   drawMinimapLabelText(ctx, L.labels);
 
+  // 自動操縦で地図から選んだ着陸地点（平地の帯）
+  const field = EnvState.flight && EnvState.flight.autopilot && EnvState.flight.autopilot.destField;
+  if (field) {
+    const a = field.headingDeg * Math.PI / 180;
+    const half = field.lengthM * 0.5;
+    const p0 = minimapWorldToPx(view, field.x - Math.sin(a) * half, field.z + Math.cos(a) * half);
+    const p1 = minimapWorldToPx(view, field.x + Math.sin(a) * half, field.z - Math.cos(a) * half);
+    const pc = minimapWorldToPx(view, field.x, field.z);
+    ctx.strokeStyle = '#ff7ab6';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(p0.px, p0.py); ctx.lineTo(p1.px, p1.py); ctx.stroke();
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(pc.px, pc.py, 5, 0, Math.PI * 2); ctx.stroke();
+  }
+
   // カメラの位置と、いま向いている方向の視野
   const cam = EnvState.camera.position;
   const tgt = EnvState.orbitControls.target;
@@ -745,6 +760,14 @@ function onMinimapClick(ev) {
   const half = view.span / 2;
   const wx = view.cx - half + (px / MINIMAP_SIZE) * view.span;
   const wz = view.cz - half + (py / MINIMAP_SIZE) * view.span;
+
+  // 自動操縦の「地図で着陸地点を選ぶ」を押したあとなら、そのそばの平地を探して目的地にする
+  if (EnvState.flight && EnvState.flight.pickingField && typeof apPickLandingField === 'function') {
+    EnvState.flight.pickingField = false;
+    apPickLandingField(wx, wz);
+    if (typeof updateAutopilotUI === 'function') updateAutopilotUI();
+    return;
+  }
 
   const ground = Math.max(worldHeightAt(wx, wz), 0);
   const cam = EnvState.camera.position;

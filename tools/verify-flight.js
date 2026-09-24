@@ -4032,5 +4032,63 @@ function autopilotFlight(opts) {
   }
 }
 
+// --- (17) 地図で選んだ平地への着陸 ---------------------------------------------
+// 空港でない場所を選ぶと、そのそばで機体が降りられる長さの平らな帯を探し（世界側の
+// worldFindLandingField）、それを滑走路1本の「空港」に見立てて全自動で降りる。
+// 本物の世界の地形の上で、25km手前・対地1200mの巡航から降ろしてみる。
+{
+  console.log('\n(17) 地図で選んだ平地への着陸');
+  const W = require(path.join(__dirname, '..', 'js', 'env', '03b-world.js'));
+  const ground = (x, z) => W.worldHeightAt(x, z);
+  // 推力重量比の大きい機体（試験(13)と同じ、推力8倍の練習機）
+  const hot = defaultAircraftConfig();
+  for (const p of hot.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 8;
+  for (const [label, cfg, px, pz] of [
+    ['練習機・平野', defaultAircraftConfig(), 40000, 20000],
+    ['練習機・丘陵', defaultAircraftConfig(), -150000, 600000],
+    ['推力8倍の練習機', hot, 40000, 20000],
+  ]) {
+    const m = buildAircraftModel(JSON.parse(JSON.stringify(cfg)));
+    const L = ctx.apFieldLengthFor(m, false);
+    const t0 = Date.now();
+    const field = W.worldFindLandingField(px, pz, L);
+    const searchMs = Date.now() - t0;
+    if (!check(!!field, `平地への着陸（${label}）：${Math.round(L)}mの平地が見つかる`, field ? '' : 'なし')) continue;
+    const dest = ctx.apFieldAirport(field);
+    const ap = createAutopilotState();
+    ap.full = true; ap.phase = 'cruise'; ap.targetAltitudeM = field.elevationM + 1200;
+    ap.destField = field;
+    ap.plan = apMakeApproachPlan(dest, { runwayLengthM: field.lengthM, headingDeg: field.headingDeg }, 0);
+    // 25km南から北へ、水平に飛んでいるところから
+    const spd = apSpeedSchedule(m, 25000);
+    const v = spd.cruise;
+    const st = createFlightState(), c = createFlightControls();
+    const sx = field.x, sz = field.z + 25000;
+    st.position.set(sx, ground(sx, sz) + 1200, sz); st.velocity.set(0, 0, -v);
+    const sol = solveLevelTrim(m, v, st.position.y);
+    st.quaternion.setFromEuler(new THREE.Euler(sol.alphaDeg * Math.PI / 180, 0, 0, 'YXZ'));
+    c.gearDown = false; c.parkingBrake = false; c.throttle = sol.throttle; c.trim = sol.trim;
+    let t = 0, maxG = 0, sink = 0;
+    for (; t < 1800 && ap.full && !st.crashed; t += 1 / 60) {
+      stepAutopilot(m, st, c, ap, 1 / 60, { groundHeightAt: ground });
+      const wasAir = !st.onGround;
+      advanceFlight(m, st, c, noWind, ground, 1 / 60);
+      if (wasAir && st.onGround) sink = Math.max(sink, -st.verticalSpeed);
+      if (st.onGround) maxG = Math.max(maxG, st.loadFactor || 0);
+    }
+    // 止まった所が帯の上か（中心線からのずれ・帯の端からはみ出していないか）
+    const a = field.headingDeg * Math.PI / 180, fx = Math.sin(a), fz = -Math.cos(a);
+    const dx = st.position.x - field.x, dz = st.position.z - field.z;
+    const along = dx * fx + dz * fz, cross = dx * fz * -1 + dz * fx;
+    note(`平地への着陸（${label}）`, `探索 ${searchMs}ms・選んだ所から${(field.searchR / 1000).toFixed(1)}km・長さ${Math.round(L)}m・`
+      + `勾配${(field.grade * 100).toFixed(2)}%／${t.toFixed(0)}秒で${ap.phase}・接地 ${(sink * 196.85).toFixed(0)}fpm・`
+      + `止まった所 帯の中心から縦${Math.round(along)}m 横${Math.round(cross)}m`);
+    check(!ap.full && ap.phase === 'done' && !st.crashed, `平地への着陸（${label}）：墜落せず止まる`, st.crashed ? '墜落' : ap.phase);
+    check(Math.abs(along) <= field.lengthM * 0.5 + 100 && Math.abs(cross) < 40,
+      `平地への着陸（${label}）：探した帯の上で止まる`, `縦${Math.round(along)}m 横${Math.round(cross)}m`);
+    check(searchMs < 1000, `平地への着陸（${label}）：探すのが1秒以内`, `${searchMs}ms`);
+  }
+}
+
 console.log(`\n${failures === 0 ? '✅ すべて通過' : `❌ ${failures} 件の失敗`}`);
 process.exit(failures === 0 ? 0 : 1);

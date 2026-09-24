@@ -3130,6 +3130,98 @@ function worldWaterSurfaceAt(x, z) {
 }
 
 // ============================================================================
+// 9c. 空港でない場所への着陸（自動操縦が「地図で選んだ地点」へ降りるとき）
+//
+// 選んだ地点のまわりを内側の輪から順に探して、長さ lengthM のまっすぐな帯で
+//   ・全部が陸（水・海の上でない）
+//   ・縦の勾配が FIELD_MAX_GRADE 以下、帯の中心線が端と端を結ぶ直線から FIELD_MAX_BUMP_M 以内
+//   ・横（±FIELD_HALF_WIDTH_M）の高低差が FIELD_MAX_CROSS_M 以内
+//   ・街・空港の均し範囲の外、木がまばら（森の濃さ FIELD_MAX_FOREST 以下）
+// を満たすものを返す。いちばん内側の輪で見つかったもののうち、いちばん平らなもの。
+// 向きは15°おき（両向きは同じ帯なので180°ぶん）。
+// ============================================================================
+const FIELD_SEARCH_R_M = 40000;
+const FIELD_RING_STEP_M = 800;
+const FIELD_HEADING_STEP_DEG = 15;
+const FIELD_HALF_WIDTH_M = 35;
+const FIELD_SAMPLE_M = 50;
+const FIELD_MAX_GRADE = 0.008;
+const FIELD_MAX_BUMP_M = 2;
+const FIELD_MAX_CROSS_M = 1.2;
+const FIELD_MAX_FOREST = 0.3;
+
+// その地点の森の濃さ（植生と同じ式。03g-vegetation.js の treeDensityAt と同じ）
+function worldForestDensityAt(x, z, h, slope) {
+  if (h < 6) return 0;
+  const land = worldLandValueAt(x, z);
+  const temp = worldTemperatureAt(x, z, h);
+  const dry = worldDrynessAt(x, z, land);
+  return worldForestDensity(h, slope, temp, dry, worldUrbanFactorAt(x, z));
+}
+
+// 中心 (cx, cz)・向き headingDeg・長さ L の帯を調べる。降りられなければ null、降りられれば
+// { x, z, headingDeg, lengthM, elevationM（中心の高さ）, elevA, elevB（両端の高さ）, grade, bump }
+function worldCheckLandingField(cx, cz, headingDeg, L) {
+  const a = headingDeg * Math.PI / 180;
+  // 機首方位 0°＝北（-Z）、90°＝東（+X）
+  const fx = Math.sin(a), fz = -Math.cos(a);
+  const px = -fz, pz = fx;
+  const half = L * 0.5;
+  const hA = worldHeightAt(cx - fx * half, cz - fz * half);
+  const hB = worldHeightAt(cx + fx * half, cz + fz * half);
+  if (hA <= 1 || hB <= 1) return null;
+  const grade = Math.abs(hB - hA) / L;
+  if (grade > FIELD_MAX_GRADE) return null;
+  const hC = worldHeightAt(cx, cz);
+  if (Math.abs(hC - (hA + hB) * 0.5) > FIELD_MAX_BUMP_M) return null;
+  let bump = 0;
+  const n = Math.ceil(L / FIELD_SAMPLE_M);
+  for (let i = 0; i <= n; i++) {
+    const t = -half + (L * i) / n;
+    const x = cx + fx * t, z = cz + fz * t;
+    const line = hA + (hB - hA) * (i / n);
+    const h = worldHeightAt(x, z);
+    if (h <= 1) return null;
+    const dLine = Math.abs(h - line);
+    if (dLine > FIELD_MAX_BUMP_M) return null;
+    bump = Math.max(bump, dLine);
+    // 横の高低差（翼の下）
+    const hl = worldHeightAt(x + px * FIELD_HALF_WIDTH_M, z + pz * FIELD_HALF_WIDTH_M);
+    const hr = worldHeightAt(x - px * FIELD_HALF_WIDTH_M, z - pz * FIELD_HALF_WIDTH_M);
+    if (Math.abs(hl - h) > FIELD_MAX_CROSS_M || Math.abs(hr - h) > FIELD_MAX_CROSS_M) return null;
+    if (worldWaterSurfaceAt(x, z) !== null) return null;
+    if (i % 4 === 0 && worldForestDensityAt(x, z, h, grade) > FIELD_MAX_FOREST) return null;
+  }
+  for (const c of WORLD_CITIES) {
+    if (Math.hypot(c.x - cx, c.z - cz) < c.flatOuterR + half) return null;
+  }
+  for (const ap of WORLD_AIRPORTS) {
+    if (Math.hypot(ap.x - cx, ap.z - cz) < ap.flatOuterR + half) return null;
+  }
+  // elevA・elevB は帯の両端の高さ（A は headingDeg の向きに見て手前の端）
+  return { x: cx, z: cz, headingDeg, lengthM: L, elevationM: hC, elevA: hA, elevB: hB, grade, bump };
+}
+
+// 選んだ地点 (x, z) にいちばん近い、長さ lengthM の平らな帯。見つからなければ null
+function worldFindLandingField(x, z, lengthM) {
+  for (let r = 0; r <= FIELD_SEARCH_R_M; r += FIELD_RING_STEP_M) {
+    const count = r === 0 ? 1 : Math.ceil((2 * Math.PI * r) / FIELD_RING_STEP_M);
+    let best = null;
+    for (let k = 0; k < count; k++) {
+      const ang = (k / count) * Math.PI * 2;
+      const cx = x + Math.cos(ang) * r, cz = z + Math.sin(ang) * r;
+      if (worldHeightAt(cx, cz) <= 1) continue;
+      for (let hd = 0; hd < 180; hd += FIELD_HEADING_STEP_DEG) {
+        const f = worldCheckLandingField(cx, cz, hd, lengthM);
+        if (f && (!best || f.grade + f.bump * 0.002 < best.grade + best.bump * 0.002)) best = f;
+      }
+    }
+    if (best) return Object.assign(best, { searchR: r });
+  }
+  return null;
+}
+
+// ============================================================================
 // 10. 検索ヘルパー
 // ============================================================================
 
@@ -3248,7 +3340,7 @@ if (typeof module !== 'undefined' && module.exports) {
     WORLD_CITY_DATA, WORLD_AIRPORT_DATA,
     WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, WORLD_ROADS, WORLD_PEAKS,
     worldLakeAt, worldRiverAt, worldWaterSurfaceAt, worldLakeFootprintAt, worldLakeShoreCells, worldLakeField,
-    worldRangeUpliftAt, worldInRangeAt, worldNearestCrestDist,
+    worldRangeUpliftAt, worldInRangeAt, worldNearestCrestDist, worldFindLandingField, worldCheckLandingField,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
     worldClamp, worldSmooth01, worldValueNoise, worldFbm, worldRng,
     initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt,
