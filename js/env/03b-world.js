@@ -664,7 +664,9 @@ function worldHeightAt(x, z) {
     h = worldCarveLakes(x, z, h);
     // 三角州は「積もらせてから切り開く」。堆積を刻み込みより先に掛ける。
     h = worldDepositDeltas(x, z, h);
+    const beforeRivers = h;
     h = worldCarveRivers(x, z, h);
+    if (h < beforeRivers) h = worldKeepLakeShore(x, z, h, beforeRivers);
   }
 
   if (_worldAirportsReady) {
@@ -1047,20 +1049,33 @@ function worldGenerateAirports() {
 const LAKE_MIN_R = 2200;
 const LAKE_MAX_R = 13000;
 
-// 湖の水面は「岸のいちばん低いところ」の高さに置く。
+// 湖の岸は**地形の等高線そのもの**にする。
 //
-// 以前は湖の中心の地面の高さにしていた。湖は斜面にも置かれるので、それだと
-// 下り側の岸が水面より低くなり（49湖の岸を180方位ずつ測って 4383/8820 点、
-// 最大248m）、水面が地面から浮いた板になって、低い角度から見ると下が透けていた。
-// 水は岸の低いところから溢れるので、そこが水面になる。
-const LAKE_RIM_SAMPLES = 720;
-// 上り側の岸は、水面の高さまで掘った椀の縁でいきなり元の地面に戻るので、
-// 崖になる。岸の外側を水面から少しずつ上がる斜面で削って、なだらかにつなぐ。
-//   岸からの距離 s[m] での上限 = 水面 + s * LAKE_BANK_SLOPE + s² * LAKE_BANK_CURVE
-// 4.5km先では上限が水面+2450mになるので、そこで打ち切っても段差は出ない。
-const LAKE_BANK_REACH_M = 4500;
-const LAKE_BANK_SLOPE = 0.05;
-const LAKE_BANK_CURVE = 1.1e-4;
+// 以前は、ゆらがせた円を岸にして、その内側を椀状に掘り、外側は水面から上がる斜面で
+// 削って合わせていた。岸の形は地形と無関係なので、谷に水が入り込むことも、尾根が
+// 半島になって突き出すこともなく、どの湖も丸い染みに見えた。
+//
+// いまは次のように作る。
+//   1) 湖を置く場所に、滑らかな浅い椀（worldLakeBowl）を素の地形から引く。
+//      椀が無いと、素の地形の窪地は数百m〜数kmの小さなものしかない。
+//   2) その地形（worldLakeField）の上で、中心から「低いところから順に水を満たしていく」
+//      （priority flood）。あふれ口（椀の外まで抜ける道のいちばん高いところ）に着くか、
+//      予定の広さに達したところの高さを水面にする。
+//   3) 水の升目（mask）を湖に持たせる。岸はその升目のそばで地形が水面より低いところ
+//      ——つまり等高線。水面のメッシュは升目を覆う板で、地形が水面より高いところは
+//      地形のほうが手前に出るので、描いた岸も同じ等高線になる。
+// 地形は椀を引くだけで、岸の外を削る斜面は要らない（椀は縁で傾き0になる）。
+const LAKE_BOWL_R_MUL = 1.6;       // 椀の半径（湖の大きさの目安 outerR に対して）
+const LAKE_BOWL_DEPTH_M = 20;      // 椀の深さ = これ + outerR × LAKE_BOWL_DEPTH_PER_M
+const LAKE_BOWL_DEPTH_PER_M = 0.008;
+const LAKE_GRID_CELL_M = 200;      // 水を満たす升目の大きさのめやす
+const LAKE_GRID_MIN_N = 40;
+const LAKE_GRID_MAX_N = 120;
+const LAKE_ESCAPE_FRAC = 0.92;     // 椀のこの割合の外まで水が届いたら「あふれた」
+const LAKE_LEVEL_MARGIN_M = 0.3;   // 水面はあふれる高さからこれだけ下げる
+const LAKE_MIN_AREA_M2 = Math.PI * 1500 * 1500;
+const LAKE_MIN_DEPTH_M = 4;
+const LAKE_SHORE_RAYS = 96;        // ミニマップ用に岸を何方位で持つか
 // 湖に注ぐ川は、この距離をかけて水面を湖の水面まで下ろす
 const LAKE_INFLOW_BLEND_M = 3000;
 
@@ -1161,105 +1176,272 @@ function worldGenerateLakes() {
       const outerR = LAKE_MIN_R + Math.pow(rand(), 1.7) * (LAKE_MAX_R - LAKE_MIN_R);
       // 窪地でないと湖にならないので、周囲が平らなことを確かめる
       if (worldLocalReliefAt(x, z, outerR, 5) > 320) continue;
-      const level = worldLakeSpillLevel(x, z, outerR);
-      if (level < 20) continue; // 岸が海岸まで下りている
+      const bowlR = outerR * LAKE_BOWL_R_MUL;
+      // 街・空港・他の湖と重ならないこと（椀の届く範囲で見る）
+      if (worldLakeClashes(x, z, bowlR, 3000)) continue;
 
-      // 街・空港・他の湖と重ならないこと
-      let clash = false;
-      for (const c of WORLD_CITIES) {
-        if (Math.hypot(c.x - x, c.z - z) < c.flatOuterR + outerR + 3000) { clash = true; break; }
-      }
-      if (!clash) for (const a of WORLD_AIRPORTS) {
-        if (Math.hypot(a.x - x, a.z - z) < a.flatOuterR + outerR + 3000) { clash = true; break; }
-      }
-      if (!clash) for (const l of WORLD_LAKES) {
-        if (Math.hypot(l.x - x, l.z - z) < l.outerR + outerR + 8000) { clash = true; break; }
-      }
-      if (clash) continue;
+      const lake = worldFloodLake(x, z, outerR);
+      if (!lake || lake.level < 20) continue; // 小さすぎる／岸が海岸まで下りている
 
       const nm = worldMakePlaceName(country.nameStyle, rand, usedNames);
-      WORLD_LAKES.push({
+      WORLD_LAKES.push(Object.assign(lake, {
         id: 'lake-' + country.id + '-' + nm.nameLatin.toLowerCase(),
         name: nm.name + '湖', nameLatin: 'Lake ' + nm.nameLatin,
         country: country.id,
-        x, z, level,
-        innerR: outerR * 0.45,
-        outerR,
-        depth: 14 + rand() * 55,
         seed: nm.nameLatin,
-      });
+      }));
       placed++;
     }
   }
 }
 
-// 岸を真円にしないためのゆらぎ。中心からの距離を方位で伸び縮みさせる。
-function worldLakeWobble(lake, x, z) {
-  const a = Math.atan2(z - lake.z, x - lake.x);
-  return 0.78 + worldFbm(Math.cos(a) * 2.6 + lake.x * 1e-5, Math.sin(a) * 2.6 + lake.z * 1e-5, 3) * 0.5;
-}
-
-// 湖の岸までの「伸び縮み」。1を超える方位は outerR で頭打ちにする。
-// 掘り方・水面の張り方・水の中かどうかの判定は、すべてこれで岸を決める。
-// （以前は掘るほうだけが outerR で頭打ちにしていて、ゆらぎが1を超える方位では
-//   outerR のところで湖底がいきなり元の地面に戻る崖になっていた）
-function worldLakeRimScale(lake, x, z) {
-  const w = worldLakeWobble(lake, x, z);
-  return w < 1 ? w : 1;
-}
-
-// 岸（掘る前の地面）のいちばん低いところの高さ＝水が溢れる高さ
-function worldLakeSpillLevel(x, z, outerR) {
-  const probe = { x, z };
-  let lo = Infinity;
-  for (let i = 0; i < LAKE_RIM_SAMPLES; i++) {
-    const a = (i / LAKE_RIM_SAMPLES) * Math.PI * 2;
-    const cx = Math.cos(a), cz = Math.sin(a);
-    const r = outerR * worldLakeRimScale(probe, x + cx, z + cz);
-    const h = worldBaseHeightAt(x + cx * r, z + cz * r);
-    if (h < lo) lo = h;
+// 中心 (x, z)・半径 bowlR の椀が、街・空港・他の湖と margin 以内に重なるか
+function worldLakeClashes(x, z, bowlR, margin) {
+  for (const c of WORLD_CITIES) {
+    if (Math.hypot(c.x - x, c.z - z) < c.flatOuterR + bowlR + margin) return true;
   }
-  return lo;
+  for (const a of WORLD_AIRPORTS) {
+    if (Math.hypot(a.x - x, a.z - z) < a.flatOuterR + bowlR + margin) return true;
+  }
+  for (const l of WORLD_LAKES) {
+    if (Math.hypot(l.bowlX - x, l.bowlZ - z) < l.bowlR + bowlR + margin) return true;
+  }
+  return false;
 }
 
-// その地点が湖の岸の内側なら、その湖を返す（地面の高さは見ない）
+// 湖の椀の深さ（その地点で素の地形から引く量）。縁で傾き0になる形
+function worldLakeBowl(l, x, z) {
+  const dx = x - l.bowlX, dz = z - l.bowlZ;
+  const d2 = dx * dx + dz * dz;
+  const R2 = l.bowlR * l.bowlR;
+  if (d2 >= R2) return 0;
+  const u = 1 - d2 / R2;
+  return l.bowlD * u * u;
+}
+
+// 椀を引いた地形（岸を決めるのに使う高さ）
+function worldLakeField(l, x, z) {
+  return worldBaseHeightAt(x, z) - worldLakeBowl(l, x, z);
+}
+
+// (cx, cz) を中心に椀を置き、水を満たして湖を作る。できなければ null。
+// outerR は広さの目安（予定の水面の面積 = π outerR²）。
+function worldFloodLake(cx, cz, outerR) {
+  const bowlR = outerR * LAKE_BOWL_R_MUL;
+  const probe = { bowlX: cx, bowlZ: cz, bowlR, bowlD: LAKE_BOWL_DEPTH_M + outerR * LAKE_BOWL_DEPTH_PER_M };
+  const n = worldClamp(Math.ceil((2 * bowlR) / LAKE_GRID_CELL_M), LAKE_GRID_MIN_N, LAKE_GRID_MAX_N);
+  const cell = (2 * bowlR) / n;
+  const x0 = cx - bowlR, z0 = cz - bowlR;
+  const N = n * n;
+  const field = new Float32Array(N).fill(NaN);
+  const fieldAt = (k) => {
+    if (Number.isNaN(field[k])) {
+      field[k] = worldLakeField(probe, x0 + ((k % n) + 0.5) * cell, z0 + (Math.floor(k / n) + 0.5) * cell);
+    }
+    return field[k];
+  };
+  // 二分ヒープ（鍵＝そこまでの道のいちばん高いところ）
+  const heapK = [], heapV = [];
+  const push = (key, v) => {
+    let i = heapK.length;
+    heapK.push(key); heapV.push(v);
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (heapK[p] <= heapK[i]) break;
+      [heapK[p], heapK[i]] = [heapK[i], heapK[p]];
+      [heapV[p], heapV[i]] = [heapV[i], heapV[p]];
+      i = p;
+    }
+  };
+  const pop = () => {
+    const k = heapK[0], v = heapV[0];
+    const lk = heapK.pop(), lv = heapV.pop();
+    if (heapK.length) {
+      heapK[0] = lk; heapV[0] = lv;
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1, r = l + 1;
+        let m = i;
+        if (l < heapK.length && heapK[l] < heapK[m]) m = l;
+        if (r < heapK.length && heapK[r] < heapK[m]) m = r;
+        if (m === i) break;
+        [heapK[m], heapK[i]] = [heapK[i], heapK[m]];
+        [heapV[m], heapV[i]] = [heapV[i], heapV[m]];
+        i = m;
+      }
+    }
+    return [k, v];
+  };
+
+  const seen = new Uint8Array(N);
+  const keyOf = new Float32Array(N);
+  const c0 = Math.floor(n / 2) * n + Math.floor(n / 2);
+  seen[c0] = 1;
+  push(fieldAt(c0), c0);
+  const order = [];
+  const escapeR2 = (bowlR * LAKE_ESCAPE_FRAC) * (bowlR * LAKE_ESCAPE_FRAC);
+  const targetCells = Math.ceil((Math.PI * outerR * outerR) / (cell * cell));
+  let spill = Infinity;
+  while (heapK.length) {
+    const [key, k] = pop();
+    const i = k % n, j = Math.floor(k / n);
+    const px = x0 + (i + 0.5) * cell - cx, pz = z0 + (j + 0.5) * cell - cz;
+    if (px * px + pz * pz >= escapeR2) { spill = key; break; } // 椀の外まで抜けた
+    keyOf[k] = key;
+    order.push(k);
+    // 予定の広さを超えたら、同じ高さのぶんを満たしきったところで止める
+    if (order.length >= targetCells && heapK.length && heapK[0] > key) { spill = heapK[0]; break; }
+    for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const ii = i + di, jj = j + dj;
+      if (ii < 0 || jj < 0 || ii >= n || jj >= n) continue;
+      const kk = jj * n + ii;
+      if (seen[kk]) continue;
+      seen[kk] = 1;
+      push(Math.max(fieldAt(kk), key), kk);
+    }
+  }
+  if (!Number.isFinite(spill)) return null;
+
+  // 水面は満たした高さのすぐ下。それより高い鍵の升目は水に入らない
+  const level = spill - LAKE_LEVEL_MARGIN_M;
+  const wet = new Uint8Array(N);
+  let count = 0, deepest = -1, deepH = Infinity, sx = 0, sz = 0;
+  for (const k of order) {
+    if (keyOf[k] >= level) continue;
+    wet[k] = 1; count++;
+    const i = k % n, j = Math.floor(k / n);
+    sx += i; sz += j;
+    if (field[k] < deepH) { deepH = field[k]; deepest = k; }
+  }
+  if (count * cell * cell < LAKE_MIN_AREA_M2 || level - deepH < LAKE_MIN_DEPTH_M) return null;
+
+  // 名札と「湖の中心」は、水の升目の重心（そこが水でなければいちばん深いところ）
+  let ci = Math.round(sx / count - 0.5), cj = Math.round(sz / count - 0.5);
+  let ck = cj * n + ci;
+  if (!(ci >= 0 && cj >= 0 && ci < n && cj < n && wet[ck])) ck = deepest;
+  const lx = x0 + ((ck % n) + 0.5) * cell, lz = z0 + (Math.floor(ck / n) + 0.5) * cell;
+  let far = 0;
+  for (let k = 0; k < N; k++) {
+    if (!wet[k]) continue;
+    const dx = x0 + ((k % n) + 0.5) * cell - lx, dz = z0 + (Math.floor(k / n) + 0.5) * cell - lz;
+    far = Math.max(far, Math.hypot(dx, dz));
+  }
+  const lake = Object.assign(probe, {
+    x: lx, z: lz, level,
+    outerR: far + cell,
+    depth: level - deepH,
+    mask: { x0, z0, cell, n, wet },
+    areaM2: count * cell * cell,
+  });
+  lake.shore = worldLakeShoreRays(lake);
+  return lake;
+}
+
+// 升目 (i, j) が水か
+function worldLakeWetCell(m, i, j) {
+  return i >= 0 && j >= 0 && i < m.n && j < m.n && m.wet[j * m.n + i] === 1;
+}
+
+// 地点 (x, z) を囲む4つの升目の中心のどれかが水か（水面の板が張ってある範囲）
+function worldLakeNearWet(l, x, z) {
+  const m = l.mask;
+  const gx = (x - m.x0) / m.cell - 0.5, gz = (z - m.z0) / m.cell - 0.5;
+  const i = Math.floor(gx), j = Math.floor(gz);
+  return worldLakeWetCell(m, i, j) || worldLakeWetCell(m, i + 1, j)
+    || worldLakeWetCell(m, i, j + 1) || worldLakeWetCell(m, i + 1, j + 1);
+}
+
+// ミニマップ用の岸：中心から方位ごとに、水の升目がいちばん遠くまで続くところ
+function worldLakeShoreRays(l) {
+  const out = new Float32Array(LAKE_SHORE_RAYS);
+  const step = l.mask.cell * 0.5;
+  for (let r = 0; r < LAKE_SHORE_RAYS; r++) {
+    const a = (r / LAKE_SHORE_RAYS) * Math.PI * 2, c = Math.cos(a), s = Math.sin(a);
+    let last = 0;
+    for (let d = 0; d <= l.outerR; d += step) {
+      const m = l.mask;
+      const i = Math.floor((l.x + c * d - m.x0) / m.cell), j = Math.floor((l.z + s * d - m.z0) / m.cell);
+      if (worldLakeWetCell(m, i, j)) last = d;
+      else if (d - last > l.mask.cell * 3) break;
+    }
+    out[r] = last + l.mask.cell * 0.5;
+  }
+  return out;
+}
+
+// 岸の升目：水の升目の隣（上下左右）の、水でない升目の中心。
+// 検証（tools/verify-world.js）で「岸の地面が水面より低くない」を見るのに使う。
+function worldLakeShoreCells(l) {
+  const m = l.mask, out = [];
+  for (let j = 0; j < m.n; j++) {
+    for (let i = 0; i < m.n; i++) {
+      if (!worldLakeWetCell(m, i, j)) continue;
+      for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        if (worldLakeWetCell(m, i + di, j + dj)) continue;
+        out.push({
+          x: m.x0 + (i + di + 0.5) * m.cell, z: m.z0 + (j + dj + 0.5) * m.cell,
+          dx: di, dz: dj,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+// その地点が湖の中なら、その湖を返す。岸は等高線（水の升目のそばで、
+// 椀を引いた地形が水面より低いところ）
 function worldLakeFootprintAt(x, z) {
   if (!_worldLakeGrid) return null;
   const lakes = _worldLakeGrid.at(x, z);
   if (!lakes) return null;
   for (let i = 0; i < lakes.length; i++) {
     const l = lakes[i];
-    const d2 = (x - l.x) * (x - l.x) + (z - l.z) * (z - l.z);
-    if (d2 >= l.outerR * l.outerR) continue;
-    if (Math.sqrt(d2) < l.outerR * worldLakeRimScale(l, x, z)) return l;
+    const dx = x - l.x, dz = z - l.z;
+    if (dx * dx + dz * dz >= (l.outerR + l.mask.cell) * (l.outerR + l.mask.cell)) continue;
+    if (!worldLakeNearWet(l, x, z)) continue;
+    if (worldLakeField(l, x, z) < l.level) return l;
   }
   return null;
 }
 
-function worldCarveLakes(x, z, h) {
+// 川床を決めるときの地面の高さ：素の地形から湖の椀を引いたもの。
+// 椀は湖の外（湖の大きさの1.6倍）まで地形を下げるので、素の地形で川床を決めると、
+// 椀を通る川は川床より地面のほうが低くなって、川面が浮いた。
+// ただし湖の中は湖面の高さで頭打ちにする（川面がちょうど湖面になる高さ）。川床は
+// 「上流の最小値」なので、湖底まで下りると湖を出たあとも湖底の高さのまま進み、
+// あふれ口を湖の深さぶん刻んで、湖面をその出口の高さ（18m下）まで下げてしまった。
+function worldBedGroundAt(x, z) {
+  let h = worldBaseHeightAt(x, z);
+  const lakes = _worldLakeGrid ? _worldLakeGrid.at(x, z) : null;
+  if (!lakes) return h;
+  for (let i = 0; i < lakes.length; i++) h -= worldLakeBowl(lakes[i], x, z);
+  const l = worldLakeFootprintAt(x, z);
+  if (l) h = Math.max(h, l.level + RIVER_BED_OFFSET_M - RIVER_WATER_DEPTH_M);
+  return h;
+}
+
+// 湖のそばでは、川の谷が湖の水面より下まで地面を削らないようにする（川の水面の中は除く）。
+// 湖に注ぐ川は湖面の高さで岸を横切るので、川から600mまでの緩い谷底（傾き0.03）が
+// 湖面より低くなり、湖の岸の外の地面が湖面より最大5m低くなって、水面の縁が宙に浮いた
+// （アイゼンダール湖、岸110点のうち13点）。元の地面より上げることはしない。
+function worldKeepLakeShore(x, z, h, before) {
   const lakes = _worldLakeGrid.at(x, z);
   if (!lakes) return h;
   for (let i = 0; i < lakes.length; i++) {
     const l = lakes[i];
-    const dx = x - l.x, dz = z - l.z;
-    const d2 = dx * dx + dz * dz;
-    const reach = l.outerR + LAKE_BANK_REACH_M;
-    if (d2 >= reach * reach) continue;
-    const d = Math.sqrt(d2);
-    const k = worldLakeRimScale(l, x, z);
-    const rim = l.outerR * k;
-    let cap;
-    if (d < rim) {
-      // 椀。岸で t=0（水面の高さ）、innerR より内側で最深
-      const t = worldSmooth01((l.outerR - d / k) / (l.outerR - l.innerR));
-      cap = l.level - l.depth * t;
-    } else {
-      const s = d - rim;
-      if (s >= LAKE_BANK_REACH_M) continue;
-      cap = l.level + s * LAKE_BANK_SLOPE + s * s * LAKE_BANK_CURVE;
-    }
-    if (cap < h) h = cap;
+    if (h >= l.level || worldLakeBowl(l, x, z) <= 0) continue;
+    if (before < l.level) continue;               // もともと湖面より低い（湖の中）
+    if (worldWaterSurfaceAt(x, z) !== null) continue; // 川の水面の中
+    h = Math.min(before, l.level + 0.5);
   }
+  return h;
+}
+
+// 湖の椀を地形から引く（街・空港とは椀が重ならないように置いてある）
+function worldCarveLakes(x, z, h) {
+  const lakes = _worldLakeGrid.at(x, z);
+  if (!lakes) return h;
+  for (let i = 0; i < lakes.length; i++) h -= worldLakeBowl(lakes[i], x, z);
   return h;
 }
 
@@ -1332,7 +1514,7 @@ function worldTraceRiverFromMouth(mx, mz) {
   const pts = [];
   for (let i = 0; i < smooth.length; i++) {
     const p = smooth[i];
-    bed = Math.min(bed, worldBaseHeightAt(p.x, p.z));
+    bed = Math.min(bed, worldBedGroundAt(p.x, p.z));
     pts.push({ x: p.x, z: p.z, h: bed });
   }
   return pts;
@@ -1662,7 +1844,7 @@ function worldExtendRiverToSea(pts) {
   let bed = end.h;
   for (let i = 1; i < smooth.length; i++) {
     const p = smooth[i];
-    bed = Math.min(bed, worldBaseHeightAt(p.x, p.z));
+    bed = Math.min(bed, worldBedGroundAt(p.x, p.z));
     out.push({ x: p.x, z: p.z, h: bed });
   }
   return out;
@@ -1771,38 +1953,18 @@ function worldAddTerminalLakes() {
     if (worldLakeGridHas(end.x, end.z, end.h)) continue; // すでに湖に注いでいる
 
     const outerR = worldClamp(1800 + r.lengthM * 0.035, 1800, 11000);
-    // 川の終点より少し上か、岸のいちばん低いところか、低いほう
-    const lx = Math.round(end.x), lz = Math.round(end.z);
-    const level = Math.min(end.h + 6, worldLakeSpillLevel(lx, lz, outerR));
-    if (level < 3) continue;
-
-    let clash = false;
-    for (const c of WORLD_CITIES) {
-      if (Math.hypot(c.x - end.x, c.z - end.z) < c.flatOuterR + outerR + 2000) { clash = true; break; }
-    }
-    if (!clash) for (const a of WORLD_AIRPORTS) {
-      if (Math.hypot(a.x - end.x, a.z - end.z) < a.flatOuterR + outerR + 2000) { clash = true; break; }
-    }
-    if (!clash) for (const l of WORLD_LAKES) {
-      if (Math.hypot(l.x - end.x, l.z - end.z) < l.outerR + outerR + 3000) { clash = true; break; }
-    }
-    if (clash) continue;
-
-    const country = worldCountryById(r.country);
-    WORLD_LAKES.push({
+    if (worldLakeClashes(end.x, end.z, outerR * LAKE_BOWL_R_MUL, 2000)) continue;
+    // 川の終点を中心に椀を置いて水を満たす
+    const lake = worldFloodLake(end.x, end.z, outerR);
+    if (!lake || lake.level < 3) continue;
+    WORLD_LAKES.push(Object.assign(lake, {
       id: 'lake-end-' + r.id,
       name: r.name.replace('川', '') + '湖',
       nameLatin: 'Lake ' + r.nameLatin.replace(' River', ''),
       country: r.country,
-      x: lx, z: lz,
-      level,
-      innerR: outerR * 0.45,
-      outerR,
-      depth: 12 + Math.min(r.lengthM / 12000, 40),
       seed: r.id,
       fedByRiver: r.id,
-    });
-    void country;
+    }));
   }
 }
 
@@ -3024,7 +3186,7 @@ function initWorld() {
   // 3) 内陸の窪地に湖を置く（街・空港とは重ならない場所を選ぶ）
   worldGenerateLakes();
   _worldLakeGrid = makeWorldGrid(30000);
-  for (const l of WORLD_LAKES) _worldLakeGrid.insert(l.x, l.z, l.outerR + LAKE_BANK_REACH_M, l);
+  for (const l of WORLD_LAKES) _worldLakeGrid.insert(l.bowlX, l.bowlZ, l.bowlR, l);
 
   // 4) 山から海（または湖）まで川を下ろす。
   //    経路は「刻む前の地形」の上で決めること。谷を刻んでから歩かせると
@@ -3034,7 +3196,7 @@ function initWorld() {
   // 内陸で止まった川の終端に湖を足し、湖グリッドを作り直す
   worldAddTerminalLakes();
   _worldLakeGrid = makeWorldGrid(30000);
-  for (const l of WORLD_LAKES) _worldLakeGrid.insert(l.x, l.z, l.outerR + LAKE_BANK_REACH_M, l);
+  for (const l of WORLD_LAKES) _worldLakeGrid.insert(l.bowlX, l.bowlZ, l.bowlR, l);
 
   // 5) 河口の形（入り江か三角州か）を決めてから、川の幅・川床・分流を作る
   worldShapeRiverMouths();
@@ -3085,7 +3247,7 @@ if (typeof module !== 'undefined' && module.exports) {
     WORLD_LANDMASSES, WORLD_RANGES, WORLD_COUNTRIES, WORLD_CITIES, WORLD_AIRPORTS,
     WORLD_CITY_DATA, WORLD_AIRPORT_DATA,
     WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, WORLD_ROADS, WORLD_PEAKS,
-    worldLakeAt, worldRiverAt, worldWaterSurfaceAt, worldLakeFootprintAt, worldLakeRimScale,
+    worldLakeAt, worldRiverAt, worldWaterSurfaceAt, worldLakeFootprintAt, worldLakeShoreCells, worldLakeField,
     worldRangeUpliftAt, worldInRangeAt, worldNearestCrestDist,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
     worldClamp, worldSmooth01, worldValueNoise, worldFbm, worldRng,

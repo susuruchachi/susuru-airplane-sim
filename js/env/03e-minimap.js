@@ -547,10 +547,12 @@ function buildMinimapLabels(ctx, view, selected, radar) {
     const c = toPx(l.x, l.z);
     const rPx = l.outerR / mPerPx;
     if (rPx < 0.6) continue;
-    const n = rPx > 6 ? 48 : 16;
+    // 岸は地形の等高線なので、世界側が方位ごとに持っている岸までの距離（l.shore）で結ぶ
+    const rays = l.shore.length;
+    const n = rPx > 6 ? rays : 16;
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2;
-      const rr = rPx * worldLakeRimScale(l, l.x + Math.cos(a), l.z + Math.sin(a));
+      const rr = l.shore[Math.floor((i / n) * rays)] / mPerPx;
       const x = c.px + Math.cos(a) * rr, y = c.py + Math.sin(a) * rr;
       if (i === 0) lakes.moveTo(x, y); else lakes.lineTo(x, y);
     }

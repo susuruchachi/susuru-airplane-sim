@@ -14,10 +14,6 @@ const WATER_ACTIVE_RADIUS = 130000;
 // 水面が地面に埋まったり、地面が水面から顔を出したりする。
 const RIVER_BANK_MARGIN_M = RIVER_WATER_DEPTH_M / RIVER_VALLEY_SLOPE;
 
-// 岸の線を何方位で結ぶか。弦は岸の曲線から外へ最大36m・内へ最大78mずれる
-// （72方位では279m・402m）。内側のずれでは湖底が水面の1m未満下、外側のずれでは
-// 岸の斜面が水面より2mほど上にあるので、どちらも表には出ない。
-const LAKE_SHORE_RAYS = 240;
 
 // 川面の深度の寄せ方（applyDepthPull）。距離1kmあたり RIVER_DEPTH_PULL*1000 m、
 // 画面1画素ぶんの深度の変化の RIVER_DEPTH_SLOPE_PX 倍、それに RIVER_DEPTH_ABS_M
@@ -220,35 +216,37 @@ function buildRiverInstance(river) {
 
 // --- 湖 ---------------------------------------------------------------------
 
-// 岸の形は世界側の worldLakeRimScale そのもの。湖底はその内側を水面より下に掘り、
-// 岸の外は水面から上がる斜面になっている（03b-world.js の worldCarveLakes）ので、
-// 岸の線で水面を切れば、水面が地面から浮くことも、湖底が水面から出ることもない。
-//
-// 以前は中心から地形を辿って「水面の高さに達したところ」を岸にしていた。
-// 中の小山で止まるとその先の湖底が剥き出しになり、岸まで届かない方位では
-// outerR で切っていたので、そこでは水面が宙に浮いていた。
+// 湖の岸は地形の等高線（世界側の worldFloodLake）。水面は「水の升目」を覆う板で、
+// 升目の中心どうしを結んだ四角のうち、角のどれかが水のものを張る。岸の外の升目の中心は
+// 地形が水面より高いので、四角の中で地形が水面を横切り、地形のほうが手前に出る——
+// 描かれる岸は地形の等高線そのものになる。水の升目の外へは張らないので、あふれ口の先の
+// 低い谷に水面が浮くこともない。
 function buildLakeInstance(lake) {
-  const rays = LAKE_SHORE_RAYS;
-  const positions = new Float32Array((rays + 1) * 3);
-  const normals = new Float32Array((rays + 1) * 3);
-  normals[1] = 1;
-
-  for (let i = 0; i < rays; i++) {
-    const a = (i / rays) * Math.PI * 2;
-    const cx = Math.cos(a), cz = Math.sin(a);
-    const shore = lake.outerR * worldLakeRimScale(lake, lake.x + cx, lake.z + cz);
-    const vi = (i + 1) * 3;
-    positions[vi] = cx * shore;
-    positions[vi + 2] = cz * shore;
-    normals[vi + 1] = 1;
+  const m = lake.mask;
+  const vid = new Int32Array((m.n) * (m.n)).fill(-1);
+  const pos = [], idx = [];
+  const vert = (i, j) => {
+    const k = j * m.n + i;
+    if (vid[k] < 0) {
+      vid[k] = pos.length / 3;
+      pos.push(m.x0 + (i + 0.5) * m.cell - lake.x, 0, m.z0 + (j + 0.5) * m.cell - lake.z);
+    }
+    return vid[k];
+  };
+  for (let j = 0; j < m.n - 1; j++) {
+    for (let i = 0; i < m.n - 1; i++) {
+      if (!(worldLakeWetCell(m, i, j) || worldLakeWetCell(m, i + 1, j)
+        || worldLakeWetCell(m, i, j + 1) || worldLakeWetCell(m, i + 1, j + 1))) continue;
+      const a = vert(i, j), b = vert(i + 1, j), c = vert(i, j + 1), d = vert(i + 1, j + 1);
+      // 上を向く巻き順（a→c→b：+z の向きを先に回る）
+      idx.push(a, c, b, b, c, d);
+    }
   }
-
-  const indices = new Uint16Array(rays * 3);
-  for (let i = 0; i < rays; i++) {
-    indices[i * 3] = 0;
-    indices[i * 3 + 1] = 1 + ((i + 1) % rays);
-    indices[i * 3 + 2] = 1 + i;
-  }
+  if (!idx.length) return;
+  const positions = new Float32Array(pos);
+  const normals = new Float32Array(pos.length);
+  for (let i = 1; i < normals.length; i += 3) normals[i] = 1;
+  const indices = positions.length / 3 > 65000 ? new Uint32Array(idx) : new Uint16Array(idx);
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
