@@ -126,7 +126,7 @@ function runwayDesignators(headingDeg) {
 // --- 各パーツの生成 ---------------------------------------------------------
 
 // 滑走路まわりの整地エリア。周囲の地面と色を変えて「飛行場の敷地」に見せる
-function buildAirfieldGround(L, W, span, terminalZ, terminalX) {
+function buildAirfieldGround(L, W, span, terminalZ, terminalX, extraX) {
   // 滑走路の並び（span）とターミナル側（terminalZ）の両方が収まる大きさにする。
   // ここが足りないと、平行滑走路やターミナルが草地からはみ出して地形の上に浮く。
   const zMin = -span - W / 2 - 220;
@@ -134,7 +134,7 @@ function buildAirfieldGround(L, W, span, terminalZ, terminalX) {
   const depth = zMax - zMin;
   // 長さ方向も、ターミナル（と管制塔）が滑走路の端より外にあるときはそこまで広げる。
   // ターミナルは定義の最大長から位置が決まるので、UIで滑走路を縮めると端から外れる。
-  const xMin = Math.min(-L / 2 - 350, (terminalX === undefined ? 0 : terminalX) - 520);
+  const xMin = Math.min(-L / 2 - 350, (terminalX === undefined ? 0 : terminalX) - (extraX || 520));
   const xMax = L / 2 + 350;
   const mesh = new THREE.Mesh(
     new THREE.PlaneGeometry(xMax - xMin, depth),
@@ -258,7 +258,8 @@ function airportTaxiLayout(L, W, def) {
   const halfL = L / 2;
   const runwayEdgeZ = span + W / 2;          // いちばんターミナル側の滑走路の縁
   const farEdgeZ = -span + W / 2;            // いちばん奥の滑走路の、ターミナル側の縁
-  const apronZ = def.terminalLocalZ - APRON_DEPTH_M / 2 - 20;
+  // エプロンはターミナルの正面に接して置く（ターミナルの奥行きは規模で違う）
+  const apronZ = def.terminalLocalZ - airportBuildings(def).termD / 2 - APRON_DEPTH_M / 2;
   const apronNearZ = apronZ - APRON_DEPTH_M / 2;
   const parallelZ = (runwayEdgeZ + apronNearZ) / 2;
   const apronX = def.terminalLocalX;
@@ -290,7 +291,7 @@ function buildTaxiwayAndApron(L, W, def) {
   applyDecalOffset(paveMesh.material, OFFSET_PAVEMENT);
   group.add(paveMesh);
 
-  const apronW = Math.max(260, def.runwayCount * 230);
+  const apronW = airportBuildings(def).termW + 80;
   const apron = new THREE.Mesh(
     new THREE.PlaneGeometry(apronW, APRON_DEPTH_M),
     applyDecalOffset(new THREE.MeshLambertMaterial({ color: CONCRETE_COLOR }), OFFSET_PAVEMENT)
@@ -351,14 +352,28 @@ function buildTaxiwayAndApron(L, W, def) {
 // エプロンの奥行き
 const APRON_DEPTH_M = 190;
 
+// ターミナルと管制塔の大きさ。滑走路の本数で決める（1本＝地方空港、3本＝国際空港）。
+//
+// 以前は 1本で間口110m・高さ9m、3本でも間口340m・高さ17m、管制塔は35mだった。
+// Boeing 747 は全長71m・全幅64m・尾翼の高さ19mあるので、ターミナルが機体2機ぶんほどの
+// 小屋になり、管制塔は747の尾翼の倍もなかった（「管制塔とターミナル、機体のサイズ感に
+// 対して小さすぎない？」）。実際の空港に寄せる：地方空港のターミナルは間口200m前後、
+// 大きな国際空港は1棟で500〜1,000m、管制塔は地方で30〜50m・大空港で70〜120m
+// （羽田116m・ヒースロー87m・フランクフルト70m）。
+const AIRPORT_BUILDINGS = {
+  1: { termW: 220, termD: 44, termH: 16, piers: 1, pierLen: 110, towerH: 42, cabR: 9 },
+  2: { termW: 520, termD: 70, termH: 24, piers: 3, pierLen: 150, towerH: 78, cabR: 12 },
+  3: { termW: 800, termD: 90, termH: 28, piers: 4, pierLen: 170, towerH: 100, cabR: 14 },
+};
+function airportBuildings(def) {
+  return AIRPORT_BUILDINGS[Math.min(Math.max(def.runwayCount || 1, 1), 3)];
+}
+
 // ターミナル。エプロンに面した長い建物と、そこから突き出す搭乗橋（ピア）。
-// 規模は滑走路の本数で決める（1本＝地方空港の小屋、3本＝国際空港）。
 function buildTerminal(def, apron) {
   const group = new THREE.Group();
-  const n = def.runwayCount || 1;
-  const width = n === 1 ? 110 : (n === 2 ? 240 : 340);
-  const depth = n === 1 ? 26 : 42;
-  const height = n === 1 ? 9 : 17;
+  const b = airportBuildings(def);
+  const width = b.termW, depth = b.termD, height = b.termH;
   const z = def.terminalLocalZ;
 
   const shell = new THREE.MeshLambertMaterial({ color: 0x53585f });
@@ -381,58 +396,64 @@ function buildTerminal(def, apron) {
   group.add(eave);
 
   // 搭乗橋（ピア）。エプロンへ向かって突き出す腕。
-  const piers = n === 1 ? 0 : (n === 2 ? 2 : 3);
-  const pierLen = 120, pierW = 16, pierH = 8;
+  const piers = b.piers;
+  const pierLen = b.pierLen, pierW = 18, pierH = 9;
+  const legMat = new THREE.MeshLambertMaterial({ color: 0x3a3e44 });
   for (let i = 0; i < piers; i++) {
     const t = piers === 1 ? 0.5 : i / (piers - 1);
-    const px = def.terminalLocalX + (t - 0.5) * (width - pierW - 40);
+    const px = def.terminalLocalX + (t - 0.5) * (width - pierW - 60);
     const pier = new THREE.Mesh(new THREE.BoxGeometry(pierW, pierH, pierLen), shell);
     pier.position.set(px, pierH / 2 + 4, z - depth / 2 - pierLen / 2);
     group.add(pier);
     // ピアの脚
     for (let k = 0; k < 3; k++) {
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(2.4, 4, 2.4), new THREE.MeshLambertMaterial({ color: 0x3a3e44 }));
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(2.4, 4, 2.4), legMat);
       leg.position.set(px, 2, z - depth / 2 - pierLen * (0.2 + 0.3 * k));
       group.add(leg);
     }
   }
 
-  // 車寄せ（道路が着くところ）の舗装
+  // 車寄せ（道路が着くところ）の舗装。ターミナルの裏から、道路が着く位置の少し先まで
   const gateZ = def.gateLocalZ;
+  const back = z + depth / 2;
+  const fcLen = Math.max(gateZ + 30 - back, 20);
   const forecourt = new THREE.Mesh(
-    new THREE.PlaneGeometry(width * 0.8, (gateZ - z) * 2),
+    new THREE.PlaneGeometry(width * 0.8, fcLen),
     applyDecalOffset(new THREE.MeshLambertMaterial({ color: ASPHALT_COLOR }), OFFSET_PAVEMENT)
   );
   forecourt.rotation.x = -Math.PI / 2;
-  forecourt.position.set(def.terminalLocalX, TAXIWAY_Y, (z + gateZ) / 2 + depth / 2);
+  forecourt.position.set(def.terminalLocalX, TAXIWAY_Y, back + fcLen / 2);
   group.add(forecourt);
 
   void apron;
   return group;
 }
 
-function buildControlTower(x, z) {
+function buildControlTower(x, z, def) {
   const group = new THREE.Group();
+  const b = def ? airportBuildings(def) : AIRPORT_BUILDINGS[1];
+  const H = b.towerH, R = b.cabR;
+  const cabH = Math.max(6, R * 0.75);
 
   const shaft = new THREE.Mesh(
-    new THREE.CylinderGeometry(5, 6.5, 28, 16),
+    new THREE.CylinderGeometry(R * 0.5, R * 0.7, H, 16),
     new THREE.MeshLambertMaterial({ color: 0x555a61 })
   );
-  shaft.position.y = 14;
+  shaft.position.y = H / 2;
   group.add(shaft);
 
   const cab = new THREE.Mesh(
-    new THREE.CylinderGeometry(9, 7.5, 7, 16),
+    new THREE.CylinderGeometry(R, R * 0.82, cabH, 16),
     new THREE.MeshLambertMaterial({ color: 0x1d2b3a })
   );
-  cab.position.y = 31;
+  cab.position.y = H + cabH / 2;
   group.add(cab);
 
   const roof = new THREE.Mesh(
-    new THREE.CylinderGeometry(9.5, 9.5, 1.2, 16),
+    new THREE.CylinderGeometry(R * 1.05, R * 1.05, 1.4, 16),
     new THREE.MeshLambertMaterial({ color: 0x3d4249 })
   );
-  roof.position.y = 35.2;
+  roof.position.y = H + cabH + 0.7;
   group.add(roof);
 
   group.position.set(x, 0, z);
@@ -654,7 +675,9 @@ function populateAirportGroup(entry, st) {
   const offsets = [];
   for (let k = 0; k < n; k++) offsets.push(-span + k * spacing);
 
-  group.add(buildAirfieldGround(L, W, span, def.terminalLocalZ, def.terminalLocalX));
+  // 草地はターミナルと管制塔（エプロンの脇）まで収まる幅に
+  group.add(buildAirfieldGround(L, W, span, def.terminalLocalZ, def.terminalLocalX,
+    (airportBuildings(def).termW + 80) / 2 + 200));
 
   offsets.forEach((off, k) => {
     const rw = new THREE.Group();
@@ -671,7 +694,7 @@ function populateAirportGroup(entry, st) {
   const taxi = buildTaxiwayAndApron(L, W, def);
   group.add(taxi.group);
   group.add(buildTerminal(def, taxi));
-  group.add(buildControlTower(taxi.taxiX - taxi.apronW / 2 - 70, taxi.apronZ - 30));
+  group.add(buildControlTower(taxi.taxiX - taxi.apronW / 2 - 70, taxi.apronZ - 30, def));
 
   entry.lights = buildAirportLights(L, W, taxi, offsets);
   group.add(entry.lights);
