@@ -31,6 +31,14 @@ const GEAR_SQUASH_M = 0.08;
 const GEAR_ROLL_FRICTION = 0.025;  // 転がり抵抗
 const GEAR_BRAKE_FRICTION = 0.55;  // ブレーキ全踏み
 const GEAR_SIDE_FRICTION = 0.85;   // 横滑りに耐えるタイヤの摩擦
+// タイヤの横の力は、すべり角（車輪の向きと進む向きのずれ）に比例して増え、
+// GEAR_SLIP_SAT_DEG で摩擦の上限（GEAR_SIDE_FRICTION）に達する（実際のタイヤと同じ形）。
+// 以前は横に秒速0.65m滑っただけで上限に達していた——300ktなら0.2°のずれで、
+// 横風で機首が1°振られただけで車輪に摩擦の上限の横の力が掛かり、重心が車輪より9m高い
+// サンダーバード1号（主脚の片側4.2m）は、補助翼を一杯に当てたまま着陸滑走中に裏返った。
+// 止まりかけ（GEAR_SLIP_MIN_MPS より遅い）では、すべり角を大きめに見て踏ん張る。
+const GEAR_SLIP_SAT_DEG = 8;
+const GEAR_SLIP_MIN_MPS = 1;
 const GEAR_STEER_MAX_DEG = 32;
 const GEAR_STEER_HIGHSPEED_DEG = 7;   // 速いときに残す前輪の切れ角
 
@@ -804,7 +812,9 @@ function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
     const muRoll = GEAR_ROLL_FRICTION + (c.brake ? GEAR_BRAKE_FRICTION * controls.brake : 0)
       + (controls.parkingBrake ? 0.9 : 0);
     const fFwd = -Math.sign(vFwd) * Math.min(muRoll * normal, Math.abs(vFwd) * model.massKg * 4);
-    const fSide = -Math.sign(vSide) * Math.min(GEAR_SIDE_FRICTION * normal, Math.abs(vSide) * model.massKg * 4);
+    const slip = Math.atan2(Math.abs(vSide), Math.max(Math.abs(vFwd), GEAR_SLIP_MIN_MPS));
+    const grip = Math.min(slip / THREE.MathUtils.degToRad(GEAR_SLIP_SAT_DEG), 1);
+    const fSide = -Math.sign(vSide) * Math.min(GEAR_SIDE_FRICTION * normal * grip, Math.abs(vSide) * model.massKg * 4);
 
     const f = _gv.f.set(0, normal, 0).addScaledVector(fwd, fFwd).addScaledVector(side, fSide);
 

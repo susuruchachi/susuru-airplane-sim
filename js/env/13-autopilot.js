@@ -560,6 +560,12 @@ const AP_SPOILER_THR_GATE = 0.25;  // 出力がこれ以上入っていたら立
 // 機体を裏返す。「止まるのに要るぶんだけ」出すよう、力ではなく減速度で決める。
 const AP_REVERSE_DECEL_MPS2 = 3.0;
 const AP_REVERSE_FADE_MPS = 8;     // これより遅くなったらレバーを戻す(m/s)
+// 滑走路の残りが分かるときは、そこで止まるのに要る減速度（の AP_REVERSE_NEED_MARGIN 倍）まで
+// 上げる（上限 AP_REVERSE_DECEL_MAX_MPS2）。一定の3m/s²だと、逆推力の大きいサンダーバード1号は
+// レバー10%で済む計算になり、337ktで接地して3000mの滑走路を760m走り越した。
+const AP_REVERSE_DECEL_MAX_MPS2 = 6.0;
+const AP_REVERSE_NEED_MARGIN = 1.2;
+const AP_REVERSE_STOP_MARGIN_M = 150; // 滑走路の端のこれだけ手前で止まるつもりで見積もる
 
 // --- 小道具 -------------------------------------------------------------------
 
@@ -958,10 +964,16 @@ function apReverseThrustAvailN(model, controls) {
 }
 
 // 逆噴射をどれだけ入れるか。狙った減速度になるぶんだけ。
-function apReverseCommand(model, state, controls) {
+function apReverseCommand(model, state, controls, remainingM) {
   const revN = controls ? apReverseThrustAvailN(model, controls) : model.reverseThrustN;
   if (!(revN > 0)) return 0;
-  const want = model.massKg * AP_REVERSE_DECEL_MPS2 / revN;
+  let decel = AP_REVERSE_DECEL_MPS2;
+  if (Number.isFinite(remainingM)) {
+    const room = Math.max(remainingM - AP_REVERSE_STOP_MARGIN_M, 100);
+    const need = (state.groundSpeed * state.groundSpeed) / (2 * room);
+    decel = apClamp(need * AP_REVERSE_NEED_MARGIN, AP_REVERSE_DECEL_MPS2, AP_REVERSE_DECEL_MAX_MPS2);
+  }
+  const want = model.massKg * decel / revN;
   return apClamp(want, 0, 1) * apClamp(state.groundSpeed / AP_REVERSE_FADE_MPS, 0, 1);
 }
 
@@ -1177,6 +1189,14 @@ function apMakeApproachPlan(airport, settings, windDirectionDeg) {
   };
 }
 
+// 引き起こしの最後に保つ沈下率(m/s)。速い機体ほど大きく（練習機0.7・747 1.0・TB1 1.6）
+const AP_FLARE_SINK_BASE = 0.45;
+const AP_FLARE_SINK_PER_MPS = 0.0065;
+const AP_FLARE_SINK_MAX = 1.8;
+function apFlareMinSink(state) {
+  return apClamp(AP_FLARE_SINK_BASE + state.groundSpeed * AP_FLARE_SINK_PER_MPS, 0.5, AP_FLARE_SINK_MAX);
+}
+
 // 引き起こしを始める高さ。大型機ほど高い位置から機首を起こす。
 // 引き起こしを始める高さ。機体の大きさ（＝翼幅）だけで決めていたが、
 // **速い機体は同じ経路角でも沈下率が大きい**ので、同じ高さから引くと
@@ -1187,8 +1207,37 @@ const AP_FLARE_SEC = 4;
 function apFlareHeight(model, state) {
   const bySize = apClamp(model.wingSpan * 0.5, 6, 20);
   if (!state) return bySize;
-  const bySink = Math.max(-state.verticalSpeed, 0) * AP_FLARE_SEC;
+  const bySink = Math.max(-state.verticalSpeed, 0) * AP_FLARE_SEC * apFlareQuick(state);
   return Math.max(bySize, bySink);
+}
+
+// **速い機体ほど、引き起こしを短く強くする**（1＝以前どおり、速いほど小さい）。
+// 引き起こしの長さは時間で決まるので、距離は速さに比例して伸びる——実測で
+// サンダーバード2号（接地362kt）が対地47mから11.6秒・2.3km引き起こしを続けて
+// 進入端から1.6km先で接地し、3000mの滑走路の端を179m越えた。秒速100m（194kt）までは
+// 以前どおりで、それより速いと、始める高さ（沈下率×4秒）と沈下率を絞る時定数を
+// 速さに反比例して縮める（秒速125mで0.8倍が下限）。
+// 下限をもっと小さくすると、引き起こしが間に合わずに叩きつける——実測で0.44倍では
+// 747が27.8G、0.6倍でもサンダーバード1号が-1372fpm/12.1Gだった（0.8倍で-549fpm/4.3G）。
+const AP_FLARE_QUICK_FROM_MPS = 100;
+const AP_FLARE_QUICK_MIN = 0.8;
+function apFlareQuick(state) {
+  return apClamp(AP_FLARE_QUICK_FROM_MPS / Math.max(state.groundSpeed, 1), AP_FLARE_QUICK_MIN, 1);
+}
+
+// 最終進入で、中心線からのずれ1mあたり何度向きを振るか。
+// 0.06°/m（955m先の中心線を見て寄せるのと同じ）で決めていたが、速い機体ほど
+// 同じバンクでもゆっくりしか曲がれない（旋回率は速さに反比例）——実測で
+// サンダーバード2号（進入390kt）は20°バンクで1°/sしか向きを変えられず、
+// 中心線の左右を±300m・周期45秒で蛇行したまま、206m横で引き起こしに入り、
+// 滑走路の外（81m横）に接地した。見る先を旋回半径（20°バンク）の AP_LOC_RADII 倍より
+// 近くしない。進入180kt（747・Concordeまで）は旋回半径が短いので以前どおり。
+const AP_LOC_GAIN_DEG_PER_M = 0.06;
+const AP_LOC_RADII = 0.35;
+function apLocGainDegPerM(state) {
+  const r20 = (state.groundSpeed * state.groundSpeed) / (9.80665 * Math.tan((20 * Math.PI) / 180));
+  const minLook = 180 / Math.PI / AP_LOC_GAIN_DEG_PER_M;
+  return AP_LOC_GAIN_DEG_PER_M * Math.min(1, minLook / Math.max(r20 * AP_LOC_RADII, 1));
 }
 
 // 機体が進入経路のどこにいるか。
@@ -1469,12 +1518,19 @@ const AP_GROUND_HDG_KP = 0.12;      // 方位のずれ1°あたりの舵
 const AP_GROUND_RATE_KD = 0.08;     // 振れる速さ1°/sあたりの舵
 const AP_GROUND_CROSS_KP = 0.25;    // 中心線からのずれ1mあたり、目標の方位を寄せる角(°)
 const AP_GROUND_CROSS_MAX_DEG = 8;
+// 中心線へ寄る横の速さの上限(m/s)。寄せる角を速さで割って決める（56ktより遅ければ8°のまま）。
+// 角だけで決めていたので、速いほど同じ角で激しく横へ動いた——実測でサンダーバード1号が
+// 中心線から19m横に接地し、300ktのまま4秒で中心線へ戻ろうとして（横へ秒速5m）
+// 重心の高さで振られ、ロール-5°→+7°→-27°→-83°と転がった。
+const AP_GROUND_CROSS_RATE_MPS = 4;
 function apGroundSteer(state, ap, courseDeg, crossM, dt) {
   const prev = ap.gndPrevHdg === undefined ? state.headingDeg : ap.gndPrevHdg;
   ap.gndPrevHdg = state.headingDeg;
   const rate = dt > 0 ? apWrap180(state.headingDeg - prev) / dt : 0;
-  const want = courseDeg + apClamp(-crossM * AP_GROUND_CROSS_KP,
-    -AP_GROUND_CROSS_MAX_DEG, AP_GROUND_CROSS_MAX_DEG);
+  const v = Math.max(state.groundSpeed, AP_GROUND_CROSS_RATE_MPS);
+  const maxDeg = Math.min(AP_GROUND_CROSS_MAX_DEG,
+    (Math.asin(AP_GROUND_CROSS_RATE_MPS / v) * 180) / Math.PI);
+  const want = courseDeg + apClamp(-crossM * AP_GROUND_CROSS_KP, -maxDeg, maxDeg);
   return apClamp(apWrap180(want - state.headingDeg) * AP_GROUND_HDG_KP
     - rate * AP_GROUND_RATE_KD, -1, 1);
 }
@@ -2238,7 +2294,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     ap.distanceM = t.before;
 
     // 横：中心線からのずれを方位で詰める。近づくほど滑走路の方位そのものへ寄せる。
-    const corr = apClamp(-t.cross * 0.06, -35, 35);
+    const corr = apClamp(-t.cross * apLocGainDegPerM(state), -35, 35);
     const want = plan.heading + corr;
     ap.targetHeadingDeg = (want + 360) % 360;
     controls.roll = apAileronForTrack(state, want, 20, spd);
@@ -2475,7 +2531,11 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 沈下率は残りの高さに比例させる。一定の沈下率にすると、速い機体ほど
     // 何kmも浮いたまま滑走路を使い切ってしまう（大型機が2.7km先で接地した）。
     // 高いうちは速く、地面に近づくほどゆっくり——実際の引き起こしと同じ形。
-    ap.vsCmd = -Math.max(state.altitudeAglM * 0.22, 0.3);
+    // **ただし最後は一定の沈下率で降ろしきる**（速いほど大きく）。比例だけだと、
+    // 地面に近づくほど指示が0に近づいて、対地7mから接地まで12秒かかる——実測で
+    // サンダーバード1号が340ktで対地5〜7mを1.5km浮いたまま進み（画面の表示は「接地」）、
+    // そのあいだに横風で中心線から28m流された。
+    ap.vsCmd = -Math.max(state.altitudeAglM * 0.22 / apFlareQuick(state), apFlareMinSink(state));
     // 接地の姿勢は少し機首上げ。前輪から落とすと跳ねる。
     // **「機首を下げない」の下限が、上限を追い越さないようにする**。
     // apClamp は下限が優先なので（v < lo ? lo : …）、いったん上限を超えると
@@ -2503,7 +2563,12 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 姿勢はもう戻せない）。スポイラーを積んでいない機体で揚力を捨てる手段は
     // フラップを戻すことしかないので、戻す。積んでいる機体はスポイラーが
     // その役目をするので、フラップはそのままでいい。
-    controls.flap = model.hasSpoiler ? 1 : 0;
+    // **スポイラーのある機体でもフラップは戻す**。以前はスポイラーが揚力を捨てるので
+    // フラップはそのまま（全開）にしていたが、フラップが重心より前の主翼にある機体では、
+    // 全開にした揚力が機首を持ち上げる——実測でサンダーバード2号が352ktで接地した
+    // 1.5秒後にピッチ0°→5.6°で浮き上がり、昇降舵を押しても対地214mまで上がり続けた
+    // （フラップを戻すとピッチ0.3°のまま接地を続けて止まる）。
+    controls.flap = 0;
     controls.roll = apAileronForBank(state, 0, spd);
     // 中心線を保つ（離陸滑走と同じ apGroundSteer）
     controls.yaw = apGroundSteer(state, ap, plan.heading,
@@ -2555,7 +2620,9 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 翼が揚力を出したままだと踏んでも減速しない。逆噴射は車輪の効きとは
     // 無関係に効くので、濡れた滑走路の代わりに翼が浮いている状態でも使える。
     controls.spoiler = model.hasSpoiler ? 1 : 0;
-    controls.reverse = apReverseCommand(model, state, controls);
+    // 滑走路の残り＝長さ −（進入端から来た距離）。接地を狙う点は進入端の AP_TOUCHDOWN_M 先
+    const past = AP_TOUCHDOWN_M - apTrackPosition(plan, state.position.x, state.position.z).before;
+    controls.reverse = apReverseCommand(model, state, controls, plan.runwayLengthM - past);
     // 誘導路の道筋を知っている空港（画面で飛んでいるとき）は、歩くくらいまで落ちたら
     // ターミナルの前まで地上走行する。知らないとき（検証ツールの空港）は以前どおり止まる。
     if (plan.taxi && state.groundSpeed < AP_TAXI_START_MPS) {
