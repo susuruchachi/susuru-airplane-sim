@@ -444,6 +444,12 @@ function apUpdateTerrainFloor(state, ap, env, dt, distToGoM, spd, wantHeadingDeg
 // 高度が取れるまで傾けない（そのあと段階的に深くしていく）。
 // 進入・引き起こしはこの制限を掛けない——あちらは滑走路の中心線に乗せるための
 // 浅いバンク（8°）で、低いところで効かなくなると逆に降りられなくなる。
+// 離陸のあと、滑走路の向きのまま登る高さ（目標高度の何割か・下限・上限）と、
+// そこから何倍の高さまでに旋回の上限を戻すか（nav の説明）
+const AP_TAKEOFF_TURN_FRAC = 0.4;
+const AP_TAKEOFF_TURN_MIN_M = 450;
+const AP_TAKEOFF_TURN_MAX_M = 1500;
+const AP_TAKEOFF_TURN_RAMP = 1.6;
 const AP_BANK_AGL_LO = 60;   // これ以下の対地高度では傾けない(m)
 const AP_BANK_AGL_HI = 300;  // ここまで上がれば上限いっぱいまで使う(m)
 function apBankAglFactor(state) {
@@ -468,6 +474,24 @@ function apBankAglFactor(state) {
 // TAWSの引き起こし操作が「バンクを戻して真っ直ぐ引き起こす」のと同じ理由で、
 // 越えるのに要る昇降率が、出せる上昇率に対してどれだけ切迫しているかでバンクを絞る。
 const AP_BANK_CLIMB_RATIO_ZERO = 0.5; // 要る昇降率が出せる上限のこの割合に達したら水平まで戻す
+// --- 指示より速く沈んでいるときは傾きを戻す -----------------------------------------
+//
+// 深く傾けるほど揚力の上向きの成分が減り（85°で cos=0.09）、姿勢の輪が追いつかない
+// 機体はそのまま沈む。沈みはじめても傾きを保ったままだと、上向きの成分が戻らない。
+// 実測でサンダーバード1号が、対地4900mで85°のまま向きを変え続けるうちに
+// 機首-9°・毎秒-328mまで沈み、40秒後に地面に突っ込んだ。
+// 地面接近警報の回復操作と同じく、指示した昇降率より速く沈んでいるぶんだけ翼を戻す。
+// 指示どおりに降りている（降下・進入）ぶんには効かない。
+const AP_BANK_SINK_FROM_MPS = 15;   // 指示よりこれだけ速く沈んだら戻しはじめ
+const AP_BANK_SINK_SPAN_MPS = 45;   // さらにこれだけ速ければ AP_BANK_SINK_MIN まで
+const AP_BANK_SINK_MIN = 0.25;
+function apBankSinkFactor(state, ap) {
+  const cmd = ap && Number.isFinite(ap.vsCmd) ? ap.vsCmd : 0;
+  const excess = cmd - state.verticalSpeed;
+  return apClamp(1 - (excess - AP_BANK_SINK_FROM_MPS) / AP_BANK_SINK_SPAN_MPS * (1 - AP_BANK_SINK_MIN),
+    AP_BANK_SINK_MIN, 1);
+}
+
 function apBankClimbFactor(state, vsNeededMps, spd) {
   if (!(vsNeededMps > 0)) return 1;
   const up = Math.max(apVsLimits(state, spd).up, 0.1);
@@ -1603,7 +1627,11 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     const hold = apClamp(apWrap180(ap.takeoffHeadingDeg - state.headingDeg) * AP_STEER_KP, -1, 1);
     controls.yaw = hold * (1 - wing) + apRudderForCoordination(state) * wing;
 
-    controls.throttle = 1;
+    // 前へ進む出力は、加速が重さの AP_VTOL_TRANS_ACCEL_G 倍に収まるところまで。
+    // 全開にしていたので、推力が重さの325倍あるサンダーバード1号は切り替えた0.75秒で
+    // 1271ktに達し、翼が支えを引き受ける前に「速すぎるので渡す」抜け道に入って
+    // 垂直エンジンを対地60mで一度に切り、機首が少し下がったまま7000ktで地面に突っ込んだ。
+    controls.throttle = Math.min(1, AP_VTOL_TRANS_ACCEL_G * apTaxiThrottlePerWeight(model));
     // 高さは**そのときの高度を目標にした輪で**保つ。
     // 「昇降率3m/sぶんの姿勢」を開ループで指示していたので、垂直エンジンを
     // 抜きはじめて沈んでも、指示ピッチは+1°のまま動かなかった——迎角が足りず
@@ -1703,12 +1731,32 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   // ---- 進入より前の共通部分（横は目的地へ向ける） -----------------------------
   const nav = () => {
     // 越えられない山があれば、目的地の方位から振ってよける（apTerrainDodgeDeg）。
-    const want = (bearingToGo === undefined ? state.headingDeg : bearingToGo)
+    let want = (bearingToGo === undefined ? state.headingDeg : bearingToGo)
       + terrain.dodgeDeg;
+    // **離陸したら、高さが取れるまで滑走路の向きのまま登る。** 対地300mで旋回の上限が
+    // いっぱいになっていたので、上昇の速い機体は浮いた直後に目的地へ倒し込んでいた——
+    // 実測でサンダーバード1号が浮いて3秒後（対地300m・8000kt）にバンク84°まで入り、
+    // 「自動で離陸した瞬間に自分から進路を曲げる」に見えていた。
+    // 目標高度の4割（450〜1500m）までは滑走路の延長線に沿い、そこから1.6倍の高さまでに
+    // 旋回の上限を少しずつ戻す。山をよけるとき（dodgeDeg）はこれより優先する。
+    let turnFactor = 1;
+    // 上昇の段だけでなく巡航にも掛ける。速すぎる機体は、運動エネルギーだけで目標高度に
+    // 届く見込みが立つと対地400mでもう巡航の段へ移り、そこで倒し込んでいた。
+    if ((ap.phase === 'climb' || ap.phase === 'cruise') && ap.takeoffHeadingDeg !== undefined
+      && !terrain.dodgeDeg && !ap.takeoffTurnDone) {
+      const groundElev = state.altitudeM - state.altitudeAglM;
+      const turnH = apClamp(AP_TAKEOFF_TURN_FRAC * (ap.targetAltitudeM - groundElev),
+        AP_TAKEOFF_TURN_MIN_M, AP_TAKEOFF_TURN_MAX_M);
+      turnFactor = apClamp((state.altitudeAglM - turnH) / (turnH * (AP_TAKEOFF_TURN_RAMP - 1)), 0, 1);
+      if (turnFactor <= 0) want = ap.takeoffHeadingDeg;
+      // 一度上がりきったら、あとで沈んでも（山越えなどで）まっすぐに戻さない
+      if (turnFactor >= 1) ap.takeoffTurnDone = true;
+    }
     ap.targetHeadingDeg = (want + 360) % 360;
     // 対地高度が低いうちは浅く（apBankAglFactor）、地形を越えるのに昇降率が
     // 要るときも浅く（apBankClimbFactor）——登るほうを旋回より優先する。
-    const bankLim = spd.bankMax * apBankAglFactor(state) * apBankClimbFactor(state, terrain.vsNeed, spd);
+    const bankLim = spd.bankMax * apBankAglFactor(state) * apBankClimbFactor(state, terrain.vsNeed, spd)
+      * Math.max(turnFactor, 0.02) * apBankSinkFactor(state, ap);
     controls.roll = apAileronForTrack(state, want, bankLim, spd);
     controls.yaw = apRudderForCoordination(state);
   };
@@ -1745,7 +1793,12 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 1秒少々で加速）。沈み方に応じて滑らかに戻す。
     const sinkUrgency = apClamp(-state.verticalSpeed / AP_CRUISE_SINK_URGENCY_MPS, 0, 1);
     const overspeedCut = overCruise > 0 ? apClamp(1 - overCruise * 0.1, 0, 1) : 1;
-    controls.throttle = Math.max(overspeedCut, sinkUrgency);
+    // さらに**推力は重さの AP_CLIMB_THRUST_MAX_W 倍まで**。上の二つはどちらも「速すぎたら
+    // 絞る」後追いなので、推力が重さの325倍あるサンダーバード1号では、上限を下回った
+    // 1フレームの全開だけで秒速50m以上伸びる。垂直離陸から上昇の段に渡った474ktが
+    // 1.5秒で3018ktになり、機首を下げきれないまま高度100km超まで上がっていった。
+    // 推力重量比がこれより小さいふつうの機体には効かない。
+    controls.throttle = Math.min(Math.max(overspeedCut, sinkUrgency), apAirThrottleCap(model));
     // 山に追われているあいだは姿勢の頭打ちも上げる。上昇の姿勢は「上昇速度を
     // 保つところまで」で自分から止まるので、上限を上げても速度は割らない
     // （出せない機体は、上げたところで速度が落ちて勝手に戻る）。
@@ -1789,7 +1842,15 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 地形の床は、送り返される余裕のぶんだけ上で渡す。
     const handOver = Math.max(ap.targetAltitudeM - levelAhead,
       floorM + AP_TERRAIN_CLIMB_BACK_M);
-    if (state.altitudeM > handOver) { say('cruise', '巡航'); return; }
+    // **離陸してまっすぐ登っているあいだは、目標の手前60mまで巡航へ渡さない。**
+    // 上昇の速い機体は levelAhead が何kmにもなり（サンダーバード1号は毎秒249mで2.5km）、
+    // 対地400mで巡航へ渡っていた。巡航は高度のずれで昇降率を決めるので、渡った直後に
+    // 出力の変化で機首が下がっても戻しきれず、対地176mまで沈んだ。上昇の段は
+    // 速度を姿勢で使うので、速すぎる機体はそのまま機首を上げて高さに変える。
+    const straightOut = ap.takeoffHeadingDeg !== undefined && !ap.takeoffTurnDone;
+    if (state.altitudeM > (straightOut ? Math.max(handOver, ap.targetAltitudeM - 60) : handOver)) {
+      say('cruise', '巡航'); return;
+    }
 
     // 上昇を切り上げる条件は「目標に届いた」だけでは足りない。**届かない目標を
     // 設定されることがある**——高度のスライダーは12000mまで動くが、練習機の
@@ -1855,7 +1916,9 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 入口のまわりで深く傾けると沈むので、そこで全開にしてしまい、推力重量比325の
     // TB1が6,000ktまで加速して入口のまわりを何十kmもの輪で回り続けた。
     if (ap.entrySpeedLimitMps > 0 && state.airspeed > cruiseV * 1.05) sinkUrgency = 0;
-    controls.throttle = Math.max(apThrottleForSpeed(state, controls, cruiseV, dt), sinkUrgency);
+    // 推力の上限は上昇の段と同じ（apAirThrottleCap）
+    controls.throttle = Math.min(Math.max(apThrottleForSpeed(state, controls, cruiseV, dt), sinkUrgency),
+      apAirThrottleCap(model));
     // 入口に向けて落としきれないぶんはスポイラーで（降下と同じ）
     if (cruiseV < spd.cruise && !terrainPushing) {
       controls.spoiler = apSpoilerCommand(model, controls, state, cruiseV, 0);
@@ -1900,7 +1963,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     ap.targetSpeedMps = Math.min(ap.descentSpeedCapMps, vAllowed);
     // 入口を回っているあいだは、旋回半径を見積もった速さまで落とす
     if (ap.entrySpeedLimitMps > 0) ap.targetSpeedMps = Math.min(ap.targetSpeedMps, ap.entrySpeedLimitMps);
-    controls.throttle = apThrottleForSpeed(state, controls, ap.targetSpeedMps, dt);
+    controls.throttle = Math.min(apThrottleForSpeed(state, controls, ap.targetSpeedMps, dt),
+      apAirThrottleCap(model));
     // 最終進入開始点の高度へ、一定の勾配で降りる
     const wantAlt = overTerrain(
       Math.min(plan.fafAltM + distFaf * AP_DESCENT_SLOPE, ap.targetAltitudeM));
@@ -2549,6 +2613,14 @@ function apTaxiThrottlePerWeight(model) {
   return model._taxiPerW;
 }
 
+const AP_CLIMB_THRUST_MAX_W = 3;    // 上昇・巡航・降下で使う推力の上限（重さに対して）
+const AP_VTOL_TRANS_ACCEL_G = 0.35;  // 垂直離陸の前進切替で許す加速（重さに対する推力の割合）
+// 上昇・巡航・降下で使う出力レバーの上限（推力が重さの AP_CLIMB_THRUST_MAX_W 倍になる量）。
+// 推力重量比がそれより小さい機体では1（上限なし）。
+function apAirThrottleCap(model) {
+  return Math.min(1, AP_CLIMB_THRUST_MAX_W * apTaxiThrottlePerWeight(model));
+}
+
 function apStartTaxi(plan, state, ap) {
   const t = plan.taxi;
   const f = plan.forward;
@@ -2838,6 +2910,7 @@ function startFullAutopilot() {
   ap.full = true;
   ap.altHold = false;
   ap.takeoffHeadingDeg = f.state.headingDeg;
+  ap.takeoffTurnDone = !f.state.onGround; // 飛んでいる途中で入れたときは、まっすぐ登る段は無い
   const vtolTakeoff = ap.vtolTakeoff && f.aircraft.model.hasVtol;
   ap.phase = f.state.onGround ? (vtolTakeoff ? 'vtol_takeoff' : 'takeoff') : 'cruise';
   ap.rotating = false;

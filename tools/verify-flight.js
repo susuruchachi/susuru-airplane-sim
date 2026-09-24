@@ -2771,8 +2771,14 @@ function autopilotFlight(opts) {
     + ` 沈み(-15m/s):${(tSinking * 100).toFixed(0)}%`);
   check(tClimbing < 0.3, '順調に登っているあいだは、速度超過なら出力を絞ったまま',
     (tClimbing * 100).toFixed(0) + '%');
-  check(tSinking > 0.5, '沈み始めたら、速度超過中でも出力を戻す',
-    (tSinking * 100).toFixed(0) + '%');
+  // 出力レバーの量ではなく推力で見る。上昇・巡航・降下では推力を重さの3倍までに
+  // 抑えている（apAirThrottleCap。推力重量比325のTB1が、全開1フレームで秒速50m以上
+  // 伸びて高度100km超まで上がっていったため）ので、推力重量比20.7のこの機体では
+  // レバーは14%あたりが上限になる。戻すのはその上限いっぱい、推力で重さ以上。
+  const sinkTW = tSinking / ctx.apTaxiThrottlePerWeight(m2);
+  const capLever = ctx.apAirThrottleCap(m2);
+  check(tSinking >= capLever * 0.99 && sinkTW >= 1, '沈み始めたら、速度超過中でも出力を戻す',
+    `${(tSinking * 100).toFixed(0)}%（上限${(capLever * 100).toFixed(0)}%）・推力 重さの${sinkTW.toFixed(1)}倍`);
 
   // 昇降率0付近で出力が0%⇔100%を往復しない（しきい値の二値判定だと往復する——
   // 実測でこの往復が原因で速度超過カットが平均半分しか効かず、かえって加速し続けた）
