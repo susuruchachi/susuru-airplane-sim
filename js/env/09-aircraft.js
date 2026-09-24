@@ -848,6 +848,17 @@ function assignGearRoles(contacts) {
     sorted[0].steer = true;
     for (const c of sorted.slice(1)) c.brake = true;
   }
+
+  // **操向輪が主脚より後ろにある機体（尾輪式）は、切る向きを逆にする。**
+  // 車輪を同じ向きに切っても、前にある車輪は機首を、後ろにある車輪は尻を
+  // その向きへ押すので、機体の回る向きが逆になる。実機の尾輪もラダーと逆向きに
+  // 連動している。これが無かったので、TB1（操向輪が主脚の14.8m後ろ）と
+  // 三式戦闘機（10.8m後ろ）は、右ラダーで左へ曲がった（実測、7m/sで1.5秒：
+  // TB1 -12.2°・三式 -5.6°。前輪式の機体はどれも右へ）。
+  const mainsNow = contacts.filter((c) => c.brake);
+  const mainZ = mainsNow.length
+    ? mainsNow.reduce((a, c) => a + c.position.z, 0) / mainsNow.length : 0;
+  for (const c of contacts) c.steerSign = (c.steer && c.position.z > mainZ) ? -1 : 1;
 }
 
 // 脚が無い機体のための接地点（機首・左右）。境界から3点を作って三脚にする。

@@ -497,6 +497,9 @@ const AP_PITCH_VS_KD = 2;
 const AP_FLARE_PITCH_MAX = 10;  // 引き起こしで許す機首上げの上限(°)
 // 着陸滑走で跳ねて浮いたときに狙う機首上げ(°)。0にすると前輪から突っ込む
 const AP_ROLLOUT_PITCH_DEG = 5;
+const AP_TAIL_BRAKE_MARGIN_DEG = 3;  // 尾輪式：駐機姿勢からこれより下がったらブレーキを緩めはじめる(°)
+const AP_DECRAB_AGL_M = 4;         // この高さより下で、機首を滑走路の向きに合わせる
+const AP_FLARE_CROSS_KP = 0.15;    // 引き起こし中、中心線からのずれ1mあたりの寄せ角(°)
 const AP_FLAP_TRIM_PIN = 0.9;
 const AP_FLAP_BACK_RATE = 0.05; // 戻す／また下ろす速さ（毎秒）
 const AP_FLAP_BACK_MIN = 0.3;   // これ以上は戻さない
@@ -664,7 +667,14 @@ function apElevatorForPitch(state, controls, wantPitchDeg, dt, spd, ap) {
   // 動かせなくなり、「トリムが機首上げ一杯 → 上がる → 揺れる → 戻せない」で
   // 抜け出せなくなる（実際そうなった）。深くするのは静かなときだけ、
   // 中立へ戻すのはいつでも。
-  if (dt && Math.abs(cmd) < 0.9 && !state.onGround) {
+  // **舵を振り切っていても、姿勢が指示から離れていく向きに動いているなら積む**。
+  // 振り切っているあいだは積まないようにしていたが、舵だけでは止めきれない機首上げ
+  // （Boeing 747の引き起こし直後）では、振り切ったままトリムも固まり、そのまま
+  // ピッチ80°まで上がって失速した（実測、横風8m/sの離陸。無風では舵が一瞬
+  // 振り切りから外れてトリムが取れていたので、たまたま助かっていた）。
+  const errDeg = want - state.pitchDeg;
+  const diverging = errDeg * state.angularVelocity.x < 0 && Math.abs(errDeg) > 3;
+  if (dt && (Math.abs(cmd) < 0.9 || diverging) && !state.onGround) {
     const now = controls.trim || 0;
     const delta = cmd * AP_TRIM_RATE * dt;
     const backToNeutral = delta * now < 0;
@@ -892,8 +902,13 @@ function apThrottleForSpeed(state, controls, targetMps, dt) {
 // 自分で自分と綱引きしているだけ）。
 function apSpoilerCommand(model, controls, state, targetSpeedMps, aboveM) {
   if (!model.hasSpoiler) return 0;
-  const fast = apClamp((state.airspeed / Math.max(targetSpeedMps, 1) - 1)
+  let fast = apClamp((state.airspeed / Math.max(targetSpeedMps, 1) - 1)
     / AP_SPOILER_OVERSPEED, 0, 1);
+  // **経路より下にいるときは、速いというだけでは立てない**（下にいるほど弱める）。
+  // 揚力を捨てれば沈むだけで、速度より先に高さが足りなくなる——実測でTB1が進入を
+  // 474kt（進入速度362kt）で始め、速すぎるぶんスポイラーを立てたまま経路の下へ沈み、
+  // 滑走路の3.9km手前で対地2mを這っていた。
+  if (aboveM < 0) fast *= apClamp(1 + aboveM / AP_SPOILER_PATH_M, 0, 1);
   const high = apClamp((aboveM || 0) / AP_SPOILER_PATH_M, 0, 1);
   const idle = apClamp(1 - controls.throttle / AP_SPOILER_THR_GATE, 0, 1);
   return Math.max(fast, high) * idle;
@@ -1401,6 +1416,53 @@ function apAlignedForFinal(plan, state) {
   return Math.abs(apWrap180(plan.heading - state.headingDeg)) <= AP_ENTRY_ALIGN_DEG;
 }
 
+// --- 地上で中心線を保つ（離陸滑走・着陸後の滑走） ------------------------------------
+//
+// 「自動の離着陸のとき、風に煽られて左右にブレるのを、ラダーで抑えて」。
+// 地上の方向は「方位のずれ×0.05」だけで舵を当てていたので、横風で機首が風上へ振られて
+// から遅れて当てることになり、しかも中心線へ戻す力も、振れを止める減衰も無かった。
+// 実測（横風8m/s±3）：Boeing 747が離陸滑走で機首を18°風上へ取られ、中心線から70m
+// 流れたまま浮いた。Concordeは211m、練習機は無風に近くても40m流れた。
+//   ・目標の方位を、中心線からのずれで少しだけ中心線側へ寄せる（最大8°）
+//   ・方位のずれへの舵を強くする（1°で0.12）
+//   ・機首の振れる速さで止める（減衰）
+// 前輪の操向は速くなると効かなくなり（40m/sで0）、そこから先はラダーの空力だけで
+// 保つことになるので、振れを早めに止めておくことが効く。
+const AP_GROUND_HDG_KP = 0.12;      // 方位のずれ1°あたりの舵
+const AP_GROUND_RATE_KD = 0.08;     // 振れる速さ1°/sあたりの舵
+const AP_GROUND_CROSS_KP = 0.25;    // 中心線からのずれ1mあたり、目標の方位を寄せる角(°)
+const AP_GROUND_CROSS_MAX_DEG = 8;
+function apGroundSteer(state, ap, courseDeg, crossM, dt) {
+  const prev = ap.gndPrevHdg === undefined ? state.headingDeg : ap.gndPrevHdg;
+  ap.gndPrevHdg = state.headingDeg;
+  const rate = dt > 0 ? apWrap180(state.headingDeg - prev) / dt : 0;
+  const want = courseDeg + apClamp(-crossM * AP_GROUND_CROSS_KP,
+    -AP_GROUND_CROSS_MAX_DEG, AP_GROUND_CROSS_MAX_DEG);
+  return apClamp(apWrap180(want - state.headingDeg) * AP_GROUND_HDG_KP
+    - rate * AP_GROUND_RATE_KD, -1, 1);
+}
+// 滑走路の中心線からの横ずれ（右が正）。origin を通って course の向きの線から測る。
+function apCrossFromLine(state, originX, originZ, courseDeg) {
+  const r = apRight(courseDeg);
+  return (state.position.x - originX) * r.x + (state.position.z - originZ) * r.z;
+}
+
+// 尾輪式（操向輪が主脚より後ろ）か。そうなら、主脚と尾輪がどちらも接地する姿勢（°）も返す。
+function apTailwheelRestPitch(model) {
+  if (model._tailRest !== undefined) return model._tailRest;
+  const cs = model.contacts || [];
+  const tail = cs.find((c) => c.steer && c.steerSign < 0);
+  const mains = cs.filter((c) => c.brake);
+  if (!tail || !mains.length) { model._tailRest = null; return null; }
+  const my = mains.reduce((a, c) => a + c.position.y, 0) / mains.length;
+  const mz = mains.reduce((a, c) => a + c.position.z, 0) / mains.length;
+  // 機首上げθで y cosθ − z sinθ が等しくなる角度
+  const dz = mz - tail.position.z;
+  model._tailRest = Math.abs(dz) < 1e-6 ? 0
+    : Math.atan((my - tail.position.y) / dz) * 180 / Math.PI;
+  return model._tailRest;
+}
+
 function apStepFull(model, state, controls, ap, spd, dt, env) {
   const plan = ap.plan;
   const say = (phase, text) => {
@@ -1603,10 +1665,21 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
       : apClamp(1 - over * 0.1, 0, 1);
     controls.brake = 0;
     controls.gearDown = true;
-    // 前輪で滑走路の方位を保つ
-    const err = apWrap180(ap.takeoffHeadingDeg - state.headingDeg);
-    controls.yaw = apClamp(err * AP_STEER_KP, -1, 1);
-    controls.roll = apAileronForBank(state, 0, spd);
+    // 滑走路の中心線を保つ（apGroundSteer）。中心線は、離陸を始めた位置を通る
+    // 離陸方位の線。浮いたあとは、ラダーは横滑りを消すほうへ戻し、補助翼で
+    // 滑走路の延長線を追う（翼を水平に保つだけだと、横風でそのまま流される）。
+    if (ap.takeoffOrigin === undefined) {
+      ap.takeoffOrigin = { x: state.position.x, z: state.position.z };
+    }
+    const toCross = apCrossFromLine(state, ap.takeoffOrigin.x, ap.takeoffOrigin.z, ap.takeoffHeadingDeg);
+    if (state.onGround) {
+      controls.yaw = apGroundSteer(state, ap, ap.takeoffHeadingDeg, toCross, dt);
+      controls.roll = apAileronForBank(state, 0, spd);
+    } else {
+      controls.yaw = apRudderForCoordination(state);
+      controls.roll = apAileronForTrack(state, ap.takeoffHeadingDeg
+        + apClamp(-toCross * 0.1, -15, 15), 10, spd);
+    }
     // 引き起こしを始めたら、そのあとは舵を放さない。
     // **前向きの対気速度は、機首が上がるとそれだけで減る**——引き起こし中に
     // 「引き起こす速度に足りない」と見なして舵を中立へ戻してしまい、上がりだした
@@ -2095,7 +2168,12 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 接地の直前だけ、横滑りを消すより滑走路と機首を合わせるほうを優先する。
     // 斜めを向いたまま降りると脚をねじるが、早くから機首を合わせてしまうと
     // 今度は横風でそのぶん流されるので、引き起こしにかかる高さで切り替える。
-    controls.yaw = state.altitudeAglM < apFlareHeight(model) * 2
+    //
+    // **機首を合わせる（クラブを解く）のは接地の直前だけ**（AP_DECRAB_AGL_M）。
+    // 引き起こし高さの2倍（対地12〜40m）から合わせていたので、そこから接地まで
+    // 十数秒、機首は滑走路を向いたまま横風に流されっぱなしになり、横風8m/sで
+    // 三式戦闘機とBoeing 747が中心線から53m・52m横で接地していた。
+    controls.yaw = state.altitudeAglM < AP_DECRAB_AGL_M
       ? apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP, -1, 1)
       : apRudderForCoordination(state);
 
@@ -2306,9 +2384,15 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
 
   // ---- 引き起こし -----------------------------------------------------------
   if (ap.phase === 'flare') {
-    const corr = apClamp(-apTrackPosition(plan, state.position.x, state.position.z).cross * 0.06, -12, 12);
-    controls.roll = apAileronForTrack(state, plan.heading + corr, 8, spd);
-    controls.yaw = apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP, -1, 1);
+    // 引き起こしの間も、接地の直前（AP_DECRAB_AGL_M）までは風上へ機首を向けたまま
+    // （クラブ）で航跡を中心線に保ち、最後にラダーで機首を滑走路へ合わせる。
+    // 中心線への寄せも最終進入より強くする（残りが短いので、ずれを持ち越さない）。
+    const corr = apClamp(-apTrackPosition(plan, state.position.x, state.position.z).cross
+      * AP_FLARE_CROSS_KP, -15, 15);
+    controls.roll = apAileronForTrack(state, plan.heading + corr, 10, spd);
+    controls.yaw = state.altitudeAglM < AP_DECRAB_AGL_M
+      ? apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP * 2, -1, 1)
+      : apRudderForCoordination(state);
     controls.throttle = Math.max(controls.throttle - dt * 0.8, 0);
 
     // 沈下率は残りの高さに比例させる。一定の沈下率にすると、速い機体ほど
@@ -2344,7 +2428,9 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // その役目をするので、フラップはそのままでいい。
     controls.flap = model.hasSpoiler ? 1 : 0;
     controls.roll = apAileronForBank(state, 0, spd);
-    controls.yaw = apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP, -1, 1);
+    // 中心線を保つ（離陸滑走と同じ apGroundSteer）
+    controls.yaw = apGroundSteer(state, ap, plan.heading,
+      apTrackPosition(plan, state.position.x, state.position.z).cross, dt);
     // 跳ねて浮いたら、ブレーキを離してもう一度接地の姿勢へ。
     // 浮いている間に舵を中立へ落とすと、前輪から突っ込むことになるので、
     // 機首は少しだけ上げたところ（AP_ROLLOUT_PITCH_DEG）を狙う。
@@ -2377,6 +2463,16 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
       ? apElevatorForPitch(state, controls, AP_ROLLOUT_PITCH_DEG * noseUp, dt, spd, ap)
       : 0;
     controls.brake = 1;
+    // **尾輪式は、ブレーキで前にのめらないようにする**。主脚が重心より前にあるので、
+    // 速いうちにブレーキを一杯に踏むと主脚を支点に前へ回る——実測でTB1が390ktで
+    // 踏んだ2秒後にピッチ-82°まで倒れて裏返っていた（接地のたびに出ていた12〜30Gの
+    // 正体）。昇降舵で尾を押さえ（主脚と尾輪が両方接地する姿勢を狙う）、機首がその
+    // 姿勢より下がりはじめたらブレーキを緩める。実機の尾輪式も同じ踏み方をする。
+    const rest = apTailwheelRestPitch(model);
+    if (rest !== null) {
+      controls.pitch = apElevatorForPitch(state, controls, rest, dt, spd, ap);
+      controls.brake = apClamp(1 - (rest - AP_TAIL_BRAKE_MARGIN_DEG - state.pitchDeg) / 2, 0, 1);
+    }
     // 接地したらスポイラーを全開にする（実機の「揚力を捨てる」操作）。
     // 車輪のブレーキは車輪に掛かっている重さのぶんしか効かないので、
     // 翼が揚力を出したままだと踏んでも減速しない。逆噴射は車輪の効きとは

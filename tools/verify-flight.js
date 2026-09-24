@@ -3908,5 +3908,65 @@ function autopilotFlight(opts) {
   }
 }
 
+// (15) 尾輪式でもラダーの向きに曲がること、横風の離陸滑走で中心線を外れないこと。
+//
+// 「TB1みたいに、ノーズコーンのほうが後ろにある機体が、滑走時に左右移動が反転しちゃう」。
+// 操向輪を主脚の前と同じ向きに切っていたので、主脚より後ろに操向輪がある機体（TB1・
+// 三式戦闘機）は右ラダーで左へ曲がった。
+// 「自動の離着陸のとき、風に煽られて左右にブレるのを、ラダーで抑えて」。
+// 地上の方向を「方位のずれ×0.05」だけで押さえていたので、横風8m/sで練習機が36m、
+// Concordeが211m流れた。
+{
+  const turnAfter = (cfg) => {
+    const m = buildAircraftModel(cfg);
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(m, st, 0, 0, 90, flatGround);
+    settleAircraftOnGround(m, st, flatGround);
+    c.parkingBrake = false;
+    const f = new THREE.Vector3(0, 0, -1).applyQuaternion(st.quaternion); f.y = 0; f.normalize();
+    st.velocity.copy(f.multiplyScalar(7));
+    const h0 = st.headingDeg;
+    for (let t = 0; t < 1.5; t += 1 / 60) { c.throttle = 0; c.yaw = 1; advanceFlight(m, st, c, noWind, flatGround, 1 / 60); }
+    return apWrap180(st.headingDeg - h0);
+  };
+  const nose = defaultAircraftConfig();
+  const tail = defaultAircraftConfig();
+  // 尾輪式にする：主脚を重心より前へ出し、中心線上の1輪を尾へ移す
+  for (const p of tail.parts) {
+    if (p.type !== 'landing_gear') continue;
+    if (Math.abs(p.position.x) < 0.1) p.position.z = 3.0;
+    else p.position.z = -0.6;
+  }
+  const dn = turnAfter(nose), dt2 = turnAfter(tail);
+  note('右ラダーを1.5秒（7m/s）', `前輪式 ${dn.toFixed(1)}° / 尾輪式 ${dt2.toFixed(1)}°`);
+  check(dn > 1, '前輪式：右ラダーで右へ曲がる', dn.toFixed(1) + '°');
+  check(dt2 > 1, '尾輪式：右ラダーで右へ曲がる（操向輪が後ろでも逆にならない）', dt2.toFixed(1) + '°');
+
+  // 横風8m/s（±3m/sで揺らす）の中で、練習機を全自動で離陸させる
+  const m = buildAircraftModel(defaultAircraftConfig());
+  const st = createFlightState(), c = createFlightControls();
+  placeAircraftOnGround(m, st, 0, 0, 90, flatGround);
+  settleAircraftOnGround(m, st, flatGround);
+  const ap = createAutopilotState();
+  ap.full = true; ap.targetAltitudeM = 1500; ap.destAirportId = 'DST';
+  ap.phase = 'takeoff'; ap.takeoffHeadingDeg = 90;
+  ap.plan = apMakeApproachPlan({ id: 'DST', x: 60000, z: 0, elevationM: 0 },
+    { runwayLengthM: 3000, headingDeg: 90 }, 0);
+  const wind = new THREE.Vector3();
+  let gndCross = 0, airCross = 0;
+  for (let t = 0; t < 200; t += 1 / 60) {
+    wind.set(0, 0, 8 + 3 * Math.sin(t * 2 * Math.PI / 7));
+    stepAutopilot(m, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+    advanceFlight(m, st, c, wind, flatGround, 1 / 60);
+    if (ap.phase === 'takeoff' || (ap.phase === 'climb' && st.altitudeAglM < 100)) {
+      if (st.onGround) gndCross = Math.max(gndCross, Math.abs(st.position.z));
+      else airCross = Math.max(airCross, Math.abs(st.position.z));
+    }
+    if (ap.phase !== 'takeoff' && st.altitudeAglM > 100) break;
+  }
+  note('横風8m/sの離陸（練習機）', `滑走中の横ずれ ${gndCross.toFixed(1)}m / 浮いてから対地100mまで ${airCross.toFixed(1)}m（直す前は36m）`);
+  check(gndCross < 12, '横風の離陸滑走で滑走路の半幅（22m）の内側にいる', gndCross.toFixed(1) + 'm');
+}
+
 console.log(`\n${failures === 0 ? '✅ すべて通過' : `❌ ${failures} 件の失敗`}`);
 process.exit(failures === 0 ? 0 : 1);

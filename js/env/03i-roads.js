@@ -20,6 +20,8 @@ const ROAD_LIFT_M = 1.2;
 // 距離に応じて間引く。
 const ROAD_STEP_NEAR_M = 400;
 const ROAD_STEP_FAR_M = 2000;
+// 向きがこれだけ変わる点は、間引かずに残す（角を斜めに切らないように）
+const ROAD_KEEP_TURN_DEG = 12;
 
 // --- 街灯 -------------------------------------------------------------------
 // 夜に道路が消えると、街と街のあいだが真っ暗になって世界が途切れて見える。
@@ -232,6 +234,14 @@ function buildRoadInstance(road) {
   const src = roadRoutePoints(road);
 
   // カメラからの距離で間引く。近い所は細かく、遠い所は粗く。
+  //
+  // **曲がり角は間引かない。** 距離だけで間引くと角の点が飛ばされ、帯が角を斜めに
+  // 切ってしまう。特に空港の支線は、取り付き点で車寄せへ向かって曲がるので、
+  // その点が飛ぶと帯は車寄せへ斜めに入り、実際の経路（と、その上の街灯）から
+  // 最大289mずれていた（「道路と街灯の位置がずれている、とくに空港の車寄せ」）。
+  // 向きが ROAD_KEEP_TURN_DEG 以上変わる点と、支線の最後の2点（取り付き点と
+  // 車寄せ）は必ず残す。
+  const keepTail = road.airportId ? 2 : 1;
   const base = [src[0]];
   let acc = 0;
   for (let i = 1; i < src.length; i++) {
@@ -241,7 +251,15 @@ function buildRoadInstance(road) {
     const want = d < 12000 ? ROAD_STEP_NEAR_M
       : ROAD_STEP_NEAR_M + (ROAD_STEP_FAR_M - ROAD_STEP_NEAR_M)
         * Math.min(1, (d - 12000) / 30000);
-    if (acc >= want || i === src.length - 1) { base.push(b); acc = 0; }
+    let turn = false;
+    if (i < src.length - 1) {
+      const last = base[base.length - 1], c = src[i + 1];
+      const h1 = Math.atan2(b.x - last.x, b.z - last.z), h2 = Math.atan2(c.x - b.x, c.z - b.z);
+      let dh = Math.abs(h2 - h1) * 180 / Math.PI;
+      if (dh > 180) dh = 360 - dh;
+      turn = dh >= ROAD_KEEP_TURN_DEG;
+    }
+    if (acc >= want || turn || i >= src.length - keepTail) { base.push(b); acc = 0; }
   }
   const nb = base.length;
   if (nb < 2) return;
@@ -337,7 +355,9 @@ function buildRoadInstance(road) {
   mesh.updateMatrix();
   EnvState.roadGroup.add(mesh);
 
-  const lamps = buildRoadLamps(road, src, ox, oy, oz);
+  // 街灯は**帯と同じ折れ線（間引いたあと）の上**に置く。間引く前の経路に置いていたので、
+  // 帯が弦で結んだカーブでは、街灯だけ道の外に立っていた。
+  const lamps = buildRoadLamps(road, base, ox, oy, oz);
   if (lamps) EnvState.roadGroup.add(lamps);
 
   // 作り直しのときは、新しい帯ができてから古い帯を片付ける（一瞬道が消えないように）

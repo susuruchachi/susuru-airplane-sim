@@ -32,6 +32,7 @@ const GEAR_ROLL_FRICTION = 0.025;  // 転がり抵抗
 const GEAR_BRAKE_FRICTION = 0.55;  // ブレーキ全踏み
 const GEAR_SIDE_FRICTION = 0.85;   // 横滑りに耐えるタイヤの摩擦
 const GEAR_STEER_MAX_DEG = 32;
+const GEAR_STEER_HIGHSPEED_DEG = 7;   // 速いときに残す前輪の切れ角
 
 // 世界でいちばん高い地面（実測）。当たり判定の足切り（accumulateHullForces）で、
 // 「絶対にどこにも地面が届かない高さ」として使う。
@@ -716,8 +717,14 @@ function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
   const n = model.contacts.length;
   const rate = gearSpringRates(model);
 
-  const steerRad = THREE.MathUtils.degToRad(GEAR_STEER_MAX_DEG) * controls.yaw
+  // 前輪の切れ角。低速では大きく切れ（ティラー）、速くなると絞る。
+  // **速くても0にはしない**（実機もラダーペダルに連動して±7°ほど残る）。40m/sで0に
+  // していたので、ちょうど横風で機首が振られはじめる速さで地上の操向が無くなり、
+  // ラダーの空力だけでは止めきれなかった——実測でBoeing 747が横風8m/sの離陸滑走で
+  // ラダーを振り切ったまま機首を12°風上へ取られ、中心線から38m流れた。
+  const steerDeg = GEAR_STEER_HIGHSPEED_DEG + (GEAR_STEER_MAX_DEG - GEAR_STEER_HIGHSPEED_DEG)
     * THREE.MathUtils.clamp(1 - state.groundSpeed / 40, 0, 1);
+  const steerRad = THREE.MathUtils.degToRad(steerDeg) * controls.yaw;
 
   for (const c of model.contacts) {
     // 脚を畳んでいたら接地しない（＝胴体着陸になる）
@@ -753,7 +760,8 @@ function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
 
     // 車輪の向き（機体の前方を地面へ落とし、前輪なら舵角ぶん回す）
     const fwd = _gv.fwd.set(0, 0, -1);
-    if (c.steer) fwd.applyAxisAngle(_gv.up, -steerRad);
+    // 尾輪式は逆に切る（assignGearRoles の steerSign）
+    if (c.steer) fwd.applyAxisAngle(_gv.up, -steerRad * (c.steerSign || 1));
     fwd.applyQuaternion(q);
     fwd.y = 0;
     if (fwd.lengthSq() < 1e-9) fwd.set(0, 0, -1); else fwd.normalize();
