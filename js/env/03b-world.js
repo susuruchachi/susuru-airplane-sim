@@ -2046,8 +2046,11 @@ function worldGenerateRoads() {
     // 取り付き点はターミナルの正面（ローカル +Z 方向）なので、滑走路は絶対にまたがない。
     const via = airportLocalToWorld(a, a.terminalLocalX, a.gateLocalZ + ROAD_AIRPORT_APPROACH_M);
     const gate = worldAirportGateAt(a);
-    worldAddRoad('road-' + a.id, c.x, c.z, via.x, via.z, ROAD_SPUR_HALF_WIDTH_M, 'spur',
+    const road = worldAddRoad('road-' + a.id, c.x, c.z, via.x, via.z, ROAD_SPUR_HALF_WIDTH_M, 'spur',
       [via, gate]);
+    // UIで滑走路の向きを変えるとターミナルも回るので、描画側（03i-roads.js）が
+    // 最後の詰めを引き直せるよう、どの空港の支線かを覚えておく
+    if (road) road.airportId = a.id;
   }
 }
 

@@ -482,6 +482,17 @@ function terrainSurfaceHeightAtLod(x, z, seg) {
   return h11 + (h01 - h11) * (1 - tu) + (h10 - h11) * (1 - tv);
 }
 
+// その地点のタイルが **いま目指している** 分割数（refreshTerrainTiles と同じ決め方）。
+// カメラからの距離で決めると、タイルは「中心からの距離−半対角」で決まっているので
+// 一段粗く見積もることがあり、道路がメッシュより浮いたり潜ったりする。
+function terrainLodAt(x, z) {
+  const ref = _terrainLastCheck || EnvState.camera.position;
+  const ix = Math.floor(x / TERRAIN_TILE_SIZE), iz = Math.floor(z / TERRAIN_TILE_SIZE);
+  const cx = (ix + 0.5) * TERRAIN_TILE_SIZE, cz = (iz + 0.5) * TERRAIN_TILE_SIZE;
+  const dist = Math.hypot(ref.x - cx, ref.z - cz);
+  return terrainSegmentsForDistance(Math.max(dist - TERRAIN_TILE_SIZE * 0.71, 0));
+}
+
 // 視点を大きく飛ばしたあとなど、周囲の地形をすぐ作り直したいときに使う
 function terrainRebuildNow() {
   refreshTerrainTiles(true);

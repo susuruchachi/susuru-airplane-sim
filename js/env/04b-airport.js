@@ -126,18 +126,22 @@ function runwayDesignators(headingDeg) {
 // --- 各パーツの生成 ---------------------------------------------------------
 
 // 滑走路まわりの整地エリア。周囲の地面と色を変えて「飛行場の敷地」に見せる
-function buildAirfieldGround(L, W, span, terminalZ) {
+function buildAirfieldGround(L, W, span, terminalZ, terminalX) {
   // 滑走路の並び（span）とターミナル側（terminalZ）の両方が収まる大きさにする。
   // ここが足りないと、平行滑走路やターミナルが草地からはみ出して地形の上に浮く。
   const zMin = -span - W / 2 - 220;
   const zMax = terminalZ + 320;
   const depth = zMax - zMin;
+  // 長さ方向も、ターミナル（と管制塔）が滑走路の端より外にあるときはそこまで広げる。
+  // ターミナルは定義の最大長から位置が決まるので、UIで滑走路を縮めると端から外れる。
+  const xMin = Math.min(-L / 2 - 350, (terminalX === undefined ? 0 : terminalX) - 520);
+  const xMax = L / 2 + 350;
   const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(L + 700, depth),
+    new THREE.PlaneGeometry(xMax - xMin, depth),
     applyDecalOffset(new THREE.MeshLambertMaterial({ color: AIRFIELD_GRASS_COLOR }), OFFSET_AIRFIELD)
   );
   mesh.rotation.x = -Math.PI / 2;
-  mesh.position.set(0, AIRFIELD_Y, (zMin + zMax) / 2);
+  mesh.position.set((xMin + xMax) / 2, AIRFIELD_Y, (zMin + zMax) / 2);
   return mesh;
 }
 
@@ -238,25 +242,53 @@ function buildRunwayNumbers(L, headingDeg, suffix) {
 // エプロンとターミナルの位置は **世界の定義（terminalLocalX / terminalLocalZ）** から取る。
 // 滑走路の長さはUIで変えられるので、そこから割り出すとターミナルが動いてしまい、
 // そこへ向かって引いてある道路とずれる。
+//
+// **誘導路は滑走路の長さに合わせて引く。** 以前はターミナルの真正面（terminalLocalX）
+// から滑走路へ1本だけ出していたが、ターミナルは定義の最大長から決まる位置にあるので、
+// 定義どおりの長さでも滑走路の端より30m外、長さを縮めると何百mも外で分かれていて、
+// 誘導路が滑走路に着いていなかった。
+// いまは実際の空港と同じく、滑走路と平行な誘導路を全長に通し、
+// 両端と中央の3か所で滑走路へ出る。ターミナルへはその平行誘導路から1本入る。
+// 平行滑走路があるときは、出口の3本がそのまま奥の滑走路まで横切る。
+const TAXIWAY_WIDTH_M = 23;
+const TAXIWAY_EXIT_INSET_M = 45;   // 出口を滑走路端からどれだけ内側に置くか
+
+function airportTaxiLayout(L, W, def) {
+  const span = airportRunwayHalfSpan(def);
+  const halfL = L / 2;
+  const runwayEdgeZ = span + W / 2;          // いちばんターミナル側の滑走路の縁
+  const farEdgeZ = -span + W / 2;            // いちばん奥の滑走路の、ターミナル側の縁
+  const apronZ = def.terminalLocalZ - APRON_DEPTH_M / 2 - 20;
+  const apronNearZ = apronZ - APRON_DEPTH_M / 2;
+  const parallelZ = (runwayEdgeZ + apronNearZ) / 2;
+  const apronX = def.terminalLocalX;
+  const exits = [-halfL + TAXIWAY_EXIT_INSET_M, 0, halfL - TAXIWAY_EXIT_INSET_M];
+  const xMin = Math.min(exits[0], apronX), xMax = Math.max(exits[2], apronX);
+  // 誘導路の区間（中心線の両端）。どれも軸に沿った直線。
+  const segments = [{ x0: xMin, z0: parallelZ, x1: xMax, z1: parallelZ, kind: 'parallel' }];
+  for (const x of exits) {
+    segments.push({ x0: x, z0: farEdgeZ - 2, x1: x, z1: parallelZ, kind: 'exit' });
+  }
+  segments.push({ x0: apronX, z0: parallelZ, x1: apronX, z1: apronNearZ + 2, kind: 'apron' });
+  return { span, runwayEdgeZ, farEdgeZ, apronZ, apronNearZ, parallelZ, apronX, exits, segments };
+}
+
 function buildTaxiwayAndApron(L, W, def) {
   const group = new THREE.Group();
-  const span = airportRunwayHalfSpan(def);
-  const taxiX = def.terminalLocalX;    // 誘導路が滑走路から分かれる位置
-  const taxiWidth = 23;
-  const runwayEdgeZ = span + W / 2;    // いちばんターミナル側の滑走路の縁
-  const apronZ = def.terminalLocalZ - APRON_DEPTH_M / 2 - 20;
-  const taxiStart = runwayEdgeZ + 6;
-  const taxiEnd = apronZ - APRON_DEPTH_M / 2;
-  const taxiLen = Math.max(40, taxiEnd - taxiStart);
-  const taxiCenterZ = (taxiStart + taxiEnd) / 2;
+  const lay = airportTaxiLayout(L, W, def);
+  const taxiWidth = TAXIWAY_WIDTH_M;
+  const hw = taxiWidth / 2;
 
-  const taxiMat = applyDecalOffset(new THREE.MeshLambertMaterial({ color: ASPHALT_COLOR }), OFFSET_PAVEMENT);
-
-  // 滑走路が複数あるときは、あいだを横切る誘導路も要る（ターミナルから外側の滑走路へ出る道）
-  const taxiway = new THREE.Mesh(new THREE.PlaneGeometry(taxiWidth, taxiLen + 2 * span), taxiMat);
-  taxiway.rotation.x = -Math.PI / 2;
-  taxiway.position.set(taxiX, TAXIWAY_Y, taxiCenterZ - span);
-  group.add(taxiway);
+  // 舗装：区間ごとに幅23mの帯。角が欠けないよう、両端を半幅ずつ延ばして重ねる
+  const pave = [];
+  for (const sg of lay.segments) {
+    const cx = (sg.x0 + sg.x1) / 2, cz = (sg.z0 + sg.z1) / 2;
+    if (sg.z0 === sg.z1) pushRectXZ(pave, cx, cz, Math.abs(sg.x1 - sg.x0) + taxiWidth, taxiWidth, TAXIWAY_Y);
+    else pushRectXZ(pave, cx, cz, taxiWidth, Math.abs(sg.z1 - sg.z0) + taxiWidth, TAXIWAY_Y);
+  }
+  const paveMesh = meshFromRects(pave, ASPHALT_COLOR);
+  applyDecalOffset(paveMesh.material, OFFSET_PAVEMENT);
+  group.add(paveMesh);
 
   const apronW = Math.max(260, def.runwayCount * 230);
   const apron = new THREE.Mesh(
@@ -264,17 +296,56 @@ function buildTaxiwayAndApron(L, W, def) {
     applyDecalOffset(new THREE.MeshLambertMaterial({ color: CONCRETE_COLOR }), OFFSET_PAVEMENT)
   );
   apron.rotation.x = -Math.PI / 2;
-  apron.position.set(taxiX, TAXIWAY_Y, apronZ);
+  apron.position.set(lay.apronX, TAXIWAY_Y, lay.apronZ);
   group.add(apron);
 
-  // 誘導路の黄色いセンターライン
+  // 誘導路の黄色いセンターライン（滑走路の上には引かない）
+  const onRunway = (z) => z > -lay.span - W / 2 - 1 && z < lay.runwayEdgeZ + 1;
   const p = [];
-  for (let z = -span + runwayEdgeZ - 2 * span; z < taxiEnd; z += 20) {
-    pushRectXZ(p, taxiX, z, 0.9, 12, TAXIWAY_Y + 0.02); // 長さ方向がZなので幅と長さを入れ替えて置く
+  for (const sg of lay.segments) {
+    const len = Math.hypot(sg.x1 - sg.x0, sg.z1 - sg.z0);
+    const horiz = sg.z0 === sg.z1;
+    for (let d = 6; d < len - 6; d += 20) {
+      const t = d / len;
+      const x = sg.x0 + (sg.x1 - sg.x0) * t, z = sg.z0 + (sg.z1 - sg.z0) * t;
+      if (!horiz && onRunway(z)) continue;
+      if (horiz) pushRectXZ(p, x, z, 12, 0.9, TAXIWAY_Y + 0.02);
+      else pushRectXZ(p, x, z, 0.9, 12, TAXIWAY_Y + 0.02); // 長さ方向がZなので幅と長さを入れ替えて置く
+    }
   }
   group.add(meshFromRects(p, TAXI_MARKING_COLOR));
 
-  return { group, taxiX, taxiCenterZ, taxiLen, taxiWidth, apronZ, apronW };
+  // 誘導路灯（青）の位置。縁から2m外に30mおき。滑走路の上・ほかの区間の舗装の上・
+  // エプロンの上に落ちる点は置かない（交差点の真ん中に灯りが立たないように）。
+  const insidePave = (x, z) => {
+    for (const sg of lay.segments) {
+      const x0 = Math.min(sg.x0, sg.x1) - hw, x1 = Math.max(sg.x0, sg.x1) + hw;
+      const z0 = Math.min(sg.z0, sg.z1) - hw, z1 = Math.max(sg.z0, sg.z1) + hw;
+      if (x > x0 && x < x1 && z > z0 && z < z1) return true;
+    }
+    return Math.abs(x - lay.apronX) < apronW / 2 + 1
+      && Math.abs(z - lay.apronZ) < APRON_DEPTH_M / 2 + 1;
+  };
+  const lights = [];
+  for (const sg of lay.segments) {
+    const len = Math.hypot(sg.x1 - sg.x0, sg.z1 - sg.z0);
+    const horiz = sg.z0 === sg.z1;
+    for (let d = 0; d <= len; d += 30) {
+      const t = len > 0 ? d / len : 0;
+      const x = sg.x0 + (sg.x1 - sg.x0) * t, z = sg.z0 + (sg.z1 - sg.z0) * t;
+      for (const side of [-1, 1]) {
+        const lx = horiz ? x : x + side * (hw + 2);
+        const lz = horiz ? z + side * (hw + 2) : z;
+        if (onRunway(lz) || insidePave(lx, lz)) continue;
+        lights.push(lx, lz);
+      }
+    }
+  }
+
+  return {
+    group, taxiX: lay.apronX, taxiWidth, apronZ: lay.apronZ, apronW,
+    layout: lay, lights,
+  };
 }
 
 // エプロンの奥行き
@@ -416,11 +487,8 @@ function buildAirportLights(L, W, taxi, offsets) {
     });
   }
 
-  // 誘導路灯（青）
-  for (let z = W / 2 + 10; z < W / 2 + taxi.taxiLen; z += 30) {
-    add(taxi.taxiX + taxi.taxiWidth / 2 + 2, z, 0x4aa3ff);
-    add(taxi.taxiX - taxi.taxiWidth / 2 - 2, z, 0x4aa3ff);
-  }
+  // 誘導路灯（青）。位置は誘導路の形と一緒に buildTaxiwayAndApron が決める
+  for (let i = 0; i < taxi.lights.length; i += 2) add(taxi.lights[i], taxi.lights[i + 1], 0x4aa3ff);
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
@@ -586,7 +654,7 @@ function populateAirportGroup(entry, st) {
   const offsets = [];
   for (let k = 0; k < n; k++) offsets.push(-span + k * spacing);
 
-  group.add(buildAirfieldGround(L, W, span, def.terminalLocalZ));
+  group.add(buildAirfieldGround(L, W, span, def.terminalLocalZ, def.terminalLocalX));
 
   offsets.forEach((off, k) => {
     const rw = new THREE.Group();
@@ -615,6 +683,9 @@ function populateAirportGroup(entry, st) {
 
   group.rotation.y = THREE.MathUtils.degToRad(90 - st.headingDeg);
   group.visible = st.visible;
+  // 向きが変わっていればターミナルも回っているので、そこへ来る道路を引き直す
+  // （設定の読込・初期化・作り直しのどの経路から来ても揃うよう、ここで呼ぶ）
+  if (typeof rebuildAirportRoads === 'function') rebuildAirportRoads(def.id);
 }
 
 function disposeAirportInstance(id) {
@@ -640,6 +711,7 @@ function applyAirportHeading() {
   const entry = EnvState.builtAirports.get(EnvState.selectedAirportId);
   if (!entry) return;
   entry.group.rotation.y = THREE.MathUtils.degToRad(90 - selectedAirportSettings().headingDeg);
+  if (typeof rebuildAirportRoads === 'function') rebuildAirportRoads(EnvState.selectedAirportId);
 }
 
 // 方位を変えると滑走路の数字（26/08 など）が変わる。
