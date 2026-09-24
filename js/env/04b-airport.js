@@ -7,27 +7,43 @@
 //   ワールドは -Z が北、+X が東。方位θの向きは (sinθ, 0, -cosθ) なので、
 //   +X をその向きに合わせる回転は rotation.y = 90° - θ になる。
 
-// 地面(y=0)の上に、整地エリア→舗装→標識の順で重ねる。
-// 数km先でも描き負けないよう、高さ差は「見た目に響かない範囲で大きめ」に取り、
-// さらに各マテリアルへポリゴンオフセット（デカール用の深度バイアス）をかけている。
-const AIRFIELD_Y = 0.4;
-const TAXIWAY_Y = 0.8;
-const RUNWAY_SURFACE_Y = 1.0;
-const RUNWAY_MARK_Y = 1.4;
+// 地面の上に、整地エリア→舗装→標識の順で重ねる。
+// **高さは全部地面ぴったり（y=0）。** 飛行の物理は地面の高さで接地するので、
+// 以前のように舗装を1.0m・標示を1.4m浮かせると、車輪がそのぶん埋まって見えた。
+// 重なりは深度のほうで解く（02-env-scene.js の applyDepthPull）。
+// 灯火だけは器具の高さぶん上に置く。
+const AIRFIELD_Y = 0;
+const TAXIWAY_Y = 0;
+const RUNWAY_SURFACE_Y = 0;
+const RUNWAY_MARK_Y = 0;
 const LIGHT_Y = 2.2;
 
 // 重ね順（数字が大きいほど手前に描く）
 const OFFSET_AIRFIELD = 1;
 const OFFSET_PAVEMENT = 2;
+const OFFSET_APRON = 3;     // エプロンは、そこへ入ってくる誘導路（色違いの舗装）より上
 const OFFSET_MARKING = 4;
 const OFFSET_NUMBER = 6;
 
+// 重ね順ごとに、深度をカメラまでの距離のどれだけ手前へ引くか。
+// いちばん下の整地エリアでも、粗いLODの地形が空港より上に出るぶん（24分割で最大0.75m、
+// 16分割で最大4.7m。16分割になるのは空港が見える120kmの手前、およそ80kmから）を越える必要がある。
+// 4.7m / 80km ≈ 6e-5 なので 8e-5 から始め、1段ごとに 2e-5 ずつ手前へ（50m先でも最大9mm）。
+const DECAL_PULL_BASE = 6e-5;
+const DECAL_PULL_PER_RANK = 2e-5;
+
+// 地面に重ねる大きな板は、DECAL_CELL_M ほどの升目に割っておく。
+// 1枚の大きな三角形だと、カメラのすぐ近くで奥行きの補間が三角形の大きさに比例してずれ
+// （4km角で約1mm）、地面ぴったりに敷いた板が地形と前後を取り合う。
+const DECAL_CELL_M = 200;
+function decalPlaneGeometry(w, h) {
+  return new THREE.PlaneGeometry(w, h,
+    Math.max(1, Math.ceil(w / DECAL_CELL_M)), Math.max(1, Math.ceil(h / DECAL_CELL_M)));
+}
+
 // 同一平面上に重なる面が深度で喧嘩しないよう、描画順に応じた深度バイアスを与える
 function applyDecalOffset(material, rank) {
-  material.polygonOffset = true;
-  material.polygonOffsetFactor = -rank;
-  material.polygonOffsetUnits = -rank;
-  return material;
+  return applyDepthPull(material, DECAL_PULL_BASE + DECAL_PULL_PER_RANK * rank, rank);
 }
 
 // レンダラーが outputEncoding=sRGB で出力するぶん中間色が明るく持ち上がるので、
@@ -137,7 +153,7 @@ function buildAirfieldGround(L, W, span, terminalZ, terminalX, extraX) {
   const xMin = Math.min(-L / 2 - 350, (terminalX === undefined ? 0 : terminalX) - (extraX || 520));
   const xMax = L / 2 + 350;
   const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(xMax - xMin, depth),
+    decalPlaneGeometry(xMax - xMin, depth),
     applyDecalOffset(new THREE.MeshLambertMaterial({ color: AIRFIELD_GRASS_COLOR }), OFFSET_AIRFIELD)
   );
   mesh.rotation.x = -Math.PI / 2;
@@ -146,7 +162,7 @@ function buildAirfieldGround(L, W, span, terminalZ, terminalX, extraX) {
 }
 
 function buildRunwaySurface(L, W) {
-  const geo = new THREE.PlaneGeometry(L, W);
+  const geo = decalPlaneGeometry(L, W);
   const mat = applyDecalOffset(new THREE.MeshLambertMaterial({ color: ASPHALT_COLOR }), OFFSET_PAVEMENT);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.rotation.x = -Math.PI / 2;
@@ -293,8 +309,8 @@ function buildTaxiwayAndApron(L, W, def) {
 
   const apronW = airportBuildings(def).termW + 80;
   const apron = new THREE.Mesh(
-    new THREE.PlaneGeometry(apronW, APRON_DEPTH_M),
-    applyDecalOffset(new THREE.MeshLambertMaterial({ color: CONCRETE_COLOR }), OFFSET_PAVEMENT)
+    decalPlaneGeometry(apronW, APRON_DEPTH_M),
+    applyDecalOffset(new THREE.MeshLambertMaterial({ color: CONCRETE_COLOR }), OFFSET_APRON)
   );
   apron.rotation.x = -Math.PI / 2;
   apron.position.set(lay.apronX, TAXIWAY_Y, lay.apronZ);
@@ -310,8 +326,8 @@ function buildTaxiwayAndApron(L, W, def) {
       const t = d / len;
       const x = sg.x0 + (sg.x1 - sg.x0) * t, z = sg.z0 + (sg.z1 - sg.z0) * t;
       if (!horiz && onRunway(z)) continue;
-      if (horiz) pushRectXZ(p, x, z, 12, 0.9, TAXIWAY_Y + 0.02);
-      else pushRectXZ(p, x, z, 0.9, 12, TAXIWAY_Y + 0.02); // 長さ方向がZなので幅と長さを入れ替えて置く
+      if (horiz) pushRectXZ(p, x, z, 12, 0.9, TAXIWAY_Y);
+      else pushRectXZ(p, x, z, 0.9, 12, TAXIWAY_Y); // 長さ方向がZなので幅と長さを入れ替えて置く
     }
   }
   group.add(meshFromRects(p, TAXI_MARKING_COLOR));

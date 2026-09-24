@@ -445,10 +445,13 @@ const LANDING_POOL_FADE_FROM_M = 110;   // 対地これより高いと薄れは�
 const LANDING_POOL_FADE_TO_M = 210;     // ここまで上がると地面には届かない
 const LANDING_POOL_OPACITY = 0.85;
 const LANDING_POOL_MAX = 8;             // 板の数の上限（灯りを何十個も付けられるので）
-// 地面から浮かせる高さ。舗装は地形の上 1.0m、標示は 1.4m に敷いてある
-// （04b-airport.js の RUNWAY_SURFACE_Y / RUNWAY_MARK_Y）ので、地形の高さ＋60cm
-// では**滑走路の下に潜って一切見えなかった**。標示より上、灯火(2.2m)より下に置く。
-const LANDING_POOL_LIFT_M = 1.8;
+// 地面から浮かせる高さ。滑走路の舗装・標示は地面ぴったりに敷いてあり、
+// 重なりは深度を手前へ引いて解いている（02-env-scene.js の applyDepthPull）。
+// 照り返しの板も同じやり方で、標示（04b-airport.js の重ね順6）よりさらに手前へ引く。
+// 板は水平の1枚なので、空港の外のでこぼこした地面では少しだけ浮かせて潜りにくくする
+// （加算合成の光なので、30cm浮いていても見た目には分からない）。
+const LANDING_POOL_LIFT_M = 0.3;
+const LANDING_POOL_DEPTH_PULL = 2.4e-4;
 
 let _landingPoolTexture = null;
 function landingPoolTexture() {
@@ -483,15 +486,11 @@ function buildLandingPoolMesh() {
   // テクスチャの v=1（奥）がそのまま前方になる。
   const geo = new THREE.PlaneGeometry(1, 1);
   geo.rotateX(-Math.PI / 2);
-  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+  const mesh = new THREE.Mesh(geo, applyDepthPull(new THREE.MeshBasicMaterial({
     map: landingPoolTexture(), transparent: true, opacity: 0,
     depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
     side: THREE.DoubleSide,
-    // 滑走路の舗装・標示と同じく、手前へ少し引っぱっておく（04b-airport.js）。
-    // このシーンは logarithmicDepthBuffer なので polygonOffset はほぼ効かない。
-    // 実際に重なりを避けているのは LANDING_POOL_LIFT_M の高さのほう。
-    polygonOffset: true, polygonOffsetFactor: -8, polygonOffsetUnits: -8,
-  }));
+  }), LANDING_POOL_DEPTH_PULL, 8));
   mesh.renderOrder = ENV_ORDER.effect;
   mesh.visible = false;
   mesh.frustumCulled = false;

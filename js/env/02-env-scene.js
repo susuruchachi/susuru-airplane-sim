@@ -1,5 +1,50 @@
 // 02-env-scene.js — レンダラー・カメラ・OrbitControls・リサイズ・描画ループ
 
+// 同じ面に重ねて描くもの（滑走路の舗装・標示、着陸灯の照り返し）を、深度だけ手前へ引く。
+//
+// 対数深度バッファでは深度をフラグメントシェーダーが書くので、polygonOffset は効かない。
+// そのため以前は舗装を地面の1.0m上、標示を1.4m上に浮かせて重なりを避けていたが、
+// 飛行の物理は地面の高さで接地するので、車輪が舗装に1〜1.4m埋まって見えていた。
+// いまは全部を地面ぴったりに敷き、深度のほうを手前へ寄せる。寄せ方は polygonOffset と同じく2つの和：
+//   pull     … カメラまでの距離の pull 倍。遠くで粗いLODの地形が平らな空港より上に出るぶん
+//              （最大4.7m）を抑える。50m先では1cm未満
+//   slopePx  … 画面1画素ぶんの深度の変化の slopePx 倍。低い角度で見ると1画素が何mもの奥行きに
+//              またがり、同じ面どうしでも補間の誤差で前後が入れ替わる（200m先を1.1°で見ると
+//              地形が整地エリアを突き抜けた）。画素単位なので、面に立っている物（車輪）が
+//              隠れるのも最大でその画素数ぶんだけ
+//   absM     … 距離によらない数mm。大きな三角形はカメラのすぐ近くで奥行きの補間が
+//              三角形の大きさに比例してずれる（4km角の整地エリアで約1mm）ので、
+//              距離の倍率だけだと足元で地形に負けた
+// 対数深度が使えない環境では、従来どおり polygonOffset が効く。
+function applyDepthPull(material, pull, rank, slopePx, absM) {
+  material.polygonOffset = true;
+  material.polygonOffsetFactor = -rank;
+  material.polygonOffsetUnits = -rank;
+  const P = pull.toExponential(4);
+  const S = (slopePx === undefined ? rank * 0.5 : slopePx).toFixed(3);
+  const A = (absM === undefined ? 0.004 + rank * 0.003 : absM).toFixed(4);
+  // 深度 = log2(1 + w) * logDepthBufFC / 2（three.js の logdepthbuf_fragment と同じ式）。
+  // w をカメラ寄りに縮めてから深度を書き直す
+  material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace('#include <logdepthbuf_fragment>', [
+      '#include <logdepthbuf_fragment>',
+      '#if defined( USE_LOGDEPTHBUF ) && defined( USE_LOGDEPTHBUF_EXT )',
+      '  {',
+      '    float dpD = log2( vFragDepth ) * logDepthBufFC * 0.5;',
+      '    float dpSlope = 0.0;',
+      '  #if __VERSION__ >= 300',
+      '    dpSlope = max( abs( dFdx( dpD ) ), abs( dFdy( dpD ) ) );',
+      '  #endif',
+      `    float dpW = max( ( vFragDepth - 1.0 ) * ( 1.0 - ${P} ) - ${A}, 0.0 );`,
+      `    gl_FragDepthEXT = log2( 1.0 + dpW ) * logDepthBufFC * 0.5 - ${S} * dpSlope;`,
+      '  }',
+      '#endif',
+    ].join('\n'));
+  };
+  material.customProgramCacheKey = () => `depthPull:${P}:${S}:${A}`;
+  return material;
+}
+
 function initEnvScene() {
   const canvas = document.getElementById('envViewport');
   const centerEl = document.getElementById('envCenter');
