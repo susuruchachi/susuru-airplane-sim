@@ -603,6 +603,120 @@ function attachLandingBeams(lights, group) {
     n++;
     l.beam = buildLandingBeamMesh();
     group.add(l.beam);
+    l.cloudSpot = buildLandingCloudSpot();
+    group.add(l.cloudSpot);
+  }
+}
+
+// --- 雲・雲底・海面を照らす ----------------------------------------------------
+//
+// 「雲、雲底とか、海面もしっかり着陸灯で照らされて欲しい」から。
+//   海面・湖面 … 照り返しの板は「地面・海面・湖面のうち高いもの」に置く。以前は地面の高さ
+//                （海では海底）に置いていたので、海の上では水の下に沈み、高さも海底から
+//                測っていたので薄れて消えていた
+//   雲底       … 光が雲底に当たるとき（雲の下から上へ向けたとき・雲の上から見下ろしたとき）は、
+//                照り返しの板を雲底の面に置く。濃さは雲底の濃さに比例
+//   積雲       … 光の軸が積雲の玉に入るところへ、光の当たった明るい玉を置く。
+//                光の筋もそこで止める（雲の向こうへは抜けない）
+//   雲の中     … 機体が積雲の玉の中や雲底の面にいるときは、光の筋を霧の中と同じ濃さにする
+const LANDING_CLOUD_SPOT_OPACITY = 0.55;
+const LANDING_CLOUD_SPOT_MIN_M = 18;     // 光の玉の最小の直径
+const LANDING_CLOUD_REACH_M = 2000;      // これより遠い積雲は調べない（光が届かない）
+const LANDING_DECK_INSIDE_M = 60;        // 雲底の面からこの高さ以内は雲の中とみなす
+const LANDING_CLOUD_AIR = 0.9;           // 雲の中の光の筋の濃さ（霧と同じ扱い）
+
+function buildLandingCloudSpot() {
+  const spot = new THREE.Sprite(new THREE.SpriteMaterial({
+    color: 0xfff6dd, map: navLightGlowTexture(), transparent: true, opacity: 0,
+    depthWrite: false, fog: false, blending: THREE.AdditiveBlending,
+  }));
+  spot.renderOrder = ENV_ORDER.effect;
+  spot.visible = false;
+  spot.frustumCulled = false;
+  return spot;
+}
+
+// 照り返しを置く面の高さ：地面・海面・湖面・川面のうち高いもの
+function landingLightSurfaceY(x, z) {
+  let y = typeof flightGroundHeightAt === 'function' ? flightGroundHeightAt(x, z) : 0;
+  if (y < 0) y = 0; // 海面
+  const w = typeof worldWaterSurfaceAt === 'function' ? worldWaterSurfaceAt(x, z) : null;
+  if (w !== null && w > y) y = w;
+  return y;
+}
+
+// 光の軸（L から向き D）が最初に入る積雲の玉までの距離。玉は横長の楕円体とみなす
+// （板の大きさ s×1.6 の横と s の縦のうち、テクスチャが濃いおよそ6割）。
+// 灯りが玉の中にあれば 0。
+const _cloudC = new THREE.Vector3();
+function landingLightCloudHitT(L, D, maxT) {
+  if (!EnvState.cloudClusters) return Infinity;
+  let best = Infinity;
+  for (const c of EnvState.cloudClusters) {
+    if (!c.group.visible) continue;
+    const gp = c.group.position;
+    if (Math.abs(gp.x - L.x) > maxT + 2500 || Math.abs(gp.z - L.z) > maxT + 2500
+      || Math.abs(gp.y - L.y) > maxT + 1500) continue;
+    for (const sp of c.group.children) {
+      _cloudC.copy(gp).add(sp.position);
+      const rh = sp.scale.x * 0.3, rv = sp.scale.y * 0.3;
+      const k = rh / rv; // 縦を横と同じ尺度に伸ばして球として解く
+      const ox = L.x - _cloudC.x, oy = (L.y - _cloudC.y) * k, oz = L.z - _cloudC.z;
+      const dx = D.x, dy = D.y * k, dz = D.z;
+      const a = dx * dx + dy * dy + dz * dz;
+      const b = 2 * (ox * dx + oy * dy + oz * dz);
+      const cc = ox * ox + oy * oy + oz * oz - rh * rh;
+      if (cc <= 0) return 0; // 玉の中
+      const disc = b * b - 4 * a * cc;
+      if (disc < 0) continue;
+      const t = (-b - Math.sqrt(disc)) / (2 * a);
+      if (t > 0 && t < best) best = t;
+    }
+  }
+  return best <= maxT ? best : Infinity;
+}
+
+const _cloudL = new THREE.Vector3();
+const _cloudD = new THREE.Vector3();
+const _cloudQ = new THREE.Quaternion();
+const _cloudP = new THREE.Vector3();
+
+// 灯りごとに、積雲に当たる距離（l.cloudHitT）と雲の中か（l.inCloud）を決め、光の玉を置く
+function updateLandingCloudLight(ac, controls) {
+  const sun = EnvState.sunLight ? EnvState.sunLight.intensity / 1.5 : 1;
+  const dark = THREE.MathUtils.clamp(1 - sun * 1.6, 0, 1);
+  const deck = EnvState.cloudDeck;
+  const deckOp = deck && deck.visible ? deck.material.opacity : 0;
+  const deckY = EnvState.cloudAltitude;
+  let ready = false;
+  for (const l of ac.lights) {
+    if (!l.cloudSpot) continue;
+    l.cloudHitT = Infinity;
+    l.inCloud = 0;
+    l.cloudSpot.visible = false;
+    if (!controls.landingLight || !l.aimLocal) continue;
+    if (!ready) { ready = true; ac.group.updateMatrixWorld(true); }
+    l.mesh.getWorldPosition(_cloudL);
+    (l.mesh.parent || ac.group).getWorldQuaternion(_cloudQ);
+    _cloudD.copy(l.aimLocal).applyQuaternion(_cloudQ).normalize();
+
+    if (deckOp > 0.5 && Math.abs(_cloudL.y - deckY) < LANDING_DECK_INSIDE_M) l.inCloud = deckOp;
+    const reach = Math.min(l.rangeM, LANDING_CLOUD_REACH_M);
+    const t = landingLightCloudHitT(_cloudL, _cloudD, reach);
+    if (t === 0) { l.inCloud = 1; continue; }
+    if (!isFinite(t)) continue;
+    l.cloudHitT = t;
+    if (dark <= 0.01) continue;
+    // 光の当たった雲。遠いほど光が広がって薄くなる
+    const fade = 1 - THREE.MathUtils.smoothstep(t, reach * 0.35, reach);
+    if (fade <= 0.01) continue;
+    const size = Math.max(2 * t * Math.tan(THREE.MathUtils.degToRad(l.halfDeg)) * 1.6,
+      LANDING_CLOUD_SPOT_MIN_M);
+    _cloudP.copy(_cloudL).addScaledVector(_cloudD, t);
+    l.cloudSpot.position.copy(ac.group.worldToLocal(_cloudP));
+    l.cloudSpot.scale.setScalar(size);
+    l.cloudSpot.material.opacity = LANDING_CLOUD_SPOT_OPACITY * dark * fade;
+    l.cloudSpot.visible = true;
   }
 }
 
@@ -621,9 +735,11 @@ function updateLandingBeams(ac, controls, state) {
       _beamAir = landingBeamAirFactor();
       const w = EnvState.weather && EnvState.weather.current;
       _beamVis = w && w.visibilityM > 0 ? w.visibilityM * LANDING_BEAM_VIS_FRAC : Infinity;
-      if (_beamAir >= LANDING_BEAM_MIN_AIR && _beamDark > 0.01) ac.group.updateMatrixWorld(true);
+      if (_beamDark > 0.01) ac.group.updateMatrixWorld(true);
     }
-    if (_beamAir < LANDING_BEAM_MIN_AIR || _beamDark <= 0.01) { l.beam.visible = false; continue; }
+    // 雲の中（積雲の玉の中・雲底の面）では、霧の中と同じく光の筋が白い棒になる
+    const air = Math.max(_beamAir, (l.inCloud || 0) * LANDING_CLOUD_AIR);
+    if (air < LANDING_BEAM_MIN_AIR || _beamDark <= 0.01) { l.beam.visible = false; continue; }
 
     // 灯りの世界での位置と向きを、機体座標（拡縮の無いところ）へ移して置く
     l.mesh.getWorldPosition(_beamPos);
@@ -633,11 +749,12 @@ function updateLandingBeams(ac, controls, state) {
     _beamDir.copy(l.aimLocal).applyQuaternion(_beamQ).applyQuaternion(_beamQ2).normalize();
     l.beam.quaternion.setFromUnitVectors(_beamBase, _beamDir);
 
-    const len = Math.min(l.rangeM, _beamVis);
+    // 積雲に当たったら、筋はそこまで（雲の向こうへは抜けない）
+    const len = Math.min(l.rangeM, _beamVis, l.cloudHitT || Infinity);
     const r = len * Math.tan(THREE.MathUtils.degToRad(l.halfDeg));
     l.beam.scale.set(r, r, len);
     l.beam.visible = true;
-    l.beam.material.opacity = LANDING_BEAM_OPACITY * _beamAir * _beamDark;
+    l.beam.material.opacity = LANDING_BEAM_OPACITY * air * _beamDark;
   }
 }
 
@@ -688,8 +805,10 @@ function updateLandingLightPool(ac, controls, state) {
   if (dark <= 0.01) { hide(); return; }
 
   ac.group.updateMatrixWorld(true);
-  const acGround = typeof flightGroundHeightAt === 'function'
-    ? flightGroundHeightAt(state.position.x, state.position.z) : 0;
+  const acGround = landingLightSurfaceY(state.position.x, state.position.z);
+  const deck = EnvState.cloudDeck;
+  const deckOp = deck && deck.visible ? deck.material.opacity : 0;
+  const deckY = EnvState.cloudAltitude;
 
   let n = 0;
   for (const l of ac.lights) {
@@ -705,17 +824,27 @@ function updateLandingLightPool(ac, controls, state) {
     (l.mesh.parent || ac.group).getWorldQuaternion(_poolQ);
     _poolDir.copy(l.aimLocal).applyQuaternion(_poolQ).normalize();
 
-    // 灯りの高さ。接地していても胴体の下面ぶんは浮いているので下限を置く。
-    const h = Math.max(_poolLight.y - acGround, 1.5);
-    // 伏せ角は**いまの向きから**取る（機体が頭を下げれば光も近くへ落ちる）。
-    const down = Math.asin(THREE.MathUtils.clamp(-_poolDir.y, -1, 1));
+    // 光が最初に当たる水平な面：下向きなら雲底の上（雲の上にいるとき）か地面・海面、
+    // 上向きなら雲底の下（雲の下にいるとき）。雲底の濃さのぶんだけ照り返しも濃い。
+    let onDeck = false;
+    if (_poolDir.y < 0) onDeck = deckOp > 0.02 && _poolLight.y > deckY;
+    else if (deckOp > 0.02 && _poolLight.y < deckY) onDeck = true;
+    else continue; // 上を向いていて、当たる雲底も無い
+    const planeY = onDeck ? deckY : acGround;
+
+    // 灯りから面までの高さ。接地していても胴体の下面ぶんは浮いているので下限を置く。
+    const h = Math.max(Math.abs(_poolLight.y - planeY), 1.5);
+    // 面に対する伏せ角は**いまの向きから**取る（機体が頭を下げれば光も近くへ落ちる）。
+    const down = Math.asin(THREE.MathUtils.clamp(Math.abs(_poolDir.y), 0, 1));
     const half = THREE.MathUtils.degToRad(l.halfDeg);
-    if (down <= 0) continue;                      // 水平より上を向いている＝地面に落ちない
+    if (down <= 0) continue;                      // 面と平行＝当たらない
     const near = h / Math.tan(down + half);
     const far = Math.min(h / Math.tan(Math.max(down - half, LANDING_POOL_FAR_RAD)), l.rangeM);
     if (near >= far) continue;
+    // 手前の積雲に光が遮られていれば、面までは届かない
+    if (l.cloudHitT !== undefined && l.cloudHitT < h / Math.sin(down)) continue;
 
-    // 高く上がるほど地面の光は薄くなる（光が広がりきって、見えなくなる）
+    // 面から遠いほど光は薄くなる（光が広がりきって、見えなくなる）
     const fade = 1 - THREE.MathUtils.smoothstep(h, LANDING_POOL_FADE_FROM_M, LANDING_POOL_FADE_TO_M);
     if (fade <= 0.01) continue;
 
@@ -726,8 +855,7 @@ function updateLandingLightPool(ac, controls, state) {
     const mid = THREE.MathUtils.clamp((near + far) / 2, near, far);
     const cx = _poolLight.x + (hx / hl) * mid;
     const cz = _poolLight.z + (hz / hl) * mid;
-    const cy = (typeof flightGroundHeightAt === 'function' ? flightGroundHeightAt(cx, cz) : 0)
-      + LANDING_POOL_LIFT_M;
+    const cy = onDeck ? deckY : landingLightSurfaceY(cx, cz) + LANDING_POOL_LIFT_M;
 
     pool.visible = true;
     pool.scale.set(far * Math.tan(half) * 2.2, 1, far - near);
@@ -736,7 +864,7 @@ function updateLandingLightPool(ac, controls, state) {
     // 板は水平のまま、その灯りが向いている方位だけに合わせる
     pool.quaternion.copy(ac.group.quaternion).invert();
     pool.rotateY(Math.atan2(hx / hl, hz / hl) + Math.PI);
-    pool.material.opacity = LANDING_POOL_OPACITY * dark * fade;
+    pool.material.opacity = LANDING_POOL_OPACITY * dark * fade * (onDeck ? deckOp : 1);
   }
 }
 
@@ -2078,6 +2206,7 @@ function updateAircraftVisual(ac, controls, state, dt, elapsed) {
   // GLBに舵のボーンがあれば、操縦に合わせて振る（09c-aircraft-bones.js）
   if (typeof updateAircraftBones === 'function') updateAircraftBones(ac, controls, dt);
 
+  updateLandingCloudLight(ac, controls);
   updateLandingLightPool(ac, controls, state);
   updateLandingBeams(ac, controls, state);
   updateEnginePlumes(ac, controls, state, dt, elapsed);
