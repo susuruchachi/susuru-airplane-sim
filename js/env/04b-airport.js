@@ -290,6 +290,48 @@ function airportTaxiLayout(L, W, def) {
   return { span, runwayEdgeZ, farEdgeZ, apronZ, apronNearZ, parallelZ, apronX, exits, segments };
 }
 
+// 着陸したあと、ターミナルの前まで地上走行する道筋の要所（世界座標）。
+// 自動操縦（13-autopilot.js の apStartTaxi）が使う。描いている誘導路と同じ
+// airportTaxiLayout から、いまの設定（滑走路の長さ・幅・向き）で取る。
+//   exits      … 出口ごとに、着陸に使う滑走路（ターミナル側）の中心線上の点と、平行誘導路の上の点
+//   apronEntry … 平行誘導路からエプロンへ入る曲がり角
+//   apronPath  … エプロンの中を駐機場所まで行く曲がり角（2点）
+//   apronStop  … 駐機場所（ここで止まる。機首はターミナルを向く）
+//
+// **駐機場所はピア（搭乗橋）とピアのあいだ。** エプロンの真ん中はちょうどピアの下で、
+// そこへ止めると機体がピアに突っ込む。ピアの位置は buildTerminal と同じ式で出す。
+const TAXI_STAND_SINGLE_PIER_M = 55;   // ピアが1本のときは、その脇のこの距離
+const TAXI_APRON_LANE_M = 25;          // エプロンの手前の縁からこれだけ入ったところを横へ行く
+function airportTaxiRouteWorld(def, st) {
+  if (!def || !st) return null;
+  const lay = airportTaxiLayout(st.runwayLengthM, st.runwayWidthM, def);
+  const frame = Object.assign({}, def, { headingDeg: st.headingDeg });
+  const w = (lx, lz) => airportLocalToWorld(frame, lx, lz);
+  const b = airportBuildings(def);
+  const pierX = [];
+  for (let i = 0; i < b.piers; i++) {
+    const t = b.piers === 1 ? 0.5 : i / (b.piers - 1);
+    pierX.push(def.terminalLocalX + (t - 0.5) * (b.termW - 18 - 60));
+  }
+  let standX;
+  if (pierX.length === 1) standX = pierX[0] + TAXI_STAND_SINGLE_PIER_M;
+  else {
+    // エプロンへの入口（apronX）にいちばん近い、ピアとピアのあいだ
+    standX = null;
+    for (let i = 1; i < pierX.length; i++) {
+      const mid = (pierX[i - 1] + pierX[i]) / 2;
+      if (standX === null || Math.abs(mid - lay.apronX) < Math.abs(standX - lay.apronX)) standX = mid;
+    }
+  }
+  const laneZ = lay.apronNearZ + TAXI_APRON_LANE_M;
+  return {
+    exits: lay.exits.map((x) => ({ runway: w(x, lay.span), parallel: w(x, lay.parallelZ) })),
+    apronEntry: w(lay.apronX, lay.parallelZ),
+    apronPath: [w(lay.apronX, laneZ), w(standX, laneZ)],
+    apronStop: w(standX, lay.apronZ),
+  };
+}
+
 function buildTaxiwayAndApron(L, W, def) {
   const group = new THREE.Group();
   const lay = airportTaxiLayout(L, W, def);

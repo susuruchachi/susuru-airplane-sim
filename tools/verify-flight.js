@@ -46,7 +46,7 @@ const {
   apPickRunwayHeading, apTrackPosition, apWrap180, apBearingTo, apBankMaxFor,
   apElevatorForPitch, apSurfaceGain, apBankLimit, apBankAglFactor, apTerrainFloor,
   aircraftDragLengthM, apBankClimbFactor, apVsLimits, apTerrainEscapeVs, apVtolHoverAngles,
-  apAileronForBank, apSpoilerCommand, apReverseCommand,
+  apAileronForBank, apSpoilerCommand, apReverseCommand, apStartTaxi,
   aircraftBestClimb, apUpdateTerrainFloor,
   maxForwardThrustAt, aircraftVMaxMps, engineThrustScale, engineAfterburner,
   apManageEngineGroups, speedOfSoundAt, machNumberAt,
@@ -3966,6 +3966,64 @@ function autopilotFlight(opts) {
   }
   note('横風8m/sの離陸（練習機）', `滑走中の横ずれ ${gndCross.toFixed(1)}m / 浮いてから対地100mまで ${airCross.toFixed(1)}m（直す前は36m）`);
   check(gndCross < 12, '横風の離陸滑走で滑走路の半幅（22m）の内側にいる', gndCross.toFixed(1) + 'm');
+}
+
+// --- (16) 着陸後の地上走行 ------------------------------------------------------
+// 滑走路（x軸、機首方位90°）で止まったところから、出口（x=-1455/0/1455）→ 平行誘導路（z=+150）→
+// エプロンの中ほど（500, 350）まで自動で走る。練習機と、寸法4倍の大型機で。
+// 大型機は前輪と主脚が離れていて小さく回れないので、ずれの許しを大きめにとる。
+{
+  console.log('\n(16) 着陸後の地上走行');
+  const big = defaultAircraftConfig();
+  big.modelWeightKg = 165000;
+  const S = 4;
+  const scale = (v) => { v.x *= S; v.y *= S; v.z *= S; };
+  scale(big.cg);
+  for (const p of big.parts) {
+    scale(p.position);
+    if (p.props && p.props.corners) for (const k in p.props.corners) scale(p.props.corners[k]);
+    if (p.props && p.props.span) p.props.span *= S;
+    if (p.props && p.props.thrustKgf) p.props.thrustKgf *= 200;
+  }
+  const route = {
+    exits: [-1455, 0, 1455].map((x) => ({ runway: { x, z: 0 }, parallel: { x, z: 150 } })),
+    apronEntry: { x: 500, z: 150 }, apronStop: { x: 500, z: 350 },
+  };
+  const segDist = (px, pz, P) => {
+    let m = Infinity;
+    for (let i = 1; i < P.length; i++) {
+      const a = P[i - 1], b = P[i], vx = b.x - a.x, vz = b.z - a.z, L2 = vx * vx + vz * vz || 1;
+      const t = Math.max(0, Math.min(1, ((px - a.x) * vx + (pz - a.z) * vz) / L2));
+      m = Math.min(m, Math.hypot(px - a.x - vx * t, pz - a.z - vz * t));
+    }
+    return m;
+  };
+  for (const [label, cfg, maxDev] of [['練習機', defaultAircraftConfig(), 15], ['大型機', big, 50]]) {
+    const m = buildAircraftModel(JSON.parse(JSON.stringify(cfg)));
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(m, st, -800, 0, 90, flatGround);
+    settleAircraftOnGround(m, st, flatGround);
+    const ap = createAutopilotState();
+    ap.full = true; ap.phase = 'taxi';
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 0, z: 0, elevationM: 0 }, { runwayLengthM: 3000, headingDeg: 90 }, 0);
+    ap.plan.taxi = route;
+    apStartTaxi(ap.plan, st, ap);
+    const path = ap.taxi.path.map((q) => ({ x: q.x, z: q.z }));
+    let t = 0, dev = 0, vmax = 0;
+    for (; t < 900 && ap.full && !st.crashed; t += 1 / 60) {
+      stepAutopilot(m, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+      advanceFlight(m, st, c, new THREE.Vector3(), flatGround, 1 / 60);
+      dev = Math.max(dev, segDist(st.position.x, st.position.z, path));
+      vmax = Math.max(vmax, st.groundSpeed);
+    }
+    const end = path[path.length - 1];
+    const miss = Math.hypot(st.position.x - end.x, st.position.z - end.z);
+    note(`地上走行（${label}）`, `${t.toFixed(0)}秒・道筋からのずれ最大 ${dev.toFixed(1)}m・最高 ${(vmax * 1.94384).toFixed(0)}kt・止まった所のずれ ${miss.toFixed(1)}m`);
+    check(!ap.full && ap.phase === 'done' && !st.crashed, `地上走行（${label}）：エプロンまで着いて止まる`, ap.phase);
+    check(miss < 8, `地上走行（${label}）：止まる点から8m以内`, miss.toFixed(1) + 'm');
+    check(dev < maxDev, `地上走行（${label}）：誘導路の道筋から${maxDev}m以内`, dev.toFixed(1) + 'm');
+    check(vmax < 10.5, `地上走行（${label}）：20ktを超えない`, (vmax * 1.94384).toFixed(0) + 'kt');
+  }
 }
 
 console.log(`\n${failures === 0 ? '✅ すべて通過' : `❌ ${failures} 件の失敗`}`);

@@ -707,6 +707,20 @@ function gearNormalSpring(rate, pen) {
   };
 }
 
+// 主脚の中心（前後）と、操向輪までの腕（前が正）。操向輪か主脚が無ければ null。
+const GEAR_BODY_STEER_OFF_MPS = 8;   // これより速いと主脚は曲げない
+const GEAR_BODY_STEER_FULL_MPS = 4;  // これより遅いと円に完全に沿わせる
+function gearSteerGeometry(model) {
+  if (model._steerGeo !== undefined) return model._steerGeo;
+  const steer = model.contacts.find((c) => c.steer);
+  const mains = model.contacts.filter((c) => !c.steer);
+  if (!steer || !mains.length) { model._steerGeo = null; return null; }
+  const mainZ = mains.reduce((a, c) => a + c.position.z, 0) / mains.length;
+  const arm = mainZ - steer.position.z;
+  model._steerGeo = Math.abs(arm) < 0.5 ? null : { mainZ, arm, sign: steer.steerSign || 1 };
+  return model._steerGeo;
+}
+
 // 脚ごとにばねと摩擦を出す。力は機体座標で返す（空力と同じ入れ物に足せるように）。
 function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
   state.contactCount = 0;
@@ -725,6 +739,18 @@ function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
   const steerDeg = GEAR_STEER_HIGHSPEED_DEG + (GEAR_STEER_MAX_DEG - GEAR_STEER_HIGHSPEED_DEG)
     * THREE.MathUtils.clamp(1 - state.groundSpeed / 40, 0, 1);
   const steerRad = THREE.MathUtils.degToRad(steerDeg) * controls.yaw;
+
+  // **主脚が前後に何列もある機体は、低速では主脚も曲がる円に沿わせる**（実機の
+  // ボディギア・ステアリングと同じ）。主脚の列が前後に離れていると、前輪だけ切っても
+  // 後ろの列と前の列のタイヤが横に擦れて曲がるのを押さえ込む——実測でBoeing 747
+  // （主脚の列が6.7m離れている）は前輪を一杯に切って3m/sで走っても、機首が
+  // 毎秒0.2°しか回らず、誘導路の角を曲がれなかった。各車輪を「前輪の切れ角が決める
+  // 回転の中心（主脚の中心を通る横の線の上）」を向く円の接線に合わせる。
+  // 速いときは効かせない（実機も地上走行の速さでしか使わない）。主脚が1列なら何も変わらない。
+  const steerGeo = gearSteerGeometry(model);
+  const bodySteer = steerGeo ? THREE.MathUtils.clamp((GEAR_BODY_STEER_OFF_MPS - state.groundSpeed)
+    / (GEAR_BODY_STEER_OFF_MPS - GEAR_BODY_STEER_FULL_MPS), 0, 1) : 0;
+  const tanSteer = bodySteer > 0 ? Math.tan(-steerRad * steerGeo.sign) : 0;
 
   for (const c of model.contacts) {
     // 脚を畳んでいたら接地しない（＝胴体着陸になる）
@@ -762,6 +788,10 @@ function accumulateGroundForces(model, state, controls, groundHeightAt, out) {
     const fwd = _gv.fwd.set(0, 0, -1);
     // 尾輪式は逆に切る（assignGearRoles の steerSign）
     if (c.steer) fwd.applyAxisAngle(_gv.up, -steerRad * (c.steerSign || 1));
+    else if (tanSteer !== 0) {
+      const d = steerGeo.mainZ - c.position.z; // 主脚の中心から前へのずれ
+      if (Math.abs(d) > 0.3) fwd.applyAxisAngle(_gv.up, Math.atan(d * tanSteer / steerGeo.arm) * bodySteer);
+    }
     fwd.applyQuaternion(q);
     fwd.y = 0;
     if (fwd.lengthSq() < 1e-9) fwd.set(0, 0, -1); else fwd.normalize();

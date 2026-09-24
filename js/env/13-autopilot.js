@@ -1235,7 +1235,7 @@ const AP_ENGINE_ON_S = 240;          // 点ける境目（そのグループの�
 const AP_ENGINE_OFF_S = 150;         // 切る境目。点ける境目と離しておかないと、境目で往復する
 
 // 降りる段では、いちばん遅いグループだけを回す
-const AP_SLOW_PHASES = ['descent', 'approach', 'flare', 'rollout',
+const AP_SLOW_PHASES = ['descent', 'approach', 'flare', 'rollout', 'taxi',
   'vtol_approach', 'vtol_hover', 'vtol_descent', 'vtol_touchdown', 'takeoff', 'vtol_takeoff'];
 
 function apManageEngineGroups(model, state, controls, ap, spd, dt, env) {
@@ -2479,6 +2479,18 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 無関係に効くので、濡れた滑走路の代わりに翼が浮いている状態でも使える。
     controls.spoiler = model.hasSpoiler ? 1 : 0;
     controls.reverse = apReverseCommand(model, state, controls);
+    // 誘導路の道筋を知っている空港（画面で飛んでいるとき）は、歩くくらいまで落ちたら
+    // ターミナルの前まで地上走行する。知らないとき（検証ツールの空港）は以前どおり止まる。
+    if (plan.taxi && state.groundSpeed < AP_TAXI_START_MPS) {
+      apStartTaxi(plan, state, ap);
+      controls.brake = 0;
+      controls.spoiler = 0;
+      controls.reverse = 0;
+      controls.flap = 0;
+      controls.parkingBrake = false;
+      say('taxi', 'ターミナルへ地上走行');
+      return;
+    }
     if (state.groundSpeed < 1.5) {
       controls.brake = 0;
       controls.spoiler = 0;
@@ -2490,6 +2502,173 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     }
     return;
   }
+
+  if (ap.phase === 'taxi') {
+    const res = apStepTaxi(model, state, controls, ap, dt);
+    if (res === 'arrived') {
+      controls.throttle = 0;
+      controls.brake = 0;
+      controls.parkingBrake = true;
+      controls.yaw = 0;
+      say('done', `${plan.airportId} のターミナルに着きました`);
+      ap.full = false;
+    }
+    return;
+  }
+}
+
+// --- 着陸後の地上走行 -----------------------------------------------------------
+//
+// 「着陸後にターミナルまで地上走行」から。滑走路の出口 → 平行誘導路 → エプロンの中ほど、
+// の順に誘導路の中心線をたどる（道筋は 04b-airport.js の airportTaxiRouteWorld）。
+//   出口 … 進んでいる向きで前にあるうち、いちばん近いもの。前に無ければ（出口を過ぎてから
+//          止まったら）、いちばん近い後ろの出口へ、滑走路の上で向きを変えて戻る
+//   舵   … 道筋の上を「速さに応じて少し先」の点へ向ける（前輪の操向とラダーは apGroundSteer と同じ）
+//   速さ … 直線は AP_TAXI_MPS、曲がり角の手前と向きが大きくずれているときは AP_TAXI_TURN_MPS。
+//          止まる点までは一定の減速で落とす。出力は積分で合わせ、速すぎればブレーキ
+const AP_TAXI_START_MPS = 8;       // 減速してこの速さを切ったら地上走行へ
+const AP_TAXI_MPS = 8;             // 直線の速さ（約15kt。実機の地上走行と同じくらい）
+const AP_TAXI_TURN_MPS = 3;        // 曲がるときの速さ
+const AP_TAXI_TURN_SLOW_M = 70;    // 曲がり角のこの手前から落とす
+const AP_TAXI_DECEL = 0.6;         // 止まる点へ向けて落とす減速度(m/s²)
+const AP_TAXI_EXIT_AHEAD_M = 40;   // これより近い出口は「もう曲がれない」ので次を選ぶ
+const AP_TAXI_STOP_M = 4;          // 止まる点からこれ以内で停止
+// 出力は「重さの何割の推力か」で考える（apTaxiThrottlePerWeight で出力レバーに直す）
+const AP_TAXI_THR_KI_W = 0.02;     // 積分の強さ（1秒・1m/sあたり、重さに対する推力の割合）
+const AP_TAXI_THR_KP_W = 0.015;    // 比例の強さ
+const AP_TAXI_THR_MAX_W = 0.25;    // 地上走行で使う推力の上限（重さに対して）
+const AP_TAXI_THR_MAX = 0.8;       // 出力レバーの上限
+
+// 出力レバー1あたりが重さの何分の1か（＝重さ1ぶんの推力を出すレバーの量）。
+// 前へ進むエンジンの推力の合計で見る（垂直離陸用は数えない）。
+function apTaxiThrottlePerWeight(model) {
+  if (model._taxiPerW !== undefined) return model._taxiPerW;
+  let T = 0;
+  for (const e of model.engines || []) if (!e.lift) T += e.thrustN || 0;
+  model._taxiPerW = T > 0 ? (model.massKg * 9.81) / T : 1;
+  return model._taxiPerW;
+}
+
+function apStartTaxi(plan, state, ap) {
+  const t = plan.taxi;
+  const f = plan.forward;
+  const px = state.position.x, pz = state.position.z;
+  const along = (q) => (q.x - px) * f.x + (q.z - pz) * f.z;
+  let best = null;
+  for (const e of t.exits) {
+    const a = along(e.runway);
+    if (a >= AP_TAXI_EXIT_AHEAD_M && (!best || a < best.a)) best = { e, a };
+  }
+  if (!best) {
+    for (const e of t.exits) {
+      const a = along(e.runway);
+      if (!best || a > best.a) best = { e, a };
+    }
+  }
+  ap.taxi = {
+    path: [{ x: px, z: pz }, best.e.runway, best.e.parallel, t.apronEntry]
+      .concat(t.apronPath || [], [t.apronStop]),
+    seg: 0,
+  };
+  ap.taxiThr = 0;
+}
+
+function apStepTaxi(model, state, controls, ap, dt) {
+  const T = ap.taxi;
+  const P = T.path;
+  const px = state.position.x, pz = state.position.z;
+  const gs = state.groundSpeed;
+
+  // いまの区間への投影。区間の終わりを過ぎたら次の区間へ
+  let proj = null;
+  for (;;) {
+    const a = P[T.seg], b = P[T.seg + 1];
+    const vx = b.x - a.x, vz = b.z - a.z;
+    const L2 = vx * vx + vz * vz || 1;
+    const tt = ((px - a.x) * vx + (pz - a.z) * vz) / L2;
+    if (tt >= 1 && T.seg < P.length - 2) { T.seg++; continue; }
+    proj = { t: Math.max(tt, 0), len: Math.sqrt(L2) };
+    break;
+  }
+  // 道筋に沿って、投影した点から look だけ先の点を狙う。
+  // **見る先は、その機体がいちばん小さく回れる半径より近くしない。** 前輪と主脚が離れた
+  // 長い機体は小さく回れない（747は前輪を一杯に切っても半径66m）。それより近い点を見ていると
+  // 角の手前で切りはじめるのが遅れ、外へ40mふくらんでから戻ってきていた。
+  const geo = typeof gearSteerGeometry === 'function' ? gearSteerGeometry(model) : null;
+  const wheelbase = geo ? Math.abs(geo.arm) : 10;
+  const steerMaxDeg = (typeof GEAR_STEER_MAX_DEG !== 'undefined')
+    ? GEAR_STEER_HIGHSPEED_DEG + (GEAR_STEER_MAX_DEG - GEAR_STEER_HIGHSPEED_DEG) * apClamp(1 - gs / 40, 0, 1)
+    : 30;
+  const turnR = wheelbase / Math.tan(steerMaxDeg * Math.PI / 180);
+  const look = Math.max(12, gs * 2.5, turnR * 1.1);
+  let rest = look + proj.t * proj.len;
+  let tx = P[P.length - 1].x, tz = P[P.length - 1].z;
+  for (let i = T.seg; i < P.length - 1; i++) {
+    const a = P[i], b = P[i + 1];
+    const L = Math.hypot(b.x - a.x, b.z - a.z);
+    if (rest <= L) { tx = a.x + (b.x - a.x) * rest / (L || 1); tz = a.z + (b.z - a.z) * rest / (L || 1); break; }
+    rest -= L;
+  }
+  const want = apBearingTo(px, pz, tx, tz);
+  // ほぼ真後ろを狙うとき（出口を過ぎてから向きを変えて戻る）は、曲がる向きを決めたら
+  // 変えない。±180°の境目で左右が毎フレーム入れ替わると、切り返しを繰り返して回れない。
+  let err = apWrap180(want - state.headingDeg);
+  if (Math.abs(err) > 150) {
+    if (!T.turnSign) T.turnSign = err >= 0 ? 1 : -1;
+    err = T.turnSign * Math.abs(err);
+  } else if (Math.abs(err) < 90) T.turnSign = 0;
+  // 舵は「狙う点へ届く円」の曲がり具合から、前輪の切れ角をそのまま決める（純追従）。
+  // 滑走路の上の中心線保持（apGroundSteer）は速い滑走のための強い効きで、
+  // 歩くような速さで角を曲がると行き過ぎた（747が180°へ曲がるはずの角で223°まで回った）。
+  const Ld = Math.max(Math.hypot(tx - px, tz - pz), 1);
+  const alpha = err * Math.PI / 180;
+  const delta = Math.abs(alpha) >= Math.PI / 2
+    ? Math.sign(alpha) * Math.PI / 2
+    : Math.atan(2 * Math.sin(alpha) * wheelbase / Ld);
+  controls.yaw = apClamp(delta / (steerMaxDeg * Math.PI / 180), -1, 1);
+  void dt;
+
+  // 止まる点までの残り（道筋に沿って）と、次の曲がり角までの距離・曲がる角度
+  const end = P[P.length - 1];
+  let toEnd = (1 - proj.t) * proj.len;
+  for (let i = T.seg + 1; i < P.length - 1; i++) toEnd += Math.hypot(P[i + 1].x - P[i].x, P[i + 1].z - P[i].z);
+  let vWant = AP_TAXI_MPS;
+  if (T.seg < P.length - 2) {
+    const a = P[T.seg], b = P[T.seg + 1], c = P[T.seg + 2];
+    const h1 = Math.atan2(b.x - a.x, -(b.z - a.z)), h2 = Math.atan2(c.x - b.x, -(c.z - b.z));
+    const turn = Math.abs(apWrap180((h2 - h1) * 180 / Math.PI));
+    const toCorner = (1 - proj.t) * proj.len;
+    if (turn > 25 && toCorner < AP_TAXI_TURN_SLOW_M) vWant = AP_TAXI_TURN_MPS;
+  }
+  if (Math.abs(err) > 35) vWant = AP_TAXI_TURN_MPS;
+  vWant = Math.min(vWant, Math.sqrt(2 * AP_TAXI_DECEL * Math.max(toEnd - AP_TAXI_STOP_M, 0)));
+
+  controls.pitch = 0;
+  controls.roll = 0;
+  controls.flap = 0;
+  controls.spoiler = 0;
+  controls.reverse = 0;
+  controls.trim = 0;
+  controls.parkingBrake = false;
+  // 出力の効きは推力と重さの比で割っておく。サンダーバード1号は推力が重さの何倍もあり、
+  // 練習機と同じ効きで足すと少し開けただけで34ktまで走り出した。
+  const perW = apTaxiThrottlePerWeight(model);
+  const thrMax = Math.min(AP_TAXI_THR_MAX, AP_TAXI_THR_MAX_W * perW);
+  const ev = vWant - gs;
+  ap.taxiThr = apClamp((ap.taxiThr || 0) + ev * AP_TAXI_THR_KI_W * perW * dt, 0, thrMax);
+  if (ev < -1) ap.taxiThr *= Math.max(0, 1 - dt * 2); // 速すぎるときは積分を抜く
+  controls.throttle = apClamp(ap.taxiThr + ev * AP_TAXI_THR_KP_W * perW, 0, thrMax);
+  controls.brake = apClamp((-ev - 0.8) * 0.35, 0, 1);
+
+  const stopping = toEnd < AP_TAXI_STOP_M;
+  if (stopping) { controls.throttle = 0; controls.brake = 1; }
+  // 尾輪式は、ブレーキで前にのめらないように踏み方を加減する（着陸滑走と同じ）
+  const tailRest = apTailwheelRestPitch(model);
+  if (tailRest !== null) {
+    controls.brake *= apClamp(1 - (tailRest - AP_TAIL_BRAKE_MARGIN_DEG - state.pitchDeg) / 2, 0, 1);
+  }
+  if (stopping && gs < 0.3) return 'arrived';
+  return 'taxi';
 }
 
 // その場に留まる（垂直離着陸機だけ）。
@@ -2635,6 +2814,12 @@ function autopilotDestination() {
   return worldAirportById(ap.destAirportId);
 }
 
+// 着陸したあとの地上走行の道筋を計画に付ける（空港の誘導路を知っている画面側だけ）
+function apAttachTaxi(plan, dest) {
+  if (typeof airportTaxiRouteWorld !== 'function') return;
+  plan.taxi = airportTaxiRouteWorld(dest, getAirportSettings(dest.id));
+}
+
 // 全自動を入れる。出発は「いま機体がいる場所」、目的地はセレクトで選んだ空港。
 function startFullAutopilot() {
   const f = EnvState.flight;
@@ -2649,6 +2834,7 @@ function startFullAutopilot() {
   }
 
   ap.plan = apMakeApproachPlan(dest, getAirportSettings(dest.id), EnvState.env.windDirectionDeg);
+  apAttachTaxi(ap.plan, dest);
   ap.full = true;
   ap.altHold = false;
   ap.takeoffHeadingDeg = f.state.headingDeg;
@@ -2785,7 +2971,7 @@ function setupAutopilotUI() {
       // 飛んでいる途中で行き先を変えたら、経路も引き直す
       if (ap.full && ap.destAirportId) {
         const d = worldAirportById(ap.destAirportId);
-        if (d) ap.plan = apMakeApproachPlan(d, getAirportSettings(d.id), EnvState.env.windDirectionDeg);
+        if (d) { ap.plan = apMakeApproachPlan(d, getAirportSettings(d.id), EnvState.env.windDirectionDeg); apAttachTaxi(ap.plan, d); }
       }
       updateAutopilotUI();
       onEnvSettingsChanged();
@@ -2893,7 +3079,7 @@ function autopilotStatusLine() {
 // HUDに出す短い表示（11-flight-ui.js が呼ぶ）
 const AP_PHASE_LABEL = {
   takeoff: '離陸', climb: '上昇', cruise: '巡航', descent: '降下',
-  approach: '進入', goaround: 'やり直し', flare: '接地', rollout: '減速', done: '着陸',
+  approach: '進入', goaround: 'やり直し', flare: '接地', rollout: '減速', taxi: '地上走行', done: '着陸',
   vtol_takeoff: '垂直離陸', vtol_transition: '前進切替',
   vtol_approach: '進入（垂直）', vtol_hover: 'ホバリング',
   vtol_descent: '垂直降下', vtol_touchdown: '接地',
@@ -2918,6 +3104,6 @@ if (typeof module !== 'undefined' && module.exports) {
     apTerrainEscapeVs, apVtolHoverAngles,
     apSpoilerCommand, apReverseCommand, apStepHover, apTerrainDodgeDeg, apTerrainScan,
     apPitchForVs, apBankForHeading, apFlareHeight,
-    apVsForAltitude, apThrottleForSpeed,
+    apVsForAltitude, apThrottleForSpeed, apStartTaxi, apStepTaxi,
   };
 }
