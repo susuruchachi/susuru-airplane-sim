@@ -51,6 +51,19 @@ async function initFlight() {
   }
 }
 
+// 機体の一覧を IndexedDB から読み直す（ZIPで機体を取り込んだあと）。
+// flightSnapshot があれば、その「選んでいた機体」を一覧が揃ってから当てる
+async function reloadFlightAircraftConfigs(flightSnapshot) {
+  const f = EnvState.flight;
+  const builder = await loadBuilderAircraftConfigs();
+  f.configs = builder.list.concat([defaultAircraftConfig(), defaultHelicopterConfig()]);
+  if (!f.configs.some((c) => c.name === f.configName)) {
+    f.configName = (builder.preferred && builder.preferred.name) || f.configs[f.configs.length - 2].name;
+  }
+  if (flightSnapshot && typeof applyFlightSnapshot === 'function') applyFlightSnapshot(flightSnapshot);
+  refreshFlightAircraftList();
+}
+
 // いま選んでいる機体の重心のずれ（無ければゼロ）
 function currentCgOffset() {
   const o = EnvState.flight.cgOffsets[EnvState.flight.configName];

@@ -288,6 +288,56 @@ function importEnvJSONFile(file) {
   reader.readAsText(file);
 }
 
+// Builderで保存した機体すべて（3Dモデルごと）と、この画面の設定を1つのZIPにする（js/02b-pack.js）
+async function exportAllZip() {
+  setEnvStorageStatus('ZIPを作っています…');
+  try {
+    const records = (await packAllSavedAircraft()).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+    const zip = await buildPackZip(records, collectEnvSnapshot());
+    const d = new Date();
+    const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    packDownload(zip, `flight-sim-all-${ymd}.zip`);
+    setEnvStorageStatus(`書き出しました（機体 ${records.length} 機と、この画面の設定・${packSizeText(zip.length)}）`);
+  } catch (err) {
+    console.error(err);
+    setEnvStorageStatus('書き出せませんでした: ' + (err && err.message ? err.message : String(err)));
+  }
+}
+
+// ZIPを読み込む。機体は Builder の保存に入れて機体の一覧に出し、この画面の設定が入っていれば当てる
+async function importPackZipFile(file) {
+  setEnvStorageStatus('ZIPを開いています…');
+  try {
+    const pack = await readPackZip(await file.arrayBuffer());
+    if (!pack.aircraft.length && !pack.env) {
+      setEnvStorageStatus(pack.skipped[0] || 'このZIPには機体も設定も入っていません');
+      return;
+    }
+    const msg = [];
+    if (pack.aircraft.length) {
+      const dup = await packExistingNames(pack.aircraft);
+      if (!dup.length || confirm(`同じ名前の機体があります：\n${dup.join('\n')}\n\n置き換えますか？`)) {
+        await packPutAircraft(pack.aircraft);
+        msg.push(`機体 ${pack.aircraft.length} 機を取り込みました`);
+      } else {
+        msg.push('機体は取り込みませんでした');
+      }
+    }
+    if (pack.env) {
+      const result = applyEnvSnapshot(pack.env);
+      syncEnvUIToState();
+      msg.push(`この画面の設定を読み込みました（空港 ${result.applied} 件）`, ...result.notes);
+    }
+    // 機体の一覧を読み直す（設定の中の「選んでいた機体」も、ここで一覧に揃ってから当てる）
+    if (typeof reloadFlightAircraftConfigs === 'function') await reloadFlightAircraftConfigs(pack.env && pack.env.flight);
+    writeEnvToStorage();
+    setEnvStorageStatus(msg.concat(pack.skipped).join(' / '));
+  } catch (err) {
+    console.error(err);
+    setEnvStorageStatus('読み込めませんでした: ' + (err && err.message ? err.message : String(err)));
+  }
+}
+
 function setEnvStorageStatus(text) {
   const el = document.getElementById('envStorageStatus');
   if (el) el.textContent = text;

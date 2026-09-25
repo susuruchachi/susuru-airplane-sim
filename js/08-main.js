@@ -52,8 +52,8 @@ function setupSaveLoadUI() {
     await applyLoadedConfig(record);
   });
 
-  // 3Dモデル本体を含まない設定ファイル(.json)をダウンロード — デバイス間で設定だけ持ち運ぶ用
-  btnDownload.addEventListener('click', () => {
+  // 今開いている機体の設定と3Dモデルを、1つのZIPにしてダウンロード — 別の端末へ機体ごと持っていく用
+  btnDownload.addEventListener('click', async () => {
     if (!State.model.root) {
       showToast('ダウンロードするにはまずモデルを読み込んでください', true);
       return;
@@ -63,25 +63,40 @@ function setupSaveLoadUI() {
     if (input === null) return; // キャンセル
     const name = input.trim() || 'flight-sim-config';
     try {
-      downloadPortableConfig(name);
-      showToast('設定ファイルをダウンロードしました（3Dモデル本体は含まれません）');
+      const bytes = await downloadCurrentAircraftZip(name);
+      showToast(`設定と3DモデルをZIPでダウンロードしました（${packSizeText(bytes)}）`);
     } catch (err) {
       console.error(err);
       showToast('ダウンロードに失敗しました', true);
     }
   });
 
-  // 設定ファイル(.json)を読み込んで、今開いているモデルに適用する
-  btnImport.addEventListener('click', () => {
-    if (!State.model.root) {
-      showToast('設定を読み込む前に、まず機体モデルを読み込んでください', true);
-      return;
+  // 保存済みの機体すべてと飛行画面の設定を、1つのZIPにしてダウンロード（控え・引っ越し用）
+  document.getElementById('btnDownloadAll').addEventListener('click', async () => {
+    try {
+      const r = await downloadAllSavedZip();
+      if (!r) { showToast('保存済みの機体も飛行画面の設定もありません', true); return; }
+      showToast(`保存済みの機体 ${r.count} 機${r.env ? 'と飛行画面の設定' : ''}をZIPでダウンロードしました（${packSizeText(r.bytes)}）`);
+    } catch (err) {
+      console.error(err);
+      showToast('まとめてダウンロードできませんでした', true);
     }
-    configFileInput.click();
   });
+
+  // 読み込み：ZIP（3Dモデルごと開いて保存する）か、設定だけの .json（今開いているモデルに適用する）
+  btnImport.addEventListener('click', () => configFileInput.click());
   configFileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
+    configFileInput.value = '';
     if (!file) return;
+    if (packIsZipFile(file)) {
+      await importPackFile(file);
+      return;
+    }
+    if (!State.model.root) {
+      showToast('設定だけの.jsonは、先に機体モデルを読み込んでから適用してください（ZIPならモデルごと開けます）', true);
+      return;
+    }
     try {
       const data = await readPortableConfigFile(file);
       applyConfigDataToCurrentModel(data);
@@ -92,8 +107,51 @@ function setupSaveLoadUI() {
       console.error(err);
       showToast('設定ファイルの読込に失敗しました。ファイル形式を確認してください', true);
     }
-    configFileInput.value = '';
   });
+}
+
+// ZIP（js/02b-pack.js の機体パック）を取り込む。機体は保存に入れて、1機目を開く。
+// 飛行画面の設定が入っていれば、確かめてからこの端末の設定と置き換える
+async function importPackFile(file) {
+  const statusEl = document.getElementById('saveStatus');
+  let pack;
+  try {
+    pack = await readPackZip(await file.arrayBuffer());
+  } catch (err) {
+    console.error(err);
+    showToast(`ZIPを開けませんでした：${err && err.message ? err.message : err}`, true);
+    return;
+  }
+  if (!pack.aircraft.length && !pack.env) {
+    showToast(pack.skipped[0] || 'このZIPには機体も設定も入っていません', true);
+    return;
+  }
+  let saved = 0;
+  if (pack.aircraft.length) {
+    const dup = await packExistingNames(pack.aircraft);
+    let save = true;
+    if (dup.length) {
+      save = confirm(`同じ名前の保存があります：\n${dup.join('\n')}\n\n置き換えて保存しますか？\n（キャンセルすると、保存はせずに1機目を開くだけにします）`);
+    }
+    if (save) {
+      await packPutAircraft(pack.aircraft);
+      saved = pack.aircraft.length;
+      await dbPut(STORE_META, { key: 'lastConfigName', value: pack.aircraft[0].name });
+    }
+    await applyLoadedConfig(pack.aircraft[0]);
+  }
+  let envDone = false;
+  if (pack.env && confirm('飛行画面の設定（時刻・天候・風・空港の変更など）も入っています。\nこの端末の設定と置き換えますか？')) {
+    try { packStoreEnv(pack.env); envDone = true; } catch (err) { console.error(err); }
+  }
+  const msg = [];
+  if (pack.aircraft.length) msg.push(saved ? `${saved} 機を保存に取り込みました` : `「${pack.aircraft[0].name}」を開きました（保存はしていません）`);
+  if (envDone) msg.push('飛行画面の設定を置き換えました');
+  if (pack.skipped.length) msg.push(pack.skipped.join('・'));
+  if (msg.length) {
+    statusEl.textContent = msg[0];
+    showToast(msg.join(' / '), pack.skipped.length > 0);
+  }
 }
 
 async function applyLoadedConfig(record) {

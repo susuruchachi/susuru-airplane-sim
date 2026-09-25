@@ -180,10 +180,14 @@ function syncEnvUIToState() {
 function setupStorageUI() {
   const fileInput = document.getElementById('envImportFile');
   document.getElementById('envBtnExport').addEventListener('click', exportEnvJSON);
+  document.getElementById('envBtnExportAll').addEventListener('click', exportAllZip);
   document.getElementById('envBtnImport').addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', () => {
-    if (fileInput.files && fileInput.files[0]) importEnvJSONFile(fileInput.files[0]);
+    const file = fileInput.files && fileInput.files[0];
     fileInput.value = '';
+    if (!file) return;
+    if (packIsZipFile(file)) importPackZipFile(file);
+    else importEnvJSONFile(file);
   });
   document.getElementById('envBtnClearStorage').addEventListener('click', () => {
     clearEnvStorage();

@@ -514,8 +514,9 @@ body.touch-controls #hudHelp { display:none; }
         地形や空港の位置は種から決まる固定のものなので保存されません。
       </div>
       <button id="envBtnExport">設定を書き出す（.json）</button>
-      <button id="envBtnImport">設定を読み込む</button>
-      <input type="file" id="envImportFile" accept="application/json,.json" style="display:none;">
+      <button id="envBtnExportAll" title="Builderで保存した機体すべて（設定と3Dモデル）と、この画面の設定を1つのZIPにまとめます">機体もまとめて書き出す（.zip）</button>
+      <button id="envBtnImport" title=".json（この画面の設定）か、.zip（機体と設定をまとめたもの）を読み込みます">設定を読み込む（.json / .zip）</button>
+      <input type="file" id="envImportFile" accept="application/json,.json,application/zip,.zip" style="display:none;">
       <button id="envBtnClearStorage">この端末の保存を消す</button>
       <div class="env-note" id="envStorageStatus">--</div>
     </div>
@@ -564,6 +565,7 @@ body.touch-controls #hudHelp { display:none; }
 </script>
 
 <script src="js/00-version.js" onerror="_markFailed('js/00-version.js')"></script>
+<script src="js/02b-pack.js" onerror="_markFailed('js/02b-pack.js')"></script>
 <script src="js/env/01-env-state.js" onerror="_markFailed('js/env/01-env-state.js')"></script>
 <script src="js/env/02-env-scene.js" onerror="_markFailed('js/env/02-env-scene.js')"></script>
 <script src="js/env/03m-shadows.js" onerror="_markFailed('js/env/03m-shadows.js')"></script>

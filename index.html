@@ -314,6 +314,8 @@
     #btnLoadSaved::before{content:"📁 開く";font-size:11.5px;}
     #topbar #btnDownloadConfig{font-size:0;}
     #btnDownloadConfig::before{content:"⇩ DL";font-size:11.5px;}
+    #topbar #btnDownloadAll{font-size:0;}
+    #btnDownloadAll::before{content:"⇩ 全部";font-size:11.5px;}
     #topbar #btnImportConfig{font-size:0;}
     #btnImportConfig::before{content:"⇧ 読込";font-size:11.5px;}
     #topbar #linkEnvPreview{font-size:0;}
@@ -333,8 +335,9 @@
       <button id="btnSaveConfig" class="primary">保存</button>
       <button id="btnLoadSaved">保存済みを開く</button>
       <div class="topbar-sep"></div>
-      <button id="btnDownloadConfig" title="3Dモデルを含まない設定ファイル(.json)をダウンロードします">⇩ 設定をダウンロード</button>
-      <button id="btnImportConfig" title="ダウンロードした設定ファイル(.json)を、今開いているモデルに適用します">⇧ 設定を読込</button>
+      <button id="btnDownloadConfig" title="今開いている機体の設定と3Dモデルを、1つのZIPにまとめてダウンロードします">⇩ 設定をダウンロード</button>
+      <button id="btnDownloadAll" title="保存済みの機体すべて（設定と3Dモデル）と飛行画面の設定を、1つのZIPにまとめてダウンロードします">⇩ まとめてZIP</button>
+      <button id="btnImportConfig" title="ダウンロードしたZIP（3Dモデルごと開いて保存する）か、設定だけの.json（今開いているモデルに適用する）を読み込みます">⇧ 設定を読込</button>
       <div class="topbar-sep"></div>
       <a id="linkEnvPreview" class="navlink" href="flight.html" title="空・雲・昼夜サイクルの環境プレビューを開きます">🌤 環境プレビュー</a>
     </div>
@@ -404,7 +407,7 @@
 </div>
 
 <input type="file" id="fileInput" accept=".glb,.gltf">
-<input type="file" id="configFileInput" accept=".json">
+<input type="file" id="configFileInput" accept=".json,.zip,application/json,application/zip">
 <div id="toast"></div>
 
 <script>
@@ -449,6 +452,7 @@
 <script src="js/00-version.js" onerror="_markFailed('js/00-version.js')"></script>
 <script src="js/01-state.js" onerror="_markFailed('js/01-state.js')"></script>
 <script src="js/02-storage.js" onerror="_markFailed('js/02-storage.js')"></script>
+<script src="js/02b-pack.js" onerror="_markFailed('js/02b-pack.js')"></script>
 <script src="js/03-scene-setup.js" onerror="_markFailed('js/03-scene-setup.js')"></script>
 <script src="js/04-model-loader.js" onerror="_markFailed('js/04-model-loader.js')"></script>
 <script src="js/env/09c-aircraft-bones.js" onerror="_markFailed('js/env/09c-aircraft-bones.js')"></script>
