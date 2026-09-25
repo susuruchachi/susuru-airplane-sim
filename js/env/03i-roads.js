@@ -53,6 +53,22 @@ const BRIDGE_PARAPET_H_M = 1.1;      // 欄干の高さ
 const BRIDGE_PIER_SPACING_M = 48;    // 橋脚の間隔
 const BRIDGE_PIER_LEN_M = 3;         // 橋脚の厚み（道に沿った向き）
 const BRIDGE_COLOR = 0x6f6b64;       // コンクリート
+// 橋の形は渡る長さ（桁の長さ）で選ぶ。以前はどの橋も48mおきに橋脚の立つ桁橋だった。
+//   桁橋 … 〜BRIDGE_ARCH_FROM_M。街の中の短い橋
+//   アーチ橋 … 〜BRIDGE_STAY_FROM_M。桁の上に2本のアーチ（高さは長さの16%）、吊り材で桁を吊る。川の中に橋脚を立てない
+//   斜張橋 … 〜BRIDGE_SUSP_FROM_M。塔（1本か2本）から扇形にケーブルを張る
+//   吊り橋 … それより長い。2本の塔のあいだに主ケーブルを垂らし、吊り材で桁を吊る
+const BRIDGE_ARCH_FROM_M = 250;
+const BRIDGE_STAY_FROM_M = 520;
+const BRIDGE_SUSP_FROM_M = 820;
+const BRIDGE_STEEL_COLORS = { arch: 0xb8bcc0, stay: 0xc8c8c4, susp: [0x9a3a26, 0x8a8e92] };
+
+function bridgeTypeFor(len) {
+  if (len < BRIDGE_ARCH_FROM_M) return 'girder';
+  if (len < BRIDGE_STAY_FROM_M) return 'arch';
+  if (len < BRIDGE_SUSP_FROM_M) return 'stay';
+  return 'susp';
+}
 
 // 経路に沿った距離 s が、どれかの橋（取付け部を含む）から margin 以内か
 function roadOnBridge(road, s, margin) {
@@ -76,6 +92,35 @@ function buildBridgeStructure(rows, bridges, ox, oy, oz) {
   };
   const elevated = (r) => r.prof > Math.min(r.gl, r.gr) + ROAD_LIFT_M + 0.3;
 
+  // 橋ごとの形と、川の中に立てる橋脚の位置（桁橋以外は塔の下だけ）
+  for (const b of bridges) {
+    const len = b.s2 - b.s1;
+    b._type = bridgeTypeFor(len);
+    b._piers = b._type === 'girder' ? null
+      : b._type === 'arch' ? []
+        : b._type === 'stay' ? (len < 650 ? [b.s1 + len * 0.5] : [b.s1 + len * 0.28, b.s2 - len * 0.28])
+          : [b.s1 + len * 0.18, b.s2 - len * 0.18];
+  }
+  const pierAt = (a, b, sp, T, big) => {
+    const t = (sp - a.s) / ((b.s - a.s) || 1);
+    const cx = a.x + (b.x - a.x) * t, cz = a.z + (b.z - a.z) * t;
+    const top = (a.yl + a.yr) / 2 + ((b.yl + b.yr) / 2 - (a.yl + a.yr) / 2) * t - T;
+    const bottom = worldHeightAt(cx, cz) - 2;
+    if (top - bottom <= 1) return;
+    // 道の向きと横向き
+    let dx = b.x - a.x, dz = b.z - a.z;
+    const dl = Math.hypot(dx, dz) || 1; dx /= dl; dz /= dl;
+    const hw = Math.hypot(a.lx - a.rx, a.lz - a.rz) * (big ? 0.62 : 0.32); // 桁の幅の6割強（塔の下は桁より広く）
+    const hl = BRIDGE_PIER_LEN_M * (big ? 3 : 1) / 2;
+    const px = -dz, pz = dx;
+    const c = (u, v, y) => [cx + dx * u + px * v, y, cz + dz * u + pz * v];
+    const corners = [[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]];
+    for (let k = 0; k < 4; k++) {
+      const [u0, v0] = corners[k], [u1, v1] = corners[(k + 1) % 4];
+      quad(c(u0, v0, bottom), c(u1, v1, bottom), c(u1, v1, top), c(u0, v0, top));
+    }
+  };
+
   let pierNext = null;
   for (let i = 0; i < rows.length - 1; i++) {
     const a = rows[i], b = rows[i + 1];
@@ -97,28 +142,16 @@ function buildBridgeStructure(rows, bridges, ox, oy, oz) {
       quad(AL, BL, bL, aL);
       quad(AR, BR, bR, aR);
       quad(aL, bL, bR, aR);
-      // 橋脚：桁の下から地面（川底）まで。水際の外（陸の上）にも同じ間隔で立てる
-      if (pierNext === null || pierNext < a.s - BRIDGE_PIER_SPACING_M) pierNext = deck.s1 + BRIDGE_PIER_SPACING_M * 0.5;
-      while (pierNext >= a.s && pierNext < b.s) {
-        const t = (pierNext - a.s) / ((b.s - a.s) || 1);
-        const cx = a.x + (b.x - a.x) * t, cz = a.z + (b.z - a.z) * t;
-        const top = (a.yl + a.yr) / 2 + ((b.yl + b.yr) / 2 - (a.yl + a.yr) / 2) * t - T;
-        const bottom = worldHeightAt(cx, cz) - 2;
-        if (top - bottom > 1) {
-          // 道の向きと横向き
-          let dx = b.x - a.x, dz = b.z - a.z;
-          const dl = Math.hypot(dx, dz) || 1; dx /= dl; dz /= dl;
-          const hw = Math.hypot(a.lx - a.rx, a.lz - a.rz) * 0.32; // 桁の幅の6割強
-          const hl = BRIDGE_PIER_LEN_M / 2;
-          const px = -dz, pz = dx;
-          const c = (u, v, y) => [cx + dx * u + px * v, y, cz + dz * u + pz * v];
-          const corners = [[-hl, -hw], [hl, -hw], [hl, hw], [-hl, hw]];
-          for (let k = 0; k < 4; k++) {
-            const [u0, v0] = corners[k], [u1, v1] = corners[(k + 1) % 4];
-            quad(c(u0, v0, bottom), c(u1, v1, bottom), c(u1, v1, top), c(u0, v0, top));
-          }
+      // 橋脚：桁の下から地面（川底）まで。桁橋は水際の外（陸の上）にも同じ間隔で立てる。
+      // ほかの形は塔の下だけ（アーチ橋は川の中に1本も立てない）
+      if (deck._piers) {
+        for (const sp of deck._piers) if (sp >= a.s && sp < b.s) pierAt(a, b, sp, T, true);
+      } else {
+        if (pierNext === null || pierNext < a.s - BRIDGE_PIER_SPACING_M) pierNext = deck.s1 + BRIDGE_PIER_SPACING_M * 0.5;
+        while (pierNext >= a.s && pierNext < b.s) {
+          pierAt(a, b, pierNext, T, false);
+          pierNext += BRIDGE_PIER_SPACING_M;
         }
-        pierNext += BRIDGE_PIER_SPACING_M;
       }
     } else {
       // 取付け部（盛土）の擁壁：路面の縁から地面まで
@@ -139,6 +172,147 @@ function buildBridgeStructure(rows, bridges, ox, oy, oz) {
   mesh.position.set(ox, oy, oz);
   mesh.matrixAutoUpdate = false;
   mesh.updateMatrix();
+  // 桁の上の構造（アーチ・塔・ケーブル）。色が橋ごとに違うので頂点色の別メッシュにする
+  const sup = buildBridgeSuperstructure(rows, bridges, ox, oy, oz);
+  if (sup) mesh.add(sup);
+  return mesh;
+}
+
+// 桁の上の構造。rows の縁を s で補間して、アーチ・塔・ケーブルを細い角材で組む。
+function buildBridgeSuperstructure(rows, bridges, ox, oy, oz) {
+  const pos = [], col = [];
+  let rgb = [1, 1, 1];
+  const push = (p) => { pos.push(p[0] - ox, p[1] - oy, p[2] - oz); col.push(rgb[0], rgb[1], rgb[2]); };
+  const quad = (a, b, c, d) => { push(a); push(b); push(c); push(a); push(c); push(d); };
+  // p→q の角材（断面は十字の板2枚。どの向きから見ても細い線に見える）
+  const bar = (p, q, w) => {
+    const dx = q[0] - p[0], dy = q[1] - p[1], dz = q[2] - p[2];
+    const L = Math.hypot(dx, dy, dz) || 1;
+    // 軸に直交する2方向
+    let ax = -dz, az = dx, al = Math.hypot(ax, az);
+    if (al < 1e-6) { ax = 1; az = 0; al = 1; }
+    ax /= al; az /= al;
+    const bx = (dy * az) / L, by = (dz * ax - dx * az) / L, bz = (-dy * ax) / L;
+    const h = w / 2;
+    quad([p[0] + ax * h, p[1], p[2] + az * h], [q[0] + ax * h, q[1], q[2] + az * h],
+      [q[0] - ax * h, q[1], q[2] - az * h], [p[0] - ax * h, p[1], p[2] - az * h]);
+    quad([p[0] + bx * h, p[1] + by * h, p[2] + bz * h], [q[0] + bx * h, q[1] + by * h, q[2] + bz * h],
+      [q[0] - bx * h, q[1] - by * h, q[2] - bz * h], [p[0] - bx * h, p[1] - by * h, p[2] - bz * h]);
+  };
+  // 距離 s の断面（左右の縁と路面の高さ）。out は外へ out m 張り出した位置
+  const edgeAt = (sq, out) => {
+    let i = 0;
+    while (i < rows.length - 2 && rows[i + 1].s < sq) i++;
+    const a = rows[i], b = rows[i + 1];
+    const t = Math.min(Math.max((sq - a.s) / ((b.s - a.s) || 1), 0), 1);
+    const L = (u, v) => u + (v - u) * t;
+    const lx = L(a.lx, b.lx), lz = L(a.lz, b.lz), rx = L(a.rx, b.rx), rz = L(a.rz, b.rz);
+    const y = (L(a.yl, b.yl) + L(a.yr, b.yr)) / 2 + BRIDGE_PARAPET_H_M;
+    const wx = lx - rx, wz = lz - rz, wl = Math.hypot(wx, wz) || 1;
+    const ux = wx / wl * (out || 0), uz = wz / wl * (out || 0);
+    return { l: [lx + ux, y, lz + uz], r: [rx - ux, y, rz - uz], y };
+  };
+  const hex = (h) => [((h >> 16) & 255) / 255, ((h >> 8) & 255) / 255, (h & 255) / 255];
+
+  for (const b of bridges) {
+    if (!b._type || b._type === 'girder') continue;
+    const s1 = b.s1, s2 = b.s2, len = s2 - s1;
+    if (rows.length < 2 || rows[0].s > s1 + 1 || rows[rows.length - 1].s < s2 - 1) continue;
+    if (b._type === 'arch') {
+      rgb = hex(BRIDGE_STEEL_COLORS.arch);
+      const rise = len * 0.16, n = 28;
+      for (const side of ['l', 'r']) {
+        let prev = null;
+        for (let k = 0; k <= n; k++) {
+          const sq = s1 + (len * k) / n, t = k / n;
+          const e = edgeAt(sq, 1)[side];
+          const p = [e[0], e[1] + rise * 4 * t * (1 - t), e[2]];
+          if (prev) bar(prev, p, 2.6);
+          // 吊り材
+          if (k > 0 && k < n) bar([e[0], e[1], e[2]], p, 0.5);
+          prev = p;
+        }
+      }
+      // 左右のアーチをつなぐ横桁（上だけ。車の通る高さより上）
+      for (let k = 3; k <= 25; k += 4) {
+        const sq = s1 + (len * k) / 28, t = k / 28, h = rise * 4 * t * (1 - t);
+        if (h < 8) continue;
+        const e = edgeAt(sq, 1);
+        bar([e.l[0], e.l[1] + h, e.l[2]], [e.r[0], e.r[1] + h, e.r[2]], 1.2);
+      }
+    } else {
+      const susp = b._type === 'susp';
+      const towers = b._piers;
+      const H = susp ? len * 0.11 + 20 : (towers.length === 1 ? len * 0.2 : len * 0.15) + 12;
+      rgb = hex(susp ? BRIDGE_STEEL_COLORS.susp[(Math.round(len) % 3 === 0) ? 1 : 0] : BRIDGE_STEEL_COLORS.stay);
+      const tops = [];
+      for (const st of towers) {
+        const e = edgeAt(st, 2.5);
+        const base = e.y - BRIDGE_PARAPET_H_M - BRIDGE_DECK_THICK_M;
+        if (susp) {
+          // 門の形の塔（両脚と横梁2本）
+          const tl = [e.l[0], e.y + H, e.l[2]], tr = [e.r[0], e.y + H, e.r[2]];
+          bar([e.l[0], base, e.l[2]], tl, 4); bar([e.r[0], base, e.r[2]], tr, 4);
+          bar([e.l[0], e.y + H * 0.55, e.l[2]], [e.r[0], e.y + H * 0.55, e.r[2]], 3);
+          bar(tl, tr, 3);
+          tops.push({ s: st, l: tl, r: tr });
+        } else {
+          // A字の塔（両脚が上で1点に集まる）
+          const cx = (e.l[0] + e.r[0]) / 2, cz = (e.l[2] + e.r[2]) / 2;
+          const apex = [cx, e.y + H, cz];
+          bar([e.l[0], base, e.l[2]], apex, 3.6); bar([e.r[0], base, e.r[2]], apex, 3.6);
+          bar([e.l[0], e.y + 6, e.l[2]], [e.r[0], e.y + 6, e.r[2]], 2);
+          tops.push({ s: st, l: apex, r: apex });
+        }
+      }
+      if (susp) {
+        // 主ケーブル：両端（取付け）→ 塔の上 → 塔のあいだは放物線で桁の近くまで垂れる → 塔の上 → 両端
+        const [A, B] = tops;
+        for (const side of ['l', 'r']) {
+          const cable = (sq) => {
+            const e = edgeAt(sq, 2.5)[side];
+            let y;
+            if (sq <= A.s) y = e[1] + (H * (sq - s1)) / (A.s - s1);
+            else if (sq >= B.s) y = e[1] + (H * (s2 - sq)) / (s2 - B.s);
+            else { const t = (sq - A.s) / (B.s - A.s); y = e[1] + 4 + (H - 4) * Math.pow(2 * t - 1, 2); }
+            return [e[0], y, e[2]];
+          };
+          let prev = cable(s1);
+          for (let sq = s1 + 12; sq <= s2 + 0.01; sq += 12) {
+            const p = cable(Math.min(sq, s2));
+            bar(prev, p, 1.4);
+            const e = edgeAt(Math.min(sq, s2), 2.5)[side];
+            if (p[1] - e[1] > 2) bar(e, p, 0.35);
+            prev = p;
+          }
+        }
+      } else {
+        // 斜張：塔の上から、左右それぞれ18mおきの桁の縁へ扇形に
+        for (const tw of tops) {
+          const reach = towers.length === 1 ? len * 0.48 : len * 0.34;
+          for (let d = 18; d <= reach; d += 18) {
+            for (const sq of [tw.s - d, tw.s + d]) {
+              if (sq < s1 || sq > s2) continue;
+              const e = edgeAt(sq, 1);
+              bar([tw.l[0], tw.l[1] - 2, tw.l[2]], e.l, 0.45);
+              bar([tw.r[0], tw.r[1] - 2, tw.r[2]], e.r, 0.45);
+            }
+          }
+        }
+      }
+    }
+  }
+  if (!pos.length) return null;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(col), 3));
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  if (!EnvState.bridgeSteelMaterial) {
+    EnvState.bridgeSteelMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+  }
+  const mesh = new THREE.Mesh(geo, EnvState.bridgeSteelMaterial);
+  mesh.matrixAutoUpdate = false;
   return mesh;
 }
 
