@@ -1358,8 +1358,15 @@ const AP_SLOW_PHASES = ['descent', 'approach', 'flare', 'rollout', 'taxi',
 
 function apManageEngineGroups(model, state, controls, ap, spd, dt, env) {
   const groups = model.engineGroups || [];
-  if (groups.length < 2) return;
   if (!controls.engineGroupOff) controls.engineGroupOff = {};
+  // グループが1つしかない機体は切り替えるものが無いが、**止まっていたら点け直す**。
+  // 前に乗っていた機体で止めたグループの記録が残っていると（グループの番号は機体どうしで重なる）、
+  // この機体のただ一つのエンジンが止まったままになり、全自動を入れても出力が上がらず動かなかった
+  // ——実測でTB2_18の自動離陸（グループ1を止める）のあとTB1_21に替えると、推力0のまま滑走路に止まっていた。
+  if (groups.length < 2) {
+    if (groups[0] && controls.engineGroupOff[groups[0].id]) controls.engineGroupOff[groups[0].id] = false;
+    return;
+  }
   ap.engineHold = Math.max((ap.engineHold || 0) - dt, 0);
   if (ap.engineHold > 0) return;
 

@@ -213,6 +213,12 @@ function resetFlightToRunway() {
   f.controls.brake = 0;
   f.controls.gearDown = true;
   f.controls.parkingBrake = true;
+  // **止めたエンジングループとエンジンの回り具合も取り直す**。機体を替えても残っていたので、
+  // 前の機体で止めたグループ（番号は機体どうしで重なる）がこの機体でも止まったままになり、
+  // エンジンが1グループしかない機体は出力を上げても全く動かなかった。
+  f.controls.engineGroupOff = {};
+  f.state.enginePower = {};
+  if (typeof flightAutopilot === 'function') flightAutopilot().engineHold = 0;
   // 上昇していく速度でトリムを取っておく。ここを0のまま出すと、機体によって
   // 手を離した瞬間に機首が上がったり下がったりして、まっすぐ飛ぶことすらできない。
   setFlightTrimForClimb();
