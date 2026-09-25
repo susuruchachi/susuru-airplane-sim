@@ -446,6 +446,8 @@ function _roadHousePlace(x, z, dx, dz, w, d) {
   if (typeof worldAirportRoadBlock === 'function' && worldAirportRoadBlock(x, z, 250)) return null;
   const near = worldNearestAirport(x, z);
   if (near && near.airport && near.distanceM < near.airport.flatInnerR) return null;
+  // 港の岸壁（の付け根）には建てない。岸壁は陸へ30m食い込んでいて、床を家が突き抜ける
+  if (typeof worldPortAt === 'function' && worldPortAt(x, z, 40)) return null;
   let lo = Infinity, hi = -Infinity;
   const hw = w / 2, hd = d / 2;
   for (const [u, v] of [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd], [0, 0]]) {

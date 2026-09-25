@@ -184,6 +184,40 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   check(plazaHit === 0, '名所の敷地に建物が建たない', `${plazaHit}軒`);
 }
 
+// --- 港：海の近い街の海岸に岸壁があり、街から道がつながっている ---
+// 岸壁は岸から海の上へ突き出した床で、地形は均さない。付け根が低い岸で、沖が深い所に置く。
+{
+  const ports = W.WORLD_PORTS;
+  let landOk = 0, seaOk = 0, roadOk = 0, apart = 0, notInCity = 0;
+  for (const p of ports) {
+    // 付け根（陸側の縁）は陸で低く、沖の縁は海で深い（海岸線に沿って8点）
+    let land = true, sea = true;
+    for (let u = -p.lengthM / 2; u <= p.lengthM / 2; u += p.lengthM / 7) {
+      const bx = p.x + p.tx * u - p.ox * 40, bz = p.z + p.tz * u - p.oz * 40;
+      const h = W.worldHeightAt(bx, bz);
+      if (!(h > 0 && h <= 4)) land = false;
+      const sx = p.x + p.tx * u + p.ox * p.depthM, sz = p.z + p.tz * u + p.oz * p.depthM;
+      if (!(W.worldHeightAt(sx, sz) < -3)) sea = false;
+    }
+    if (land) landOk++;
+    if (sea) seaOk++;
+    const road = W.WORLD_ROADS.find((r) => r.portId === p.id);
+    if (road) {
+      const end = road.points[road.points.length - 1];
+      if (Math.hypot(end.x - p.gate.x, end.z - p.gate.z) < 1) roadOk++;
+    }
+    if (!W.WORLD_AIRPORTS.some((a) => Math.hypot(a.x - p.x, a.z - p.z) < a.flatOuterR + 1500)) apart++;
+    if (!W.WORLD_CITIES.some((c) => Math.hypot(c.x - p.x, c.z - p.z) < c.builtRadiusM + 300)) notInCity++;
+  }
+  console.log(`[  --  ] 港: ${ports.length}か所（${ports.map((p) => p.city.split('-')[1]).join(' ')}）`);
+  check(ports.length >= 15, '海の近い街に港が15か所以上ある', `${ports.length}`);
+  summary('港の岸壁の付け根が低い陸（0〜4m）', landOk, ports.length);
+  summary('港の岸壁の沖の縁が深い海（3m以上）', seaOk, ports.length);
+  summary('港まで街から道がつながり、岸壁の付け根で終わる', roadOk, ports.length);
+  summary('港が空港の平地から離れている', apart, ports.length);
+  summary('港が街の建物の範囲にかからない', notInCity, ports.length);
+}
+
 // --- 空港：標高どおりに均されていて、滑走路の全長が平らか ---
 {
   let level = 0, flat = 0, apart = 0;
@@ -541,7 +575,7 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
 
   const kinds = {};
   for (const r of W.WORLD_ROADS) kinds[r.kind] = (kinds[r.kind] || 0) + 1;
-  console.log(`[  --  ] 内訳: 幹線${kinds.trunk || 0} 空港への支線${kinds.spur || 0}`);
+  console.log(`[  --  ] 内訳: 幹線${kinds.trunk || 0} 空港・港への支線${kinds.spur || 0}`);
 
   // 街が道路網につながっているか（島の街はつながらなくてよい）
   let linked = 0;

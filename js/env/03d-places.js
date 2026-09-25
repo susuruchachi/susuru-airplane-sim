@@ -103,6 +103,7 @@ function initPlaces() {
   EnvState.streetMaterial.polygonOffsetFactor = -5;
   EnvState.streetMaterial.polygonOffsetUnits = -5;
 
+  if (typeof initPorts === 'function') initPorts();   // 港（03l-ports.js）
   initPlaceLabels();
   refreshCities();
 }
@@ -137,6 +138,8 @@ function refreshCities() {
   }
   // 近い街から建てる（見ている場所ほど早く出てほしい）
   _cityWork.sort((a, b) => a.d - b.d);
+  // 港も同じ判断で出し入れする
+  if (typeof refreshPorts === 'function') refreshPorts();
 }
 
 function updateCities() {
@@ -425,6 +428,7 @@ function buildCityStreets(city) {
 // 夜になったら街の灯りを点ける（03-sky.js から dayFactor を受け取る）
 function updatePlacesForDaylight(dayFactor) {
   const v = 1 - THREE.MathUtils.clamp(dayFactor, 0, 1);
+  if (typeof updatePortsForDaylight === 'function') updatePortsForDaylight(dayFactor);
   if (!EnvState.builtCities) return;
   for (const entry of EnvState.builtCities.values()) {
     entry.lights.material.opacity = v;

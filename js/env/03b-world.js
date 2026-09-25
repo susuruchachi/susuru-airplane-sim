@@ -2636,6 +2636,95 @@ function worldGeneratePeaks() {
 
 const WORLD_ROADS = [];
 
+// ============================================================================
+// 港
+// 海の近い街（中心から PORT_SEARCH_M 以内に海がある街）の海岸に港を置く。
+// 地形は均さない。**岸から海の上へ突き出した岸壁**（杭の上の床）にして、その上に
+// ガントリークレーン・コンテナ・倉庫を並べ、横に防波堤と灯台、沖側に船を着ける
+// （形は 03l-ports.js）。道路は街から岸壁の付け根まで支線を引く（空港と同じ）。
+// 岸壁の付け根が低い岸（陸の高さ PORT_MAX_LAND_M 以下）で、沖が十分深い（PORT_MIN_DEPTH_M）
+// 所を、街から見た海の向きの±30°で探して、いちばん低い岸を選ぶ。川の水面・空港の均しの近くは避ける。
+// ============================================================================
+const PORT_SEARCH_M = 20000;
+const PORT_QUAY_LEN_M = 560;      // 岸壁の長さ（海岸線に沿った向き）
+const PORT_QUAY_DEPTH_M = 230;    // 岸から沖へ突き出す長さ
+const PORT_QUAY_BACK_M = 30;      // 陸へ食い込ませる長さ（岸と床のあいだに隙間を作らない）
+const PORT_DECK_Y_M = 3;          // 床の高さ（海面から）
+const PORT_MAX_LAND_M = 4;
+const PORT_MIN_DEPTH_M = 3;
+const PORT_ROAD_BACK_M = 400;     // 道路の取り付き点（岸から陸へ）
+const WORLD_PORTS = [];
+
+function worldGeneratePorts() {
+  WORLD_PORTS.length = 0;
+  const H = worldHeightAt;
+  for (const c of WORLD_CITIES) {
+    // 1) 街の中心からいちばん近い海の向き
+    let sea = null;
+    for (let r = 300; r <= PORT_SEARCH_M && !sea; r += 300) {
+      const n = Math.max(24, Math.round(r / 120));
+      for (let a = 0; a < n; a++) {
+        const ang = (a / n) * Math.PI * 2;
+        if (H(c.x + Math.cos(ang) * r, c.z + Math.sin(ang) * r) <= -1) { sea = { r, ang }; break; }
+      }
+    }
+    if (!sea) continue;
+    // 2) その向きの±30°で、街から出て最初に海になる手前（海岸）を探し、岸壁が置けるか見る
+    let best = null;
+    for (let da = -30; da <= 30; da += 6) {
+      const ang = sea.ang + da * Math.PI / 180;
+      const dx = Math.cos(ang), dz = Math.sin(ang);
+      let last = null;
+      for (let d = c.builtRadiusM; d <= sea.r + 4000; d += 20) {
+        const x = c.x + dx * d, z = c.z + dz * d;
+        if (H(x, z) > 0) last = { x, z }; else if (last) break;
+      }
+      if (!last) continue;
+      // 沖の向き＝地面の下り勾配の向き
+      const e = 30;
+      const gx = (H(last.x + e, last.z) - H(last.x - e, last.z)) / (2 * e);
+      const gz = (H(last.x, last.z + e) - H(last.x, last.z - e)) / (2 * e);
+      const gl = Math.hypot(gx, gz);
+      if (gl < 1e-6) continue;
+      const ox = -gx / gl, oz = -gz / gl, tx = -oz, tz = ox;
+      let ok = true, landMax = 0, depth = Infinity;
+      for (let u = -PORT_QUAY_LEN_M / 2; u <= PORT_QUAY_LEN_M / 2 && ok; u += 70) {
+        const sx = last.x + tx * u, sz = last.z + tz * u;
+        const land = H(sx - ox * 40, sz - oz * 40);
+        const deep = H(sx + ox * PORT_QUAY_DEPTH_M, sz + oz * PORT_QUAY_DEPTH_M);
+        if (!(land > 0 && land <= PORT_MAX_LAND_M && deep < -PORT_MIN_DEPTH_M)) ok = false;
+        landMax = Math.max(landMax, land); depth = Math.min(depth, -deep);
+      }
+      if (!ok) continue;
+      if (worldWaterSurfaceAt(last.x, last.z) !== null) continue;       // 川の水面の上には置かない
+      if (WORLD_AIRPORTS.some((a) => Math.hypot(a.x - last.x, a.z - last.z) < a.flatOuterR + 1500)) continue;
+      if (WORLD_PORTS.some((q) => Math.hypot(q.x - last.x, q.z - last.z) < 4000)) continue;
+      if (!best || landMax < best.landMax) best = { x: last.x, z: last.z, ox, oz, tx, tz, landMax, depth };
+    }
+    if (!best) continue;
+    const via = { x: best.x - best.ox * PORT_ROAD_BACK_M, z: best.z - best.oz * PORT_ROAD_BACK_M };
+    const gate = { x: best.x - best.ox * (PORT_QUAY_BACK_M * 0.5), z: best.z - best.oz * (PORT_QUAY_BACK_M * 0.5) };
+    WORLD_PORTS.push({
+      id: 'port-' + c.id, city: c.id, x: best.x, z: best.z,
+      ox: best.ox, oz: best.oz, tx: best.tx, tz: best.tz,
+      lengthM: PORT_QUAY_LEN_M, depthM: PORT_QUAY_DEPTH_M, backM: PORT_QUAY_BACK_M,
+      deckY: PORT_DECK_Y_M, landMax: best.landMax, seaDepthM: best.depth, via, gate,
+    });
+  }
+}
+function worldPortById(id) { return WORLD_PORTS.find((p) => p.id === id) || null; }
+// (x, z) が港の岸壁（まわり margin m を含む）の上か。港があればそれを返す
+function worldPortAt(x, z, margin) {
+  const m = margin || 0;
+  for (const p of WORLD_PORTS) {
+    const dx = x - p.x, dz = z - p.z;
+    if (dx * dx + dz * dz > (p.lengthM + p.depthM + m) * (p.lengthM + p.depthM + m)) continue;
+    const u = dx * p.tx + dz * p.tz, v = dx * p.ox + dz * p.oz;
+    if (Math.abs(u) <= p.lengthM / 2 + m && v >= -p.backM - m && v <= p.depthM + m) return p;
+  }
+  return null;
+}
+
 const ROAD_CELL_M = 3500;           // 経路探索の格子
 const ROAD_CORRIDOR_FRAC = 0.40;    // 直線からどれだけ外へ出てよいか（距離に対する割合）
 const ROAD_CORRIDOR_MIN_M = 17500;
@@ -3054,6 +3143,15 @@ function worldGenerateRoads() {
     if (road) road.airportId = a.id;
   }
 
+  // 4) 港も、親の街から岸壁の付け根まで支線を引く（取り付き点は岸から陸へ PORT_ROAD_BACK_M）
+  for (const p of WORLD_PORTS) {
+    const c = worldCityById(p.city);
+    if (!c) continue;
+    const road = worldAddRoad('road-' + p.id, c.x, c.z, p.via.x, p.via.z, ROAD_SPUR_HALF_WIDTH_M, 'spur',
+      [p.via, p.gate]);
+    if (road) { road.portId = p.id; p.roadId = road.id; }
+  }
+
   worldBuildRoadGrid();
 }
 
@@ -3460,6 +3558,9 @@ function initWorld() {
   // 10) 山の名前と標高。稜線の上を歩いて峰を拾うので、地形が出来上がってから。
   worldGeneratePeaks();
 
+  // 10.5) 港。地形が出来上がってから、海の近い街の海岸に置く（道路はここへも引く）
+  worldGeneratePorts();
+
   // 11) 道路。**いちばん最後**に引く。経路は「出来上がった地形」の上で探さないと、
   //     川の谷も空港の平地も見えないまま山と川を突っ切る道になる。
   worldGenerateRoads();
@@ -3474,7 +3575,7 @@ if (typeof module !== 'undefined' && module.exports) {
     WORLD_SEED, WORLD_SIZE, WORLD_HALF,
     WORLD_LANDMASSES, WORLD_RANGES, WORLD_COUNTRIES, WORLD_CITIES, WORLD_AIRPORTS,
     WORLD_CITY_DATA, WORLD_AIRPORT_DATA,
-    WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, WORLD_ROADS, WORLD_PEAKS,
+    WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, WORLD_ROADS, WORLD_PEAKS, WORLD_PORTS, worldPortById, worldPortAt,
     worldLakeAt, worldRiverAt, worldWaterSurfaceAt, worldLakeFootprintAt, worldLakeShoreCells, worldLakeField,
     worldRangeUpliftAt, worldInRangeAt, worldNearestCrestDist, worldFindLandingField, worldCheckLandingField, worldFindVtolPad, worldCheckVtolPad,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
