@@ -22,7 +22,8 @@ async function initFlight() {
   // 機体の候補をそろえる。Builderの保存があればそれを優先し、内蔵機は必ず末尾に置く。
   const builder = await loadBuilderAircraftConfigs();
   const builtin = defaultAircraftConfig();
-  EnvState.flight.configs = builder.list.concat([builtin]);
+  // 内蔵のヘリコプターも末尾に置く（Builderで作らなくても試せるように）
+  EnvState.flight.configs = builder.list.concat([builtin, defaultHelicopterConfig()]);
   EnvState.flight.configName = (builder.preferred && builder.preferred.name) || builtin.name;
 
   // 保存してあった機体と視点をここで戻す。設定の読み込みは起動処理より先に走るので、
@@ -245,6 +246,7 @@ function resetFlightToRunway() {
 function setFlightTrimForClimb() {
   const f = EnvState.flight;
   if (!f.aircraft) return;
+  if (f.aircraft.model.isHelicopter) { f.controls.trim = 0; return; }   // ヘリに翼のトリムは無い
   const perf = analyzeAircraftPerformance(f.aircraft.model);
   // 空気の濃さで釣り合いは変わるので、滑走路の高さを基準にする（高地の空港もある）
   const sol = solveLevelTrim(f.aircraft.model, perf.liftoffMps * 1.25, f.state.altitudeM + 300);

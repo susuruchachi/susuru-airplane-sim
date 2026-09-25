@@ -112,7 +112,21 @@ function soundBuildNoiseBuffer(ctx) {
 //              山をなだらかにする。
 //   AB付き    … ジェットに、点いたときだけ**腹に来る低い唸り**を足す。
 //   ロケット  … ほとんど低い雑音。150Hz以下が主で、上のほうに「バチバチ」が乗る。
+//   ヘリのローター … 「バタバタ」。羽根が前の羽根の渦を叩く音（ブレードスラップ）で、
+//              広い帯域の雑音が**羽根の通過する速さで脈を打つ**（4枚・毎分390回転で約26回/秒。
+//              耳には「バタバタ」と聞こえる12〜18Hzあたりに置く）。上にタービンの細い高い音。
+//              回転数はほぼ一定なので、コレクティブを動かしても高さはあまり変わらず、強さだけ変わる。
 const SOUND_ENGINE_LOOK = {
+  rotor: {
+    toneFrom: 0, toneTo: 0, toneType: 'sine', toneGain: 0,
+    toneCutMul: 4,
+    noiseHz: 320, noiseQ: 0.55, noiseGain: 1.0,
+    // 脈の速さ（アイドル〜全開）と深さ
+    slapFrom: 12, slapTo: 17, slapDepth: 0.85,
+    whineFrom: 1900, whineTo: 2300,
+    whineGain: 0.006, whineHarm: 0.4, whineRasp: 0.35, whineRaspQ: 9,
+    rumbleGain: 0.35, level: 0.9, levelFloor: 0.55,
+  },
   prop: {
     // 翼通過周波数（アイドル〜全開）
     toneFrom: 25, toneTo: 95, toneType: 'sawtooth', toneGain: 0.55,
@@ -186,7 +200,23 @@ function buildEngineVoice(ctx, dest, kind, noiseBuf) {
   air.frequency.value = SOUND_AIR_NEAR_HZ;
   const out = ctx.createGain();
   out.gain.value = 1;
-  body.connect(sub).connect(air).connect(out).connect(dest);
+  // 脈（ヘリのローターのバタバタ）。音全体の大きさを羽根の通過の速さで揺らす
+  let slap = null;
+  if (look.slapDepth > 0) {
+    const am = ctx.createGain();
+    am.gain.value = 1 - look.slapDepth * 0.5;
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = look.slapFrom;
+    const depth = ctx.createGain();
+    depth.gain.value = look.slapDepth * 0.5;
+    lfo.connect(depth).connect(am.gain);
+    body.connect(am).connect(sub);
+    slap = { am, lfo, depth };
+  } else {
+    body.connect(sub);
+  }
+  sub.connect(air).connect(out).connect(dest);
 
   const parts = {};
 
@@ -279,8 +309,11 @@ function buildEngineVoice(ctx, dest, kind, noiseBuf) {
       const p = Math.max(Math.min(lever, 1), 0);
       const a = Math.max(Math.min(ab || 0, 1), 0);
       // 出力が上がるほど大きく。0では完全に消す（止めたエンジンは鳴らない）。
-      const lv = p <= 0.004 ? 0 : look.level * (0.12 + 0.88 * p);
+      // ローターは回転数がほぼ一定なので、下限（levelFloor）から上がるだけ
+      const floor = look.levelFloor === undefined ? 0.12 : look.levelFloor;
+      const lv = p <= 0.004 ? 0 : look.level * (floor + (1 - floor) * p);
       soundRamp(body.gain, lv, t, tau);
+      if (slap) soundRamp(slap.lfo.frequency, (look.slapFrom + (look.slapTo - look.slapFrom) * p) * voice.doppler, t, tau);
       if (parts.tone) {
         const hz = (look.toneFrom + (look.toneTo - look.toneFrom) * p) * voice.doppler;
         soundRamp(parts.tone.osc.frequency, hz, t, tau);
@@ -304,8 +337,8 @@ function buildEngineVoice(ctx, dest, kind, noiseBuf) {
         }
       }
       if (parts.rumble) {
-        // ロケットは出力そのまま、AB付きは点いたぶんだけ
-        const amt = kind === 'rocket' ? p : a;
+        // ロケットとローターは出力そのまま、AB付きは点いたぶんだけ
+        const amt = kind === 'rocket' || kind === 'rotor' ? p : a;
         soundRamp(parts.rumble.gain.gain, parts.rumble.max * amt, t, tau);
         soundRamp(parts.rumble.lp.frequency, SOUND_RUMBLE_HZ * voice.doppler, t, tau);
       }
@@ -337,6 +370,7 @@ function buildEngineVoice(ctx, dest, kind, noiseBuf) {
       }
       if (parts.noise) parts.noise.src.start(t);
       if (parts.rumble) parts.rumble.src.start(t);
+      if (slap) slap.lfo.start(t);
     },
     stop(when) {
       const t = when === undefined ? ctx.currentTime : when;
@@ -347,6 +381,7 @@ function buildEngineVoice(ctx, dest, kind, noiseBuf) {
       }
       if (parts.noise) parts.noise.src.stop(t);
       if (parts.rumble) parts.rumble.src.stop(t);
+      if (slap) slap.lfo.stop(t);
     },
   };
   return voice;

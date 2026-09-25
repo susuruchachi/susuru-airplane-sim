@@ -64,8 +64,9 @@ async function loadBuilderAircraftConfigs() {
     const all = await idbGetAll(db, AIRCRAFT_STORE_CONFIGS);
     const meta = await idbGet(db, AIRCRAFT_STORE_META, 'lastConfigName');
     const lastName = meta ? meta.value : null;
-    // 翼が1枚も無い機体は飛ばせないので候補から外す
-    const usable = all.filter((c) => (c.parts || []).some((p) => p.type === 'wing'));
+    // 翼が1枚も無い機体は飛ばせないので候補から外す（ヘリのローターを積んだ機体は翼が無くても飛べる）
+    const usable = all.filter((c) => (c.parts || []).some((p) => p.type === 'wing'
+      || (p.type === 'engine' && p.props && p.props.engineKind === 'rotor')));
     usable.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
     const last = usable.find((c) => c.name === lastName);
     return { list: usable, preferred: last || usable[0] || null };
@@ -152,6 +153,78 @@ function buildBuiltinAircraftMesh() {
   return group;
 }
 
+// 内蔵のヘリコプター。キャビン・尾部・エンジンの覆い・そり、回るメインローター（4枚）と
+// テールローター（2枚）。回転の中心は 09-aircraft.js の defaultHelicopterConfig と同じ位置
+function buildBuiltinHelicopterMesh() {
+  const group = new THREE.Group();
+  const paint = (color, opts) => new THREE.MeshStandardMaterial(
+    Object.assign({ color, roughness: 0.5, metalness: 0.15 }, opts || {}));
+  const body = paint(0xb0302a), dark = paint(0x2a2f36), light = paint(0xdfe4ea);
+  const cabin = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), body);
+  cabin.scale.set(1.25, 1.15, 2.3); cabin.position.set(0, 1.55, -0.5);
+  group.add(cabin);
+  const glass = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.5),
+    new THREE.MeshStandardMaterial({ color: 0x8fc4e8, roughness: 0.1, metalness: 0.2, transparent: true, opacity: 0.6 }));
+  glass.scale.set(1.1, 0.9, 1.4); glass.position.set(0, 1.7, -1.6); glass.rotation.x = -0.5;
+  group.add(glass);
+  const housing = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.7, 2.4), light);
+  housing.position.set(0, 2.55, 0.1);
+  group.add(housing);
+  const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.38, 5.6, 12), body);
+  boom.rotation.x = Math.PI / 2; boom.position.set(0, 1.7, 4.3);
+  group.add(boom);
+  const fin = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.4, 0.8), body);
+  fin.position.set(0, 2.2, 7.1);
+  group.add(fin);
+  const stab = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.06, 0.55), body);
+  stab.position.set(0, 1.55, 6.4);
+  group.add(stab);
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.12, 0.45, 10), dark);
+  mast.position.set(0, 3.0, 0);
+  group.add(mast);
+  // そり（脚の接地点 ±1.1m・前後 -1.3〜1.2m に合わせる）
+  for (const sx of [-1.1, 1.1]) {
+    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 3.6, 8), dark);
+    bar.rotation.x = Math.PI / 2; bar.position.set(sx, 0.06, -0.05);
+    group.add(bar);
+    for (const sz of [-0.9, 0.8]) {
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.05, 8), dark);
+      leg.position.set(sx * 0.82, 0.55, sz); leg.rotation.z = sx > 0 ? 0.35 : -0.35;
+      group.add(leg);
+    }
+  }
+  // メインローター（4枚）と、速く回ったときに見える薄い円
+  const rotor = new THREE.Group();
+  rotor.position.set(0, 3.2, 0);
+  const bladeMat = new THREE.MeshStandardMaterial({ color: 0x1f2328, roughness: 0.6, transparent: true, opacity: 1 });
+  for (let i = 0; i < 4; i++) {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(5.3, 0.05, 0.3), bladeMat);
+    b.position.set(Math.cos(i * Math.PI / 2) * 2.75, 0, Math.sin(i * Math.PI / 2) * 2.75);
+    b.rotation.y = -i * Math.PI / 2;
+    rotor.add(b);
+  }
+  rotor.add(new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.2, 10), dark));
+  group.add(rotor);
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(5.5, 40),
+    new THREE.MeshBasicMaterial({ color: 0x2a2f36, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }));
+  disc.rotation.x = -Math.PI / 2; disc.position.set(0, 3.2, 0);
+  group.add(disc);
+  // テールローター（横向きの軸で回る）
+  const tail = new THREE.Group();
+  tail.position.set(0.12, 2.2, 7.3);
+  for (let i = 0; i < 2; i++) {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(0.04, 1.3, 0.16), bladeMat);
+    b.rotation.x = i * Math.PI / 2;
+    tail.add(b);
+  }
+  group.add(tail);
+  group.userData.mainRotor = rotor;
+  group.userData.tailRotor = tail;
+  group.userData.rotorDisc = disc;
+  group.userData.rotorBlades = bladeMat;
+  return group;
+}
+
 // 内蔵機の脚（前脚＋主脚）。格納しないので固定脚として作る。
 function buildBuiltinGear() {
   const dark = new THREE.MeshStandardMaterial({ color: 0x2a2f36, roughness: 0.6 });
@@ -232,8 +305,8 @@ async function createAircraft(config, cgOverride) {
     }
   }
   if (!visual) {
-    visual = buildBuiltinAircraftMesh();
-    visual.add(buildBuiltinGear());
+    if (config.builtinShape === 'helicopter') visual = buildBuiltinHelicopterMesh();
+    else { visual = buildBuiltinAircraftMesh(); visual.add(buildBuiltinGear()); }
   }
   modelXform.add(visual);
 
@@ -287,6 +360,11 @@ async function createAircraft(config, cgOverride) {
     plumes, boom, contrail, smoke, tyreSmoke, fx: contrail.group, bones, hull, proxies,
     source,
     name: config.name || (source === 'builder' ? '機体' : '内蔵の練習機'),
+    mainRotor: visual.userData ? visual.userData.mainRotor : null,
+    tailRotor: visual.userData ? visual.userData.tailRotor : null,
+    rotorDisc: visual.userData ? visual.userData.rotorDisc : null,
+    rotorBlades: visual.userData ? visual.userData.rotorBlades : null,
+    rotorAngle: 0, rotorSpin: 0,
     propeller: visual.userData ? visual.userData.propeller : null,
     propDisc: visual.userData ? visual.userData.propDisc : null,
     propAngle: 0,
@@ -2190,6 +2268,20 @@ function updateAircraftVisual(ac, controls, state, dt, elapsed) {
     ac.propeller.material.opacity = 1 - blur * 0.85;
     ac.propeller.material.transparent = blur > 0.01;
     if (ac.propDisc) ac.propDisc.material.opacity = blur * 0.22;
+  }
+
+  // ヘリのローター。回転数はほぼ一定（毎分390回転）で、ローターが回り出す／止まるときだけ変わる。
+  // 速く回ると羽根が見えなくなるので、羽根を薄くして円を濃くする
+  if (ac.mainRotor) {
+    const run = ((state && state.enginePower && state.enginePower.lift) || 0) > 0.02 ? 1 : 0;
+    ac.rotorSpin += (run - ac.rotorSpin) * Math.min(1, dt * (run ? 0.6 : 0.25));
+    const w = ac.rotorSpin * (390 / 60) * Math.PI * 2;
+    ac.rotorAngle += w * dt;
+    ac.mainRotor.rotation.y = -ac.rotorAngle;
+    if (ac.tailRotor) ac.tailRotor.rotation.x = ac.rotorAngle * 5.2;
+    const blur = THREE.MathUtils.clamp((ac.rotorSpin - 0.3) / 0.5, 0, 1);
+    if (ac.rotorBlades) ac.rotorBlades.opacity = 1 - blur * 0.8;
+    if (ac.rotorDisc) ac.rotorDisc.material.opacity = blur * 0.18;
   }
 
   // 航行灯。夜だけ光らせるのではなく、灯火は昼でも点いているものとして扱う。

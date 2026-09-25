@@ -297,7 +297,7 @@ function updateFlightTouchReadout() {
 
   const model = f.aircraft && f.aircraft.model;
   const vtol = t.el.querySelector('#ftVtol');
-  if (vtol) vtol.hidden = !(model && model.hasVtol);
+  if (vtol) vtol.hidden = !(model && model.hasVtol) || !!model.isHelicopter;   // ヘリは出力レバーがコレクティブ
   // ホバリングは垂直離着陸機だけ
   const hovBtn = t.el.querySelector('#ftHover');
   if (hovBtn) {

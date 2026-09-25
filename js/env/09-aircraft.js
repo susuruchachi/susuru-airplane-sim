@@ -74,7 +74,18 @@ const ENGINE_KINDS = {
   jet:    { label: 'ジェット', decay: 0.20, rhoPow: 0.85, ab: 0 },
   jet_ab: { label: 'ジェット（AB付き）', decay: 0.20, rhoPow: 0.85, ab: 0.5 },
   rocket: { label: 'ロケット', decay: 0.00, rhoPow: 0.00, ab: 0 },
+  // ヘリのローター。回転軸を上（Y軸）にしたエンジンにだけ意味がある。速度による推力の変化
+  // （前へ進むと効きが増し、速すぎると後退側の羽根が失速して落ちる）は 10-flight.js の
+  // heliRotorFactor が受け持つので、ここでは速度で落とさない。空気が薄いとプロペラと同じく弱る
+  rotor:  { label: 'ヘリのローター', decay: 0.00, rhoPow: 1.00, ab: 0 },
 };
+// ローターの直径を入れていないときの見積もり（m）= この値 × √(推力kgf)。
+// 実機のヘリはおよそ推力3,300kgfで直径11m前後
+const ROTOR_DIAMETER_K = 0.19;
+// ヘリの胴体の抗力（前面投影×抗力係数, m²）。重さ1kgあたり。翼で浮く機体と違って胴体が太く、
+// ローターの頭も風を受けるので大きい。前へ25°傾けた推力の水平成分と釣り合う速さが
+// およそ75m/s（146kt）になる値にしてある
+const HELI_DRAG_AREA_PER_KG = 0.0013;
 // アフターバーナーが点きはじめる出力レバーの位置と、全開までの幅
 const ENGINE_AB_FROM = 0.90;
 const ENGINE_AB_FULL = 1.00;
@@ -586,6 +597,10 @@ function buildAircraftModel(config) {
       plumeWidthM: Math.max((p.props && p.props.plumeWidth) || 0, 0) * partScale(p),
       plumeScale: partScale(p),
       plumeLengthScale: Math.max((p.props && p.props.plumeLength) || 1, 0),
+      // ヘリのローターの直径（m）。0なら推力から見積もる（ROTOR_DIAMETER_K）
+      rotorDiameterM: ((p.props && p.props.rotorDiameter) || 0) > 0
+        ? p.props.rotorDiameter * partScale(p)
+        : ROTOR_DIAMETER_K * Math.sqrt(Math.max((p.props && p.props.thrustKgf) || 0, 0)),
     };
   }).filter((e) => e.thrustN > 0);
   applyVtolTrim(engines);
@@ -662,6 +677,11 @@ function buildAircraftModel(config) {
     vtolThrustN: engines.reduce((a, e) => a + (e.lift ? e.thrustN * e.trimScale : 0), 0),
     vtolThrustNRaw: engines.reduce((a, e) => a + (e.lift ? e.thrustN : 0), 0),
     hasVtol: engines.some((e) => e.lift),
+    // ヘリコプター：上向きのエンジンが「ヘリのローター」。操縦のしかたも自動操縦も別になる
+    // （10-flight.js の accumulateHeliControl、13-autopilot.js の apStepHeli）
+    isHelicopter: engines.some((e) => e.lift && e.kind === 'rotor'),
+    rotorDiameterM: Math.max(0, ...engines.filter((e) => e.lift && e.kind === 'rotor').map((e) => e.rotorDiameterM)),
+    heliDragArea: massKg * HELI_DRAG_AREA_PER_KG,
     // 減速装置を持っているか。自動操縦と計器は「積んでいる機体だけ使う」ので、
     // 持っていない機体に効かないレバーを引かせないためにここで数えておく。
     hasSpoiler: surfaces.some((s) => s.spoiler > 0 || s.spoilerCd > 0),
@@ -904,6 +924,7 @@ const AC_CLMAX = 1.5;          // 失速時の最大揚力係数の目安
 const AC_LIFTOFF_MARGIN = 1.15; // 浮上速度は失速速度の何倍か
 
 function analyzeAircraftPerformance(model) {
+  if (model.isHelicopter) return analyzeHelicopterPerformance(model);
   const W = model.massKg * FLIGHT_GRAVITY_APPROX;
   const S = Math.max(model.wingArea, 0.01);
   const rho = 1.225;
@@ -1265,9 +1286,79 @@ function defaultAircraftConfig() {
   };
 }
 
+// ヘリの性能。翼で浮かないので、固定翼の診断（失速・離陸滑走・翼面荷重）は当てはまらない。
+// 見るのは、ローターの推力が重さの何倍か（ホバリングの余裕）と、上がれる高さだけ。
+function analyzeHelicopterPerformance(model) {
+  const W = model.massKg * FLIGHT_GRAVITY_APPROX;
+  const tw = model.vtolThrustN / W;
+  // 上がれる高さ：推力が重さの1.1倍を切る高さ（空気の濃さは標準大気）
+  let ceil = 0;
+  for (let h = 0; h <= 9000; h += 100) {
+    const rho = Math.pow(Math.max(1 - 2.2557e-5 * h, 0.05), 4.2559);
+    if (model.vtolThrustN * rho > W * 1.1) ceil = h; else break;
+  }
+  const notes = [];
+  if (tw < 1.05) notes.push({ level: 'error', text: `ローターの推力が重さの ${tw.toFixed(2)} 倍しかなく、浮けません。推力を重さの1.2〜1.5倍にしてください。` });
+  else if (tw < 1.2) notes.push({ level: 'warn', text: `ローターの推力が重さの ${tw.toFixed(2)} 倍で、余裕が少なめです（上がれるのは標高 ${ceil.toLocaleString()} m まで）。` });
+  else notes.push({ level: 'info', text: `ヘリコプター：推力は重さの ${tw.toFixed(2)} 倍、ホバリングの出力はおよそ ${Math.round(100 / tw)}%、上がれるのは標高 ${ceil.toLocaleString()} m まで。` });
+  return {
+    isHelicopter: true, thrustToWeight: tw, liftThrust: model.vtolThrustN, ceilingM: ceil,
+    wingLoading: 0, stallMps: 0, liftoffMps: 0, takeoffM: 0, staticMarginPct: 0,
+    notes, flyable: tw >= 1.05,
+  };
+}
+
+// 内蔵のヘリコプター。2,400kg・ローター直径11m・推力3,300kgf（重さの1.38倍）。
+// 小さな水平安定板と垂直安定板を持ち、脚はそり（4点）
+function defaultHelicopterConfig() {
+  const fin = (id, name, role, side, x, y, z, halfSpan, chord) => ({
+    id, type: 'wing', name,
+    position: { x, y, z }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: {
+      role, side, span: halfSpan * 2,
+      corners: role === 'vtail' ? {
+        rootLeading: { x: 0, y: 0, z: -chord / 2 }, rootTrailing: { x: 0, y: 0, z: chord / 2 },
+        tipLeading: { x: 0, y: halfSpan, z: -chord / 2 + 0.3 }, tipTrailing: { x: 0, y: halfSpan, z: chord / 2 },
+      } : {
+        rootLeading: { x: 0, y: 0, z: -chord / 2 }, rootTrailing: { x: 0, y: 0, z: chord / 2 },
+        tipLeading: { x: halfSpan * (side === 'left' ? -1 : 1), y: 0, z: -chord / 2 },
+        tipTrailing: { x: halfSpan * (side === 'left' ? -1 : 1), y: 0, z: chord / 2 },
+      },
+    },
+  });
+  const skid = (id, name, pos, x, z) => ({
+    id, type: 'landing_gear', name,
+    position: { x, y: 0, z }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: { gearPosition: pos, deployState: 1, retractedAtZero: true, joints: [], struts: [] },
+  });
+  return {
+    name: '内蔵のヘリコプター',
+    builtin: true,
+    builtinShape: 'helicopter',
+    modelWeightKg: 2400,
+    modelMaxSpeedValue: 150,
+    modelMaxSpeedUnit: 'kt',
+    cg: { x: 0, y: 1.3, z: 0 },
+    parts: [
+      fin('h_htail_l', '水平安定板 左', 'htail', 'left', -0.15, 1.5, 6.4, 0.9, 0.6),
+      fin('h_htail_r', '水平安定板 右', 'htail', 'right', 0.15, 1.5, 6.4, 0.9, 0.6),
+      fin('h_vtail', '垂直安定板', 'vtail', 'center', 0, 1.6, 7.3, 1.2, 0.8),
+      {
+        id: 'rotor_main', type: 'engine', name: 'メインローター',
+        position: { x: 0, y: 3.2, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+        props: { thrustKgf: 3300, spinAxis: 'y', engineKind: 'rotor', rotorDiameter: 11 },
+      },
+      skid('s_fl', 'そり 左前', 'nose', -1.1, -1.3),
+      skid('s_fr', 'そり 右前', 'nose', 1.1, -1.3),
+      skid('s_rl', 'そり 左後', 'main_left', -1.1, 1.2),
+      skid('s_rr', 'そり 右後', 'main_right', 1.1, 1.2),
+    ],
+  };
+}
+
 // Node（tools/verify-flight.js）からモデルの組み立てだけを検査できるようにする
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    buildAircraftModel, defaultAircraftConfig, analyzeAircraftPerformance, AERO_DEFAULTS,
+    buildAircraftModel, defaultAircraftConfig, defaultHelicopterConfig, analyzeAircraftPerformance, AERO_DEFAULTS,
   };
 }

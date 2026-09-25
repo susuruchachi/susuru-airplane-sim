@@ -428,7 +428,8 @@ function updateFlightCamera(dt) {
   if (!ac) return;
   const st = f.state;
   const cam = EnvState.camera;
-  const size = Math.max(ac.model.wingSpan, 6);
+  // 機体の大きさの目安は翼幅。ヘリは翼がほとんど無いので、ローターの直径を使う
+  const size = Math.max(ac.model.wingSpan, ac.model.rotorDiameterM || 0, 6);
 
   if (f.cameraMode === 'free') return; // 環境プレビューのまま
 
@@ -699,7 +700,8 @@ function updateFlightHUD() {
   const thrUnit = document.getElementById('hudThrUnit');
   if (thrUnit) thrUnit.hidden = !!atIdle;
   const vtolTile = document.getElementById('hudVtolTile');
-  const hasVtol = !!(f.aircraft && f.aircraft.model && f.aircraft.model.hasVtol);
+  // ヘリはメインの出力レバーがコレクティブなので、垂直エンジンの欄は出さない
+  const hasVtol = !!(f.aircraft && f.aircraft.model && f.aircraft.model.hasVtol && !f.aircraft.model.isHelicopter);
   if (vtolTile) vtolTile.hidden = !hasVtol;
   if (hasVtol) set('hudVtol', Math.round((c.vtolThrottle || 0) * 100));
   set('hudTrim', `${(c.trim || 0) >= 0 ? '+' : ''}${Math.round((c.trim || 0) * 100)}`);
@@ -910,7 +912,9 @@ function updateFlightPanelReadout() {
   // その機体が飛べるかどうかを出す。Builderは教えてくれないので、ここで名指しする。
   const a = analyzeAircraftPerformance(m);
   const kt = (v) => Math.round(v * 1.94384);
-  set('envFlightPerfReadout',
+  if (a.isHelicopter) set('envFlightPerfReadout',
+    `ヘリコプター ／ 推力は重さの${a.thrustToWeight.toFixed(2)}倍 ／ ホバリング約${Math.round(100 / a.thrustToWeight)}% ／ 上がれる高さ ${a.ceilingM.toLocaleString()}m`);
+  else set('envFlightPerfReadout',
     `失速 ${kt(a.stallMps)}kt ／ 離陸滑走 ${a.takeoffM ? Math.round(a.takeoffM).toLocaleString() + 'm' : '不可'}`
     + ` ／ 翼面荷重 ${Math.round(a.wingLoading)}kg/m²`
     + ` ／ 静安定 ${a.staticMarginPct >= 0 ? '+' : ''}${a.staticMarginPct.toFixed(0)}%MAC`);

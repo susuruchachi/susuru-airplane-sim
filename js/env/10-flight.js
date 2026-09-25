@@ -203,8 +203,8 @@ function ladderLever(n, i, lever) {
 // 変えるのに数秒かかり（実機の turbofan はアイドル→全開に5〜8秒）、プロペラと
 // ロケットはもっと速い。ここが無いと、レバーを叩いた瞬間に何百kNもの推力が
 // 立ち上がって機体が跳ねる。単位は「0→1に上げるのにかかる秒数」。
-const ENGINE_SPOOL_UP_S = { prop: 1.6, jet: 5.5, jet_ab: 4.0, rocket: 1.2 };
-const ENGINE_SPOOL_DOWN_S = { prop: 1.2, jet: 4.0, jet_ab: 3.0, rocket: 0.8 };
+const ENGINE_SPOOL_UP_S = { prop: 1.6, jet: 5.5, jet_ab: 4.0, rocket: 1.2, rotor: 1.0 };
+const ENGINE_SPOOL_DOWN_S = { prop: 1.2, jet: 4.0, jet_ab: 3.0, rocket: 0.8, rotor: 0.8 };
 
 function engineGroupKind(g) {
   // そのグループでいちばん推力の大きいエンジンの種別を代表にする
@@ -511,6 +511,10 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
     const dGear = 0.5 * rho * airspeed * model.gearDragArea * AERO_DEFAULTS.gearCd;
     out.force.addScaledVector(vAirBody, -dGear);
   }
+  // ヘリの胴体とローターの頭の抗力（翼の少ないヘリは、翼面積から見積もる胴体の抗力がほぼ0になる）
+  if (model.isHelicopter && airspeed > 1e-3) {
+    out.force.addScaledVector(vAirBody, -0.5 * rho * airspeed * model.heliDragArea);
+  }
 
   // 推力。速度と空気の薄さでどれだけ落ちるかは**エンジンの種別ごと**に違うので、
   // 倍率はエンジン1基ずつ出す（engineThrustScale）。
@@ -549,8 +553,9 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
     const scale = engineThrustScale(e, airspeed, rho, lever, vMaxCut);
     // 垂直離陸用エンジンは前後バランス（trimScale）ぶん絞ってある。
     // ここで掛け忘れると、モデル構築時に消したはずの機首振りが物理では復活する。
-    const t = e.lift ? e.thrustN * e.trimScale * lever * scale
+    let t = e.lift ? e.thrustN * e.trimScale * lever * scale
       : e.thrustN * (lever * scale - (e.canReverse ? revLever * scale : 0));
+    if (e.kind === 'rotor') t *= heliRotorFactor(model, state, airspeed);
     if (e.lift) vtolTotal += t; else thrustTotal += t;
     if (e.kind === 'jet_ab') abTotal = Math.max(abTotal, engineAfterburner(lever));
     out.force.addScaledVector(e.axis, t);
@@ -602,7 +607,62 @@ const VTOL_RCS_AUTH_MAX = 1.5;  // 効きの上限（支えている重さの割
 
 const _vtolUp = new THREE.Vector3();
 
+// --- ヘリコプター ----------------------------------------------------------------
+//
+// ローターの推力の効き。前へ進むと、ローターが新しい空気を吸うぶん効きが増える
+// （転移揚力。実機で15〜25kt から2割ほど）。速すぎると、後ろへ回る側の羽根が風に対して遅くなって
+// 失速し、効きが落ちる（実機のヘリの最高速度がおよそ150〜170ktで頭打ちになる理由）。
+// 地面の近く（ローターの半径より低い）では、吹き下ろしが地面に押し返されて効きが増す（地面効果）。
+const HELI_ETL_GAIN = 0.18;           // 転移揚力で増える割合
+const HELI_ETL_FROM_MPS = 5, HELI_ETL_FULL_MPS = 20;
+const HELI_RBS_FROM_MPS = 72, HELI_RBS_FULL_MPS = 95, HELI_RBS_LOSS = 0.35;  // 後退側の羽根の失速
+const HELI_GROUND_EFFECT = 0.12;      // 地面すれすれで増える割合
+function heliRotorFactor(model, state, airspeed) {
+  const sm = THREE.MathUtils.smoothstep;
+  let f = 1 + HELI_ETL_GAIN * sm(airspeed, HELI_ETL_FROM_MPS, HELI_ETL_FULL_MPS)
+    - HELI_RBS_LOSS * sm(airspeed, HELI_RBS_FROM_MPS, HELI_RBS_FULL_MPS);
+  const R = Math.max(model.rotorDiameterM * 0.5, 1);
+  const agl = Math.max(state.altitudeAglM || 0, 0);
+  if (agl < R) f *= 1 + HELI_GROUND_EFFECT * (1 - agl / R);
+  return f;
+}
+
+// 操縦桿は**姿勢の指示**（放すと水平に戻る）。実機のヘリはサイクリックで回転面を傾けて
+// 機体の姿勢を変え、そのまま手を離すとどんどん傾いていく（ホバリングは常に当て舵）。
+// それをキーボードや指で続けるのは無理なので、姿勢を保つ安定化装置（実機のSAS・姿勢保持）が
+// 入っている形にする：桿の倒し量に比例した姿勢（前後±25°・左右±35°）へ機体を持っていき、
+// ラダー（ペダル）は向きを変える速さ（±45°/s）の指示にする。
+// 前へ進むのは、機首を下げて回転面ごと推力を前へ倒すから（前へ進むエンジンは要らない）。
+const HELI_PITCH_MAX_DEG = 25;
+const HELI_ROLL_MAX_DEG = 35;
+const HELI_YAW_RATE_DEG = 45;
+const HELI_ATT_KP = 5;          // 姿勢のずれ1radあたりの角加速度（rad/s²）
+const HELI_ATT_KD = 3.5;        // 角速度を止める強さ（1/s）
+const HELI_YAW_KP = 3;
+const HELI_SPIN_FOR_CONTROL = 0.25;   // ローターの出力がこれに達するまでで操縦の効きを立ち上げる
+function accumulateHeliControl(model, state, controls, out) {
+  const power = (state.enginePower && state.enginePower.lift) || 0;
+  // ローターが回っていないと回転面を傾けられない（地上で止まっているときは何もしない）
+  const auth = THREE.MathUtils.clamp(power / HELI_SPIN_FOR_CONTROL, 0, 1);
+  if (auth <= 1e-4) return;
+  const I = model.inertia;
+  const w = state.angularVelocity;
+  const rad = THREE.MathUtils.degToRad;
+  const up = _vtolUp.set(0, 1, 0).applyQuaternion(_fv.qInv.copy(state.quaternion).invert());
+  // いまの姿勢（機首上げ・右へ傾くが正）と、指示の姿勢
+  const pitch = -Math.asin(THREE.MathUtils.clamp(up.z, -1, 1));
+  const roll = -Math.asin(THREE.MathUtils.clamp(up.x, -1, 1));
+  const tp = THREE.MathUtils.clamp(controls.pitch || 0, -1, 1) * rad(HELI_PITCH_MAX_DEG);
+  const tr = THREE.MathUtils.clamp(controls.roll || 0, -1, 1) * rad(HELI_ROLL_MAX_DEG);
+  const tyRate = THREE.MathUtils.clamp(controls.yaw || 0, -1, 1) * rad(HELI_YAW_RATE_DEG);
+  // 符号はVTOLの姿勢制御と同じ（torque.x＋で機首上げ、torque.z−で右ロール、torque.y−で右ヨー）
+  out.torque.x += I.x * (HELI_ATT_KP * (tp - pitch) - HELI_ATT_KD * w.x) * auth;
+  out.torque.z += I.z * (-HELI_ATT_KP * (tr - roll) - HELI_ATT_KD * w.z) * auth;
+  out.torque.y += I.y * (-HELI_YAW_KP * (tyRate + w.y)) * auth;
+}
+
 function accumulateVtolControl(model, state, controls, out) {
+  if (model.isHelicopter) { accumulateHeliControl(model, state, controls, out); return; }
   if (!model.hasVtol) return;
   const power = controls.vtolThrottle || 0;
   if (power < 0.02) return;
@@ -918,6 +978,9 @@ const _iv = {
 function flightStep(model, state, controls, windWorld, groundHeightAt, dt, hull) {
   const acc = { force: new THREE.Vector3(), torque: new THREE.Vector3() };
 
+  // ヘリはメインの出力レバーがそのままコレクティブ（ローターの推力）。垂直エンジンのレバーへ写しておく
+  // （垂直離着陸機と同じ推力の道筋・計器・音をそのまま使うため）
+  if (model.isHelicopter) controls.vtolThrottle = THREE.MathUtils.clamp(controls.throttle || 0, 0, 1);
   // レバーの指示を、エンジンの応答の速さぶん遅らせて実出力にする
   spoolEnginePower(model, state, controls, dt);
   accumulateAeroForces(model, state, controls, windWorld, acc);

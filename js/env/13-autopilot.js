@@ -3078,9 +3078,186 @@ function apStepAltHold(model, state, controls, ap, spd, dt) {
 }
 
 // 自動操縦を1フレーム進める（環境に依らない本体）
+// --- ヘリコプター -------------------------------------------------------------------
+//
+// ヘリは翼で浮かないので、固定翼の自動操縦（速度の段取り・進入の経路・滑走）は使わない。
+// どの段も同じ「速度を指示 → 欲しい加速度 → 機体の傾き」の1本で飛ぶ：
+//   ・横 … 欲しい対地速度（目的地の向き。近づいたら止まれる速さまで落とす）と今の速度の差から
+//          加速度を出し、それを前後・左右の傾きにする（前へ加速したければ機首を下げる）。
+//          操縦桿は姿勢の指示（10-flight.js の accumulateHeliControl）なので、傾きをそのまま渡せる
+//   ・縦 … 欲しい昇降率とのずれでコレクティブ（出力レバー）を動かす（ホバリングの出力＋比例＋積分）
+//   ・向き … 速ければ進む向きへ、遅ければいまの向きのまま
+// 段は 離陸（真上へ30m）→ 巡航（地形より上を目的地へ）→ 進入（止まれる距離から減速して降り場の上60mへ）
+//   → 降下（降り場の上で止まったまま真下へ）→ 接地（コレクティブを0へ）→ 着陸
+const HELI_AP_CRUISE_FRAC = 0.85;     // 巡航の速さ（最高速度に対する割合）
+const HELI_AP_CRUISE_MAX_MPS = 70;
+const HELI_AP_BRAKE_MPS2 = 1.2;       // 目的地へ向けて減速するときの加速度
+const HELI_AP_ACC_MAX = 3.5;          // 横に出す加速度の上限（m/s²。およそ20°の傾き）
+const HELI_AP_VEL_KP = 0.6;           // 速度のずれ1m/sあたりの加速度
+const HELI_AP_TAKEOFF_AGL_M = 30;
+const HELI_AP_MIN_AGL_M = 150;        // 巡航で地形からこれだけ上を飛ぶ
+const HELI_AP_APPROACH_AGL_M = 60;
+const HELI_AP_VS_UP = 7, HELI_AP_VS_DOWN = 5;
+const HELI_AP_COL_KP = 0.06;          // 昇降率のずれ1m/sあたりのコレクティブ
+const HELI_AP_COL_KI = 0.04;
+
+// ホバリングに要るコレクティブの見積もり（その高さの空気の濃さと、いまの傾きで）
+function heliHoverCollective(model, state) {
+  const rho = airDensityAt(state.altitudeM || 0);
+  const tilt = Math.cos(THREE.MathUtils.degToRad(Math.min(Math.hypot(state.pitchDeg || 0, state.rollDeg || 0), 60)));
+  const f = heliRotorFactor(model, state, state.airspeed || 0);
+  const T = model.vtolThrustN * (rho / FLIGHT_RHO0) * f * Math.max(tilt, 0.3);
+  return T > 0 ? (model.massKg * FLIGHT_GRAVITY) / T : 1;
+}
+
+// 昇降率を targetVs に合わせるコレクティブ（出力レバー）
+function heliCollectiveForVs(model, state, controls, ap, targetVs, dt) {
+  const err = targetVs - state.verticalSpeed;
+  ap.heliColI = apClamp((ap.heliColI || 0) + err * HELI_AP_COL_KI * dt, -0.2, 0.2);
+  return apClamp(heliHoverCollective(model, state) + err * HELI_AP_COL_KP + ap.heliColI, 0, 1);
+}
+
+// 欲しい対地速度（ワールドの x, z）へ向けて傾ける。向きは wantHdg（undefined ならそのまま）
+function heliSteer(model, state, controls, vx, vz, wantHdg) {
+  let ax = (vx - state.velocity.x) * HELI_AP_VEL_KP, az = (vz - state.velocity.z) * HELI_AP_VEL_KP;
+  const a = Math.hypot(ax, az);
+  if (a > HELI_AP_ACC_MAX) { ax *= HELI_AP_ACC_MAX / a; az *= HELI_AP_ACC_MAX / a; }
+  const h = THREE.MathUtils.degToRad(state.headingDeg);
+  const fx = Math.sin(h), fz = -Math.cos(h), rx = Math.cos(h), rz = Math.sin(h);
+  const aF = ax * fx + az * fz, aR = ax * rx + az * rz;
+  const g = FLIGHT_GRAVITY;
+  controls.pitch = apClamp(-Math.atan(aF / g) / THREE.MathUtils.degToRad(HELI_PITCH_MAX_DEG), -1, 1);
+  controls.roll = apClamp(Math.atan(aR / g) / THREE.MathUtils.degToRad(HELI_ROLL_MAX_DEG), -1, 1);
+  if (wantHdg === undefined) controls.yaw = 0;
+  else {
+    const err = apWrap180(wantHdg - state.headingDeg);
+    controls.yaw = apClamp((err * 1.2) / HELI_YAW_RATE_DEG, -1, 1);
+  }
+}
+
+// ヘリの上がれる高さ（推力が重さの1.1倍を切る高さ）。巡航の高さの上限に使う
+function heliCeilingM(model) {
+  if (model._heliCeil !== undefined) return model._heliCeil;
+  let lo = 0, hi = 9000;
+  for (let i = 0; i < 30; i++) {
+    const mid = (lo + hi) / 2;
+    const T = model.vtolThrustN * (airDensityAt(mid) / FLIGHT_RHO0);
+    if (T > model.massKg * FLIGHT_GRAVITY * 1.1) lo = mid; else hi = mid;
+  }
+  model._heliCeil = lo;
+  return lo;
+}
+
+function apStepHeli(model, state, controls, ap, dt, env) {
+  const plan = ap.plan;
+  const ground = (x, z) => (env && env.groundHeightAt ? env.groundHeightAt(x, z) : 0);
+  const say = (phase, text) => {
+    if (ap.phase === phase) return;
+    ap.phase = phase; ap.statusText = text;
+    if (env && env.announce) env.announce('自動操縦：' + text);
+  };
+  controls.gearDown = true;
+  controls.parkingBrake = false;
+  controls.brake = 0;
+  if (!plan) { apStepHeliHover(model, state, controls, ap, dt, env); return; }
+  const tx = plan.pad.x, tz = plan.pad.z;
+  const dx = tx - state.position.x, dz = tz - state.position.z;
+  const dist = Math.hypot(dx, dz);
+  const ux = dist > 1e-3 ? dx / dist : 0, uz = dist > 1e-3 ? dz / dist : 0;
+  const bearing = apBearingTo(state.position.x, state.position.z, tx, tz);
+  const agl = state.altitudeAglM || 0;
+  const vCruise = Math.min(model.vMaxMps * HELI_AP_CRUISE_FRAC, HELI_AP_CRUISE_MAX_MPS);
+  if (ap.phase === 'takeoff' || ap.phase === 'off' || !ap.phase) say('heli_takeoff', '離陸（真上へ）');
+
+  if (ap.phase === 'heli_takeoff') {
+    heliSteer(model, state, controls, 0, 0, undefined);
+    controls.throttle = heliCollectiveForVs(model, state, controls, ap, 3, dt);
+    if (agl > HELI_AP_TAKEOFF_AGL_M) say('heli_cruise', '巡航');
+    return;
+  }
+  if (ap.phase === 'heli_cruise' || ap.phase === 'heli_approach') {
+    // 高さ：巡航は指示の高さ（上がれる高さまで）、ただし行く手の地形より HELI_AP_MIN_AGL_M 上。
+    // 進入は降り場の上 HELI_AP_APPROACH_AGL_M へ降りる（途中の地形より下がらない）
+    let floor = 0;
+    const look = Math.max(state.groundSpeed * 40, 800);
+    for (let d = 0; d <= look; d += 200) {
+      const k = Math.min(d, dist);
+      floor = Math.max(floor, ground(state.position.x + ux * k, state.position.z + uz * k));
+    }
+    const padY = plan.elevationM;
+    let altT;
+    if (ap.phase === 'heli_cruise') {
+      altT = Math.max(Math.min(ap.targetAltitudeM || 1000, heliCeilingM(model)), floor + HELI_AP_MIN_AGL_M);
+    } else {
+      altT = Math.max(padY + HELI_AP_APPROACH_AGL_M, floor + 40);
+    }
+    const vs = apClamp((altT - state.altitudeM) * 0.25, -HELI_AP_VS_DOWN, HELI_AP_VS_UP);
+    controls.throttle = heliCollectiveForVs(model, state, controls, ap, vs, dt);
+    // 横：止まれる速さ（√(2aD)）までで目的地へ
+    const v = Math.min(vCruise, Math.sqrt(2 * HELI_AP_BRAKE_MPS2 * Math.max(dist - 8, 0)));
+    heliSteer(model, state, controls, ux * v, uz * v, state.groundSpeed > 12 ? bearing : (dist > 60 ? bearing : undefined));
+    const brakeDist = (vCruise * vCruise) / (2 * HELI_AP_BRAKE_MPS2);
+    if (ap.phase === 'heli_cruise' && dist < brakeDist + 500) say('heli_approach', '進入（減速）');
+    if (ap.phase === 'heli_approach' && dist < 12 && state.groundSpeed < 2) say('heli_descent', '降下（真下へ）');
+    return;
+  }
+  if (ap.phase === 'heli_descent') {
+    // 降り場の上で止まったまま、低くなるほどゆっくり降りる
+    const v = Math.min(3, dist * 0.4);
+    heliSteer(model, state, controls, ux * v, uz * v, undefined);
+    const vs = -Math.min(3, Math.max(0.4, agl * 0.12));
+    controls.throttle = heliCollectiveForVs(model, state, controls, ap, vs, dt);
+    if (state.onGround) { ap.heliTouchAt = 0; say('heli_touchdown', '接地'); }
+    return;
+  }
+  if (ap.phase === 'heli_touchdown') {
+    heliSteer(model, state, controls, 0, 0, undefined);
+    controls.throttle = Math.max(0, controls.throttle - dt * 0.5);
+    controls.parkingBrake = true;
+    if (controls.throttle <= 0) {
+      ap.full = false;
+      say('done', `${plan.label || plan.airportId || ''} に着陸しました`);
+    }
+  }
+}
+
+// ヘリのホバリング（J）。その場所・その高さに止まる。出力のキーで保つ高さを上げ下げ、
+// 操縦桿を倒しているあいだは手に任せ、放したところで止まり直す
+function apStepHeliHover(model, state, controls, ap, dt, env) {
+  const manual = (env && env.manual) || {};
+  if (ap.hoverAltM === undefined) ap.hoverAltM = state.altitudeM;
+  if (manual.hoverAlt) {
+    const ground = state.altitudeM - (state.altitudeAglM || 0);
+    ap.hoverAltM = Math.max(ap.hoverAltM + apClamp(manual.hoverAlt, -1, 1) * AP_HOVER_ADJ_MPS * dt, ground + 2);
+  }
+  const vs = apClamp((ap.hoverAltM - state.altitudeM) * 0.4, -HELI_AP_VS_DOWN, HELI_AP_VS_UP);
+  controls.throttle = heliCollectiveForVs(model, state, controls, ap, vs, dt);
+  if (manual.pitch || manual.roll || ap.hoverX === undefined) {
+    ap.hoverX = state.position.x; ap.hoverZ = state.position.z;
+    if (manual.pitch || manual.roll) return;   // 桿は手のまま
+  }
+  const dx = ap.hoverX - state.position.x, dz = ap.hoverZ - state.position.z;
+  const d = Math.hypot(dx, dz), v = Math.min(5, d * 0.4);
+  const yaw = controls.yaw;
+  heliSteer(model, state, controls, d > 1e-3 ? dx / d * v : 0, d > 1e-3 ? dz / d * v : 0, undefined);
+  if (manual.yaw) controls.yaw = yaw;
+}
+
+// ヘリの高度維持（O）。コレクティブだけ受け持ち、桿とペダルは手のまま
+function apStepHeliAltHold(model, state, controls, ap, dt) {
+  const vs = apClamp(((ap.targetAltitudeM || state.altitudeM) - state.altitudeM) * 0.3, -HELI_AP_VS_DOWN, HELI_AP_VS_UP);
+  controls.throttle = heliCollectiveForVs(model, state, controls, ap, vs, dt);
+}
+
 function stepAutopilot(model, state, controls, ap, dt, env) {
   if (state.crashed) {
     ap.full = false; ap.altHold = false; ap.hover = false; ap.phase = 'off'; return;
+  }
+  if (model.isHelicopter) {
+    if (ap.full) apStepHeli(model, state, controls, ap, dt, env);
+    else if (ap.hover) apStepHeliHover(model, state, controls, ap, dt, env);
+    else if (ap.altHold) apStepHeliAltHold(model, state, controls, ap, dt);
+    return;
   }
   // 目的地までの距離（進入計画があれば最終進入開始点まで）。旋回半径をルートの
   // 長さに合わせて絞るのに使う（apCruiseTurnRadiusMax参照）。
@@ -3154,8 +3331,13 @@ function apVtolPadSize(model) {
   return Math.max(Math.max(model.wingSpan || 0, zMax - zMin) * 1.5, 40);
 }
 
+// 垂直に降りるか（ヘリはいつも。垂直離着陸機は「垂直着陸」を入れたとき）
+function apVerticalLanding(model, ap) {
+  return !!(model && (model.isHelicopter || (ap && ap.vtolLanding && model.hasVtol)));
+}
+
 function apFieldLengthFor(model, vtolLanding) {
-  if (vtolLanding && model.hasVtol) return AP_FIELD_VTOL_M;
+  if (model.isHelicopter || (vtolLanding && model.hasVtol)) return AP_FIELD_VTOL_M;
   const v = apSpeedSchedule(model, 80000).approach;
   return apClamp(AP_FIELD_AIR_M + (v * v) / (2 * AP_FIELD_DECEL), AP_FIELD_MIN_M, AP_FIELD_MAX_M);
 }
@@ -3170,7 +3352,7 @@ function apPickLandingField(x, z) {
   // 真下へ降りる（worldFindVtolPad）。以前は垂直着陸でも600mの帯を探していたので、
   // 選んだ所から何kmも離れた所に降りたり、丘陵では見つからなかったりした。
   // 機首は風上へ向ける（風に向かってホバリングするほうが持ち場を保ちやすい）。
-  const vtol = !!(ap.vtolLanding && model.hasVtol);
+  const vtol = apVerticalLanding(model, ap);
   const L = vtol ? apVtolPadSize(model) : apFieldLengthFor(model, false);
   const field = vtol
     ? worldFindVtolPad(x, z, L, EnvState.env.windDirectionDeg || 0)
@@ -3251,7 +3433,8 @@ function toggleHover() {
     // 「いまの高さを保て」は「何もするな」と同じになり、押しても浮かない。
     // 浮かせるのは垂直レバー（X）の仕事で、ホバリングは浮いたあとに使う道具。
     if (f.state.onGround) {
-      announceFlight('先に X で浮いてからホバリングに入れてください');
+      announceFlight(f.aircraft.model.isHelicopter ? '先に Shift（出力）で浮いてからホバリングに入れてください'
+        : '先に X で浮いてからホバリングに入れてください');
       return;
     }
     ap.hover = true;
@@ -3371,7 +3554,7 @@ function setupAutopilotUI() {
     EnvState.flight.pickingField = !EnvState.flight.pickingField;
     // 右のメニューを閉じていると地図が見えないので開く
     if (EnvState.flight.pickingField && typeof setEnvPanelCollapsed === 'function') setEnvPanelCollapsed(false);
-    if (EnvState.flight.pickingField) announceFlight(flightAutopilot().vtolLanding && EnvState.flight.aircraft && EnvState.flight.aircraft.model.hasVtol
+    if (EnvState.flight.pickingField) announceFlight(EnvState.flight.aircraft && apVerticalLanding(EnvState.flight.aircraft.model, flightAutopilot())
       ? '右の地図をクリックすると、そのすぐそばに垂直着陸します（地図はドラッグで動かし、ホイール・2本指で拡大）'
       : '右の地図をクリックすると、そのそばの平地を探して着陸地点にします（地図はドラッグで動かし、ホイール・2本指で拡大）');
     updateAutopilotUI();
@@ -3413,7 +3596,7 @@ function setupAutopilotUI() {
     // 地図で選んだ着陸地点は、垂直着陸かどうかで探し方が違う（小さな降り場／長い帯）。
     // 切り替えたら、同じ選んだ地点で探し直す——垂直着陸用の降り場のまま滑走で降りると帯が足りない
     const fd = ap.destField;
-    if (fd && !!fd.vtolPad !== !!(ap.vtolLanding && EnvState.flight.aircraft && EnvState.flight.aircraft.model.hasVtol)) {
+    if (fd && !!fd.vtolPad !== !!(EnvState.flight.aircraft && apVerticalLanding(EnvState.flight.aircraft.model, ap))) {
       apPickLandingField(fd.pickX !== undefined ? fd.pickX : fd.x, fd.pickZ !== undefined ? fd.pickZ : fd.z);
     }
     onEnvSettingsChanged();
@@ -3446,15 +3629,17 @@ function updateAutopilotUI() {
   const hasVtol = !!(EnvState.flight.aircraft && EnvState.flight.aircraft.model.hasVtol);
   const hov = document.getElementById('envApHover');
   if (hov) { hov.checked = ap.hover; hov.disabled = !hasVtol; }
+  // ヘリはいつも真上へ上がって真下へ降りるので、選ばせない（入った状態で固める）
+  const heli = !!(EnvState.flight.aircraft && EnvState.flight.aircraft.model.isHelicopter);
   const vtolTakeoff = document.getElementById('envApVtolTakeoff');
-  if (vtolTakeoff) { vtolTakeoff.checked = ap.vtolTakeoff; vtolTakeoff.disabled = !hasVtol; }
+  if (vtolTakeoff) { vtolTakeoff.checked = heli || ap.vtolTakeoff; vtolTakeoff.disabled = !hasVtol || heli; }
   const vtolLanding = document.getElementById('envApVtolLanding');
-  if (vtolLanding) { vtolLanding.checked = ap.vtolLanding; vtolLanding.disabled = !hasVtol; }
+  if (vtolLanding) { vtolLanding.checked = heli || ap.vtolLanding; vtolLanding.disabled = !hasVtol || heli; }
   const vtolHint = document.getElementById('envApVtolHint');
   if (vtolHint) {
-    vtolHint.textContent = hasVtol
-      ? '入れると滑走路を使わず、真上へ上がって／真下へ降りて発着します。'
-      : 'この機体には垂直離着陸用エンジンがありません。';
+    vtolHint.textContent = heli ? 'ヘリコプターはいつも真上へ上がって、降り場の真上から真下へ降ります。'
+      : hasVtol ? '入れると滑走路を使わず、真上へ上がって／真下へ降りて発着します。'
+        : 'この機体には垂直離着陸用エンジンがありません。';
   }
 
   // 地図で平地を選んだら、セレクトはその項目を指す（無ければ足す）

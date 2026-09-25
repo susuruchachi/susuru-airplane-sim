@@ -437,8 +437,16 @@ function renderTypeSpecificFields(part) {
           <option value="jet" ${part.props.engineKind === 'jet' ? 'selected' : ''}>ジェット</option>
           <option value="jet_ab" ${part.props.engineKind === 'jet_ab' ? 'selected' : ''}>ジェット（アフターバーナー付き）</option>
           <option value="rocket" ${part.props.engineKind === 'rocket' ? 'selected' : ''}>ロケット</option>
+          <option value="rotor" ${part.props.engineKind === 'rotor' ? 'selected' : ''}>ヘリのローター</option>
         </select>
       </div>
+      ${part.props.engineKind === 'rotor' ? `
+      <div class="field">
+        <label>ローターの直径（m／0で自動）</label>
+        <input type="text" inputmode="decimal" id="fRotorDiameter" value="${part.props.rotorDiameter || 0}">
+      </div>
+      <div class="hint"><b>ヘリコプター</b>になります。回転軸は上向き（Y軸）に固定し、推力は機体を浮かせる力（ヘリの機体の重さの1.2〜1.5倍が目安）。飛行画面では、出力レバー（Shift/Ctrl）がコレクティブ、操縦桿は機体の傾きの指示（放すと水平に戻る）、ラダーは向きを変える速さになります。前へ進むのは機首を下げて回転面ごと推力を前へ倒すからで、前へ進むエンジンは要りません。直径は地面効果（ローターの半径より低いと効きが増す）と、仮モデルの羽根の長さに使います。0なら推力から見積もります。</div>
+      ` : ''}
       <div class="hint">プロペラは速度が上がるほど推力が落ち、空気が薄いと弱ります。ジェットは速度による落ちがゆるく、薄い空気にもプロペラより強い。アフターバーナー付きは出力レバーを9割より上げたときだけ推力が5割増しになり、炎を吹きます。ロケットは空気を使わないので、速度にも高度にもまったく左右されません。<br>見た目は、プロペラは何も出さず、ジェットはノズル後方の<b>陽炎</b>だけ（炎は出ません）。アフターバーナー付きは9割から上で炎、ロケットは炎と煙を吹きます。</div>
       <div class="field">
         <label>ノズルの直径（m／0で自動）</label>
@@ -517,8 +525,17 @@ function renderTypeSpecificFields(part) {
     });
     document.getElementById('fEngineKind').addEventListener('change', (e) => {
       part.props.engineKind = e.target.value;
+      // ヘリのローターは上向きの回転軸でしか意味がない
+      if (e.target.value === 'rotor' && part.props.spinAxis !== 'y') {
+        part.props.spinAxis = 'y';
+        updateEngineGizmoShape(part);
+      }
       // プロペラには炎の欄が要らない（出ないので）。出し入れのために描き直す。
       renderInspector();
+    });
+    const elRd = document.getElementById('fRotorDiameter');
+    if (elRd) elRd.addEventListener('change', (e) => {
+      part.props.rotorDiameter = Math.max(parseFloat(e.target.value) || 0, 0);
     });
     const elPw = document.getElementById('fPlumeWidth');
     if (elPw) elPw.addEventListener('change', (e) => {

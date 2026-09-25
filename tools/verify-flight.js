@@ -4178,6 +4178,84 @@ function autopilotFlight(opts) {
   }
 }
 
+// --- ヘリコプター --------------------------------------------------------------
+// 内蔵のヘリ（ローター推力が重さの1.38倍）。操縦桿は姿勢の指示、出力レバーがコレクティブ。
+// 自動操縦は「速度を指示 → 傾き」で飛び、降り場の真上から真下へ降りる。
+{
+  console.log('\n(ヘリ) 内蔵のヘリコプター');
+  const cfg = ctx.defaultHelicopterConfig();
+  const mk = () => {
+    const m = buildAircraftModel(cfg);
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(m, st, 0, 0, 90, flatGround); settleAircraftOnGround(m, st, flatGround);
+    c.parkingBrake = false;
+    return { m, st, c };
+  };
+  const perf = analyzeAircraftPerformance(buildAircraftModel(cfg));
+  check(perf.isHelicopter && perf.flyable && !perf.notes.some((n) => n.level === 'error'),
+    'ヘリの性能診断に固定翼の誤った指摘（失速・滑走）が出ない', perf.notes.map((n) => n.text).join(' / '));
+  // 桿の倒し量どおりの姿勢になる（前へ0.6で機首-15°、右へ0.4で右15°弱）
+  {
+    const { m, st, c } = mk();
+    let pitchAt = 0, rollAt = 0;
+    for (let t = 0; t < 30; t += 1 / 60) {
+      c.throttle = Math.min(1, Math.max(0, 0.73 + (20 - st.altitudeAglM) * 0.01 - st.verticalSpeed * 0.05));
+      c.pitch = t > 12 && t < 20 ? -0.6 : 0;
+      c.roll = t > 22 ? 0.4 : 0;
+      advanceFlight(m, st, c, noWind, flatGround, 1 / 60);
+      if (Math.abs(t - 19) < 1e-6 || (t > 18.99 && t < 19.01)) pitchAt = st.pitchDeg;
+      if (t > 28.99 && t < 29.01) rollAt = st.rollDeg;
+    }
+    note('ヘリの姿勢の指示', `前へ0.6 → ピッチ ${pitchAt.toFixed(1)}° ／ 右へ0.4 → ロール ${rollAt.toFixed(1)}°`);
+    check(Math.abs(pitchAt + 15) < 2, 'ヘリ：前へ桿0.6で機首が15°下がる', pitchAt.toFixed(1) + '°');
+    check(Math.abs(rollAt - 14) < 2.5, 'ヘリ：右へ桿0.4で右へ14°傾く', rollAt.toFixed(1) + '°');
+  }
+  // 全自動：30km先の空港へ、横風8m/s
+  {
+    const { m, st, c } = mk();
+    const ap = createAutopilotState();
+    ap.full = true; ap.targetAltitudeM = 600; ap.phase = 'takeoff'; ap.takeoffHeadingDeg = 90; ap.destAirportId = 'DST';
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: 30000, z: 0, elevationM: 0 }, { runwayLengthM: 2000, headingDeg: 90 }, 0);
+    const wind = new THREE.Vector3(0, 0, 8);
+    let t = 0, tdVs = null, air = false, maxTilt = 0, seen = [];
+    for (; t < 1500 && ap.phase !== 'done' && !st.crashed; t += 1 / 60) {
+      stepAutopilot(m, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+      const vs = st.velocity.y;
+      advanceFlight(m, st, c, wind, flatGround, 1 / 60);
+      if (!st.onGround) air = true;
+      if (st.onGround && air && tdVs === null) tdVs = vs;
+      maxTilt = Math.max(maxTilt, Math.hypot(st.pitchDeg, st.rollDeg));
+      if (seen[seen.length - 1] !== ap.phase) seen.push(ap.phase);
+    }
+    const miss = Math.hypot(st.position.x - ap.plan.pad.x, st.position.z - ap.plan.pad.z);
+    note('ヘリの全自動（30km・横風8m/s）', `${seen.join('→')} ${t.toFixed(0)}秒・降り場から${miss.toFixed(1)}m・接地 ${(tdVs || 0).toFixed(2)}m/s・最大の傾き${maxTilt.toFixed(1)}°`);
+    check(ap.phase === 'done' && !st.crashed, 'ヘリの全自動：墜落せず着陸する', st.crashed ? '墜落' : ap.phase);
+    check(miss < 3, 'ヘリの全自動：降り場から3m以内に降りる', miss.toFixed(1) + 'm');
+    check(tdVs !== null && tdVs > -1, 'ヘリの全自動：接地は毎秒1mより穏やか', (tdVs || 0).toFixed(2));
+    check(c.throttle === 0, 'ヘリの全自動：着陸したらコレクティブを0へ', c.throttle.toFixed(2));
+  }
+  // ホバリング：その場に止まる（横風6m/sでも30秒で5m以内）
+  {
+    const { m, st, c } = mk();
+    for (let t = 0; t < 12; t += 1 / 60) {
+      c.throttle = Math.min(1, Math.max(0, 0.73 + (30 - st.altitudeAglM) * 0.01 - st.verticalSpeed * 0.05));
+      advanceFlight(m, st, c, noWind, flatGround, 1 / 60);
+    }
+    const ap = createAutopilotState();
+    ap.hover = true; ap.hoverX = st.position.x; ap.hoverZ = st.position.z; ap.hoverAltM = st.altitudeM;
+    const x0 = st.position.x, z0 = st.position.z, y0 = st.altitudeM;
+    const wind = new THREE.Vector3(6, 0, 0);
+    let drift = 0, dy = 0;
+    for (let t = 0; t < 30; t += 1 / 60) {
+      stepAutopilot(m, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+      advanceFlight(m, st, c, wind, flatGround, 1 / 60);
+      if (t > 10) { drift = Math.max(drift, Math.hypot(st.position.x - x0, st.position.z - z0)); dy = Math.max(dy, Math.abs(st.altitudeM - y0)); }
+    }
+    note('ヘリのホバリング（横風6m/s）', `10〜30秒で位置のずれ最大 ${drift.toFixed(1)}m・高さのずれ ${dy.toFixed(1)}m`);
+    check(drift < 5 && dy < 3, 'ヘリのホバリング：横風でもその場に止まる', `${drift.toFixed(1)}m / ${dy.toFixed(1)}m`);
+  }
+}
+
 // --- 部品の仮モデル（09e-part-proxy.js）---------------------------------------
 // 「飛行画面でも仮モデルを出す」にした舵面が、操縦のとおりの向きへ振れること。
 // 機体のモデルを前後逆に置いた（機体まるごとを180°回した）ときも同じ向きになること。
