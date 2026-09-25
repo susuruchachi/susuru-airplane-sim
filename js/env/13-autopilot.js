@@ -1549,12 +1549,12 @@ function apAlignedForFinal(plan, state) {
 // 実測（横風8m/s±3）：Boeing 747が離陸滑走で機首を18°風上へ取られ、中心線から70m
 // 流れたまま浮いた。Concordeは211m、練習機は無風に近くても40m流れた。
 //   ・目標の方位を、中心線からのずれで少しだけ中心線側へ寄せる（最大8°）
-//   ・方位のずれへの舵を強くする（1°で0.12）
-//   ・機首の振れる速さで止める（減衰）
+//   ・方位のずれへの舵を強くする（1°で1.2。はじめ0.12にしていたが、下の「すべり角」「積分」の説明を参照）
+//   ・機首の振れる速さで止める（減衰、1°/sで0.8）
 // 前輪の操向は速くなると効かなくなり（40m/sで0）、そこから先はラダーの空力だけで
 // 保つことになるので、振れを早めに止めておくことが効く。
-const AP_GROUND_HDG_KP = 0.12;      // 方位のずれ1°あたりの舵
-const AP_GROUND_RATE_KD = 0.08;     // 振れる速さ1°/sあたりの舵
+const AP_GROUND_HDG_KP = 1.2;       // 方位のずれ1°あたりの舵
+const AP_GROUND_RATE_KD = 0.8;      // 振れる速さ1°/sあたりの舵
 const AP_GROUND_CROSS_KP = 0.25;    // 中心線からのずれ1mあたり、目標の方位を寄せる角(°)
 const AP_GROUND_CROSS_MAX_DEG = 8;
 // 中心線へ寄る横の速さの上限(m/s)。寄せる角を速さで割って決める（56ktより遅ければ8°のまま）。
@@ -1562,21 +1562,78 @@ const AP_GROUND_CROSS_MAX_DEG = 8;
 // 中心線から19m横に接地し、300ktのまま4秒で中心線へ戻ろうとして（横へ秒速5m）
 // 重心の高さで振られ、ロール-5°→+7°→-27°→-83°と転がった。
 const AP_GROUND_CROSS_RATE_MPS = 4;
+// **舵を「方位」だけで決めると、横風のあいだ中心線から流れ続ける**。2つ足した。
+//   ・進む向き（対地の速度の向き）と機首の向きのずれ（タイヤのすべり角）を目標の方位に足す。
+//     横風を受けているタイヤは、機首の向きより風下へずれて進む——方位だけ合わせていると、
+//     そのずれのぶん斜めに走り続ける。
+//   ・方位のずれを積む（I）。風見鶏のように機首を風上へ回す力は滑走中ずっと掛かっているので、
+//     比例だけでは「ずれが残るから舵が出る」ところで釣り合い、ずれたまま走る。
+//     速い機体ほど同じずれで横へ速く動く（200m/sで1°なら秒速3.5m）。
+// 実測（横風8m/s、真横）：サンダーバード2号(18)が地上で中心線から29.6m流れていた
+// （方位のずれは2.7°で、舵は0.5しか使っていなかった）。
+// **効きも10倍にした**（方位1°で0.12→1.2、振れ1°/sで0.08→0.8）。サンダーバードは滑走路の上で
+// 200〜400m/sまで出るので、1°ずれただけで秒速3.5〜7m横へ動く。弱い効きでは戻しきる前に流れた。
+// 横風4/8/12m/sで、Concorde 11/37/67m → 0.6/1.3/2.0m、TB2_18 12/30/47m → 0.8/1.7/2.6m、
+// TB1_21 5/10/15m → 1.0/2.0/3.7m。ヨー角速度の最大は1.3°/s以下、舵の動きは1秒あたり合計0.33以下。
+const AP_GROUND_HDG_KI = 0.1;       // 方位のずれ1°が1秒続くと足す舵
+const AP_GROUND_INT_MAX = 0.6;
+const AP_GROUND_SLIP_TAU_S = 2;     // すべり角をならす時定数
 function apGroundSteer(state, ap, courseDeg, crossM, dt) {
+  if (ap.gndPrevHdg === undefined) { ap.gndInt = 0; ap.gndSlip = 0; }
   const prev = ap.gndPrevHdg === undefined ? state.headingDeg : ap.gndPrevHdg;
   ap.gndPrevHdg = state.headingDeg;
   const rate = dt > 0 ? apWrap180(state.headingDeg - prev) / dt : 0;
   const v = Math.max(state.groundSpeed, AP_GROUND_CROSS_RATE_MPS);
   const maxDeg = Math.min(AP_GROUND_CROSS_MAX_DEG,
     (Math.asin(AP_GROUND_CROSS_RATE_MPS / v) * 180) / Math.PI);
+  // 進む向き（方位と同じ取り方：北=0、東=90）。遅いときは向きが定まらないので使わない
+  const vel = state.velocity;
+  const moving = state.groundSpeed > 5;
+  const slipNow = moving
+    ? apClamp(apWrap180(state.headingDeg - Math.atan2(vel.x, -vel.z) * 180 / Math.PI), -10, 10) : 0;
+  const a = dt > 0 ? Math.min(1, dt / AP_GROUND_SLIP_TAU_S) : 1;
+  ap.gndSlip = (ap.gndSlip || 0) + (slipNow - (ap.gndSlip || 0)) * a;
   const want = courseDeg + apClamp(-crossM * AP_GROUND_CROSS_KP, -maxDeg, maxDeg);
-  return apClamp(apWrap180(want - state.headingDeg) * AP_GROUND_HDG_KP
-    - rate * AP_GROUND_RATE_KD, -1, 1);
+  // 動いているときは「進む向き」を目標に合わせる（= 機首の向きをすべり角ぶん風上へ）
+  const err = apWrap180(want - (state.headingDeg - ap.gndSlip));
+  if (moving && dt > 0) {
+    ap.gndInt = apClamp((ap.gndInt || 0) + err * AP_GROUND_HDG_KI * dt, -AP_GROUND_INT_MAX, AP_GROUND_INT_MAX);
+  } else ap.gndInt = 0;
+  return apClamp(err * AP_GROUND_HDG_KP + ap.gndInt - rate * AP_GROUND_RATE_KD, -1, 1);
 }
 // 滑走路の中心線からの横ずれ（右が正）。origin を通って course の向きの線から測る。
 function apCrossFromLine(state, originX, originZ, courseDeg) {
   const r = apRight(courseDeg);
   return (state.position.x - originX) * r.x + (state.position.z - originZ) * r.z;
+}
+
+// 手で滑走しているときの「まっすぐ」。**ラダーに触っていないあいだだけ**、滑走を始めた線
+// （動き出したとき・接地したときの位置と進む向き）を apGroundSteer で保つ。
+// 線は**動き出した瞬間に**取る（秒速0.2m）。練習機はブレーキを離して最初の0.4mを進むあいだに
+// 横風で機首を1.7°取られる——5m/sや1m/sで線を取ると、その斜めの線を律儀に保って流れた
+// （横風8±3m/sで、5m/sで取ると36m・1m/sで17m・0.2m/sで4.8m）。
+// ヨーダンパー（apManualYawDamper）は振れを止めるだけで向きを戻さないので、横風で機首を
+// 風上へ取られると、止まった向きのまま斜めに走って滑走路から出ていた——実測で横風4m/sの
+// サンダーバード1号(21)が、機首は2.2°しか振れていないのに、400m/sを越える滑走で中心線から
+// 126m流れた。ラダーを当てれば手の舵がそのまま効き、離すとその場所・その向きで線を取り直す
+// （曲がりたくて当てたのだから、元の線へは戻さない）。止まりかけと空中では何もしない。
+// hold は呼び出し側が持つ入れ物（線と apGroundSteer の積分など）。
+const AP_MANUAL_HOLD_FROM_MPS = 0.2;
+const AP_MANUAL_HOLD_TRACK_MPS = 15;
+function apManualGroundHold(state, hold, dt) {
+  if (!state.onGround || state.groundSpeed < AP_MANUAL_HOLD_FROM_MPS) { hold.course = undefined; return null; }
+  if (hold.course === undefined) {
+    // 速いとき（接地した瞬間）は**進んでいる向き**で取る。機首の向きで取ると、横風の中を機首を
+    // 風上へ向けたまま（クラブ）接地したとき、その斜めの向きへ走っていってしまう。
+    // 動き出し（遅いとき）は機首の向きで取る。歩くほどの速さではタイヤが横風で横へずれていて、
+    // 進む向きが数°ぶれる——それで取ると、Concordeが横風12m/sで中心線から4m→32m流れた。
+    const v = state.velocity;
+    hold.course = state.groundSpeed >= AP_MANUAL_HOLD_TRACK_MPS
+      ? Math.atan2(v.x, -v.z) * 180 / Math.PI : state.headingDeg;
+    hold.x = state.position.x; hold.z = state.position.z;
+    hold.gndPrevHdg = undefined;
+  }
+  return apGroundSteer(state, hold, hold.course, apCrossFromLine(state, hold.x, hold.z, hold.course), dt);
 }
 
 // 主脚の列より後ろ（1m以上）に車輪があるか（尾輪など）。機体の前は -Z
@@ -1618,6 +1675,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 垂直降下から出たら、覚えた風の傾きと「降りられない」時間を取り直す
     if (phase !== 'vtol_descent') { ap.vtolWindPitch = undefined; ap.vtolWindBank = undefined; ap.vtolLowSec = 0; }
     if (phase !== 'vtol_touchdown') ap.vtolParked = false;
+    ap.gndPrevHdg = undefined; // 地上の操向の積分・すべり角は段ごとに取り直す
     if (phase !== 'approach') { ap.apprThr = undefined; ap.apprFlapMax = undefined; }
     // やり直すときは、FAFへまっすぐ戻るか入口を経由するかを決め直す
     if (phase === 'goaround') { ap.navMode = undefined; ap.gaThr = undefined; }

@@ -3976,7 +3976,37 @@ function autopilotFlight(opts) {
     if (ap.phase !== 'takeoff' && st.altitudeAglM > 100) break;
   }
   note('横風8m/sの離陸（練習機）', `滑走中の横ずれ ${gndCross.toFixed(1)}m / 浮いてから対地100mまで ${airCross.toFixed(1)}m（直す前は36m）`);
-  check(gndCross < 12, '横風の離陸滑走で滑走路の半幅（22m）の内側にいる', gndCross.toFixed(1) + 'm');
+  check(gndCross < 6, '横風の離陸滑走で中心線から6m以内', gndCross.toFixed(1) + 'm');
+
+  // 手で離陸（出力を上げ、引き起こしの速さで機首を上げるだけ。ラダーには触らない）。
+  // 以前はヨーダンパーだけで、振れは止まっても向きは戻らず、斜めに走って滑走路を出ていた。
+  // ラダーに触っていないあいだは、滑走を始めた線を保つ（apManualGroundHold）。
+  // 推力を6倍にした機体でも試す（速いほど、少し向きがずれただけで横へ速く動く）。
+  const manualRoll = (cfg, hold) => {
+    const mm = buildAircraftModel(cfg); const sp = apSpeedSchedule(mm);
+    const s2 = createFlightState(), c2 = createFlightControls(), a2 = createAutopilotState(), h = {};
+    placeAircraftOnGround(mm, s2, 0, 0, 90, flatGround); settleAircraftOnGround(mm, s2, flatGround);
+    c2.parkingBrake = false;
+    let cross = 0;
+    for (let t = 0; t < 120; t += 1 / 60) {
+      wind.set(0, 0, 8 + 3 * Math.sin(t * 2 * Math.PI / 7));
+      c2.throttle = Math.min(1, t / 2);
+      if (s2.forwardAirspeed >= sp.rotate) c2.pitch = apElevatorForPitch(s2, c2, 10, 1 / 60, sp, a2);
+      const g = hold ? ctx.apManualGroundHold(s2, h, 1 / 60) : null;
+      c2.yaw = g !== null ? g : ctx.apManualYawDamper(s2);
+      advanceFlight(mm, s2, c2, wind, flatGround, 1 / 60);
+      if (s2.onGround) cross = Math.max(cross, Math.abs(s2.position.z));
+      if (s2.altitudeAglM > 10) break;
+    }
+    return cross;
+  };
+  const fast = defaultAircraftConfig();
+  for (const p of fast.parts) if (p.props && p.props.thrustKgf) p.props.thrustKgf *= 6;
+  const mDamp = manualRoll(defaultAircraftConfig(), false), mHold = manualRoll(defaultAircraftConfig(), true);
+  const mFast = manualRoll(fast, true);
+  note('横風8m/sの手の離陸（ラダーに触らない）', `練習機 ヨーダンパーだけ ${mDamp.toFixed(1)}m → 線を保つ ${mHold.toFixed(1)}m／推力6倍 ${mFast.toFixed(1)}m`);
+  check(mHold < 8, '手の離陸：ラダーに触らなければ横風でも中心線から8m以内（練習機）', mHold.toFixed(1) + 'm');
+  check(mFast < 8, '手の離陸：推力6倍の機体でも中心線から8m以内', mFast.toFixed(1) + 'm');
 }
 
 // --- (16) 着陸後の地上走行 ------------------------------------------------------

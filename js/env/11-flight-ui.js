@@ -60,6 +60,7 @@ const FLIGHT_KEYMAP = {
 
 const FLIGHT_TRIM_RATE = 0.35; // トリムが端から端まで動く速さ（毎秒）
 let _flightYawStick = 0;        // 手で当てているラダー（ヨーダンパーのぶんを除く）
+const _flightGroundHold = {};   // 手で滑走しているときに保つ線（apManualGroundHold）
 
 function setupFlightControls() {
   if (_flightKeyHandlersBound) return;
@@ -225,8 +226,13 @@ function updateFlightInput(dt) {
   // ラダーは「手の舵」と「ヨーダンパー」を分けて持つ。手の舵はばねで中央へ戻り、
   // 触っていないあいだはヨーダンパー（apManualYawDamper）が機首の振れを止める
   _flightYawStick = ty !== null ? ty : axis(_flightYawStick, FLIGHT_KEYMAP.yawLeft, FLIGHT_KEYMAP.yawRight);
-  c.yaw = _flightManual.yaw || typeof apManualYawDamper !== 'function' ? _flightYawStick
-    : THREE.MathUtils.clamp(_flightYawStick + apManualYawDamper(f.state), -1, 1);
+  // 地上では、触っていないあいだは滑走を始めた線を保つ（apManualGroundHold）。
+  // 当てたら線を捨て、離したところで取り直す。全自動が舵を持っているあいだも捨てておく。
+  if (_flightManual.yaw || (f.autopilot && f.autopilot.full)) _flightGroundHold.course = undefined;
+  const hold = !_flightManual.yaw && typeof apManualGroundHold === 'function'
+    ? apManualGroundHold(f.state, _flightGroundHold, dt) : null;
+  if (_flightManual.yaw || typeof apManualYawDamper !== 'function') c.yaw = _flightYawStick;
+  else c.yaw = THREE.MathUtils.clamp(_flightYawStick + (hold !== null ? hold : apManualYawDamper(f.state)), -1, 1);
 
   // 出力レバーは画面側が controls を直接書くので、ここではキーぶんを足すだけでいい
   const dThrottle = (_keyDown(FLIGHT_KEYMAP.throttleUp) ? 1 : 0) - (_keyDown(FLIGHT_KEYMAP.throttleDown) ? 1 : 0);
