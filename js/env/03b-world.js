@@ -3309,6 +3309,51 @@ function worldFindLandingField(x, z, lengthM) {
   return null;
 }
 
+// 垂直着陸の降り場。滑走しないので長い帯は要らない。選んだ所のすぐそばで、
+// 機体が収まる大きさ（sizeM 四方）の平らな所を探す。
+//   ・全部が陸で水の上でない、四隅と辺の中点と中心の高低差が 2.5%＋0.3m 以内（傾いたまま降りると片脚から着く）
+//   ・森が濃くない、街の建物の範囲（builtRadiusM）の外。空港の中は平らなので降りてよい
+// 探すのは内側の輪（VTOL_PAD_RING_STEP_M おき、VTOL_PAD_SEARCH_R_M まで）から順に。
+// 帯とちがって向きは関係ないので、機首は headingDeg（呼ぶ側が風上に合わせる）にする。
+const VTOL_PAD_SEARCH_R_M = 8000;
+const VTOL_PAD_RING_STEP_M = 60;
+const VTOL_PAD_MAX_SLOPE = 0.025;
+function worldCheckVtolPad(cx, cz, sizeM) {
+  const hC = worldHeightAt(cx, cz);
+  if (hC <= 1) return null;
+  const half = sizeM / 2;
+  let lo = hC, hi = hC;
+  for (let i = -1; i <= 1; i++) {
+    for (let j = -1; j <= 1; j++) {
+      const x = cx + i * half, z = cz + j * half;
+      const h = worldHeightAt(x, z);
+      if (h <= 1 || worldWaterSurfaceAt(x, z) !== null) return null;
+      if (h < lo) lo = h;
+      if (h > hi) hi = h;
+    }
+  }
+  if (hi - lo > VTOL_PAD_MAX_SLOPE * sizeM + 0.3) return null;
+  if (worldForestDensityAt(cx, cz, hC, (hi - lo) / sizeM) > FIELD_MAX_FOREST) return null;
+  for (const c of WORLD_CITIES) {
+    if (Math.hypot(c.x - cx, c.z - cz) < (c.builtRadiusM || c.flatInnerR) + half) return null;
+  }
+  return { x: cx, z: cz, lengthM: sizeM, elevationM: hC, elevA: hC, elevB: hC, grade: (hi - lo) / sizeM, bump: 0 };
+}
+
+function worldFindVtolPad(x, z, sizeM, headingDeg) {
+  for (let r = 0; r <= VTOL_PAD_SEARCH_R_M; r += VTOL_PAD_RING_STEP_M) {
+    const count = r === 0 ? 1 : Math.ceil((2 * Math.PI * r) / VTOL_PAD_RING_STEP_M);
+    let best = null;
+    for (let k = 0; k < count; k++) {
+      const ang = (k / count) * Math.PI * 2;
+      const p = worldCheckVtolPad(x + Math.cos(ang) * r, z + Math.sin(ang) * r, sizeM);
+      if (p && (!best || p.grade < best.grade)) best = p;
+    }
+    if (best) return Object.assign(best, { searchR: r, headingDeg, vtolPad: true });
+  }
+  return null;
+}
+
 // ============================================================================
 // 10. 検索ヘルパー
 // ============================================================================
@@ -3431,7 +3476,7 @@ if (typeof module !== 'undefined' && module.exports) {
     WORLD_CITY_DATA, WORLD_AIRPORT_DATA,
     WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, WORLD_ROADS, WORLD_PEAKS,
     worldLakeAt, worldRiverAt, worldWaterSurfaceAt, worldLakeFootprintAt, worldLakeShoreCells, worldLakeField,
-    worldRangeUpliftAt, worldInRangeAt, worldNearestCrestDist, worldFindLandingField, worldCheckLandingField,
+    worldRangeUpliftAt, worldInRangeAt, worldNearestCrestDist, worldFindLandingField, worldCheckLandingField, worldFindVtolPad, worldCheckVtolPad,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
     worldClamp, worldSmooth01, worldValueNoise, worldFbm, worldRng,
     initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt,

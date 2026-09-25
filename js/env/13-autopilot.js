@@ -109,6 +109,15 @@ const AP_VTOL_CUT_FLOOR = 0.02;  // 割合で抜くだけだと0に着かない�
 const AP_VTOL_DESCENT_GS_MPS = 4;
 // 垂直降下：この高さから下では、ホバーの傾きを水平へ戻していく(m)
 const AP_VTOL_LEVEL_AGL_M = 25;
+// 垂直降下：風に逆らう傾きを、高いうちの指示からこの時定数でならして覚える（秒）。
+// 傾きの上限のこの割合まで（それ以上傾けたまま降りると片脚から着く）
+const AP_VTOL_WIND_TAU_SEC = 8;
+const AP_VTOL_WIND_TILT_FRAC = 0.6;
+// 地面すれすれ（この高さ未満）で、流されて降りられないままこれだけたったら降ろしきる
+const AP_VTOL_STUCK_AGL_M = 3;
+const AP_VTOL_STUCK_SEC = 8;
+// 垂直着陸：これより遅くなったら駐機ブレーキを掛ける(m/s)。後ろへこれより速く転がっているうちは踏まない
+const AP_VTOL_PARK_MPS = 0.3;
 const AP_VTOL_SETTLE_MPS = 0.5;  // 接地したあと弾んで浮いたときの、静かな沈下率(m/s)
 // --- ホバリング（その場に留まる） ---------------------------------------------
 // 垂直離着陸機が空中で止まっていられるようにする。高さと場所と機首の向きを保つ。
@@ -1540,6 +1549,17 @@ function apCrossFromLine(state, originX, originZ, courseDeg) {
   return (state.position.x - originX) * r.x + (state.position.z - originZ) * r.z;
 }
 
+// 主脚の列より後ろ（1m以上）に車輪があるか（尾輪など）。機体の前は -Z
+function apHasWheelBehindMains(model) {
+  if (model._wheelBehind !== undefined) return model._wheelBehind;
+  const cs = model.contacts || [];
+  const mains = cs.filter((c) => c.brake);
+  if (!mains.length) { model._wheelBehind = false; return false; }
+  const mz = Math.max(...mains.map((c) => c.position.z));
+  model._wheelBehind = cs.some((c) => !c.brake && c.position.z > mz + 1);
+  return model._wheelBehind;
+}
+
 // 尾輪式（操向輪が主脚より後ろ）か。そうなら、主脚と尾輪がどちらも接地する姿勢（°）も返す。
 function apTailwheelRestPitch(model) {
   if (model._tailRest !== undefined) return model._tailRest;
@@ -1565,6 +1585,9 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     if (phase !== 'vtol_approach') { ap.vtolSpeedCapMps = undefined; ap.vtolAltCapM = undefined; }
     // 前進切替から出たら、そこで覚えた高さと垂直エンジンの蓋を取り直す
     if (phase !== 'vtol_transition') { ap.vtolTransAltM = undefined; ap.vtolWean = undefined; }
+    // 垂直降下から出たら、覚えた風の傾きと「降りられない」時間を取り直す
+    if (phase !== 'vtol_descent') { ap.vtolWindPitch = undefined; ap.vtolWindBank = undefined; ap.vtolLowSec = 0; }
+    if (phase !== 'vtol_touchdown') ap.vtolParked = false;
     if (phase !== 'approach') { ap.apprThr = undefined; ap.apprFlapMax = undefined; }
     // やり直すときは、FAFへまっすぐ戻るか入口を経由するかを決め直す
     if (phase === 'goaround') { ap.navMode = undefined; ap.gaThr = undefined; }
@@ -2211,11 +2234,25 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 支える力が無くなり、そのまま倒れる（実測でサンダーバード2号が
     // ピッチ-9.5°・ロール-12.6°のまま片脚接地し、24.9Gで転がった）。
     // 低いところでは位置を直すより、水平に降りることを優先する。
-    const tiltMax = AP_VTOL_TILT_MAX
-      * apClamp(state.altitudeAglM / AP_VTOL_LEVEL_AGL_M, 0.15, 1);
-    const hover = apVtolHoverAngles(state, plan.pad.x, plan.pad.z, tiltMax, ap);
-    controls.pitch = apElevatorForPitch(state, controls, hover.wantPitchDeg, dt, spd, ap);
-    controls.roll = apAileronForBank(state, hover.wantBankDeg, spd);
+    //
+    // **ただし「水平」は風に逆らうのに要る傾き（ap.vtolWindPitch/Bank）を中心にする**。
+    // 0°を中心に±1.5°まで絞っていたので、風の中では持ち場を保てなくなり、流されている
+    // あいだは「速すぎるので降りない」ままになった——実測でサンダーバード2号（旧データ）が
+    // 風8m/sの中、対地2mで対地速度8m/sのまま横へ流され続け、いつまでも接地しなかった。
+    // 高いうち（傾きを絞らないところ）で指示した傾きをならしておき、それを風の傾きとする。
+    const lim = AP_VTOL_TILT_MAX * apClamp(state.altitudeAglM / AP_VTOL_LEVEL_AGL_M, 0.15, 1);
+    const hover = apVtolHoverAngles(state, plan.pad.x, plan.pad.z, AP_VTOL_TILT_MAX, ap);
+    if (ap.vtolWindPitch === undefined) { ap.vtolWindPitch = 0; ap.vtolWindBank = 0; }
+    if (state.altitudeAglM > AP_VTOL_LEVEL_AGL_M) {
+      const k = 1 - Math.exp(-dt / AP_VTOL_WIND_TAU_SEC);
+      const cap = AP_VTOL_TILT_MAX * AP_VTOL_WIND_TILT_FRAC;
+      ap.vtolWindPitch = apClamp(ap.vtolWindPitch + (hover.wantPitchDeg - ap.vtolWindPitch) * k, -cap, cap);
+      ap.vtolWindBank = apClamp(ap.vtolWindBank + (hover.wantBankDeg - ap.vtolWindBank) * k, -cap, cap);
+    }
+    const wantPitch = apClamp(hover.wantPitchDeg, ap.vtolWindPitch - lim, ap.vtolWindPitch + lim);
+    const wantBank = apClamp(hover.wantBankDeg, ap.vtolWindBank - lim, ap.vtolWindBank + lim);
+    controls.pitch = apElevatorForPitch(state, controls, wantPitch, dt, spd, ap);
+    controls.roll = apAileronForBank(state, wantBank, spd);
     controls.yaw = apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP, -1, 1);
 
     // 沈下率は残りの高さに比例させる（引き起こしと同じ考え方。高いうちは速く、近づくほどゆっくり）
@@ -2230,8 +2267,13 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 通り過ぎる（実測で32m先に降り、そのまま滑っていった）。
     // ホバーの傾き（apVtolHoverAngles）は速度を打ち消す向きに働くので、
     // 降りずに待っていれば止まる。止まってから降りる。
-    const slowEnough = apClamp(
+    let slowEnough = apClamp(
       (AP_VTOL_DESCENT_GS_MPS - state.groundSpeed) / AP_VTOL_DESCENT_GS_MPS, 0, 1);
+    // それでも地面すれすれで止まれないまま AP_VTOL_STUCK_SEC たったら、ゆっくり降ろしきる
+    // （宙に浮いたまま流され続けるより、流されながらでも静かに着いたほうがいい）
+    ap.vtolLowSec = state.altitudeAglM < AP_VTOL_STUCK_AGL_M && slowEnough < 0.5
+      ? (ap.vtolLowSec || 0) + dt : 0;
+    if (ap.vtolLowSec > AP_VTOL_STUCK_SEC) slowEnough = Math.max(slowEnough, 0.5);
     const targetVs = -apClamp(state.altitudeAglM * AP_VTOL_SINK_KP, 0.3, AP_VTOL_SINK_MAX)
       * slowEnough;
     controls.vtolThrottle = apVtolThrottleForVs(controls, state.verticalSpeed, targetVs, dt, ap);
@@ -2278,12 +2320,35 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.trim = 0;
     // 脚に荷重が乗りきる前に強く踏むと、重心が車輪よりずっと上にある機体は
     // そのまま前へ倒れる。推力を抜きながらブレーキを効かせていく。
-    controls.brake = 1 - controls.vtolThrottle;
-    if (state.groundSpeed < 1.5) {
+    //
+    // **後ろへ転がっているあいだは踏まない**。後ろ向きに進みながら車輪で止めると、
+    // 止める力が重心より下に掛かるぶん機首が上がる。主脚が重心のすぐ後ろにある機体は
+    // それで尻もちをつく——実測でサンダーバード2号（旧データ：主脚が重心の0.6m後ろ、
+    // 重心は車輪の10.6m上＝3.2°起きれば後ろへ倒れる）が、垂直着陸で後ろへ0.4m/sで
+    // 接地し、駐機ブレーキで止めたところで機首が3.3°→89°と起きてひっくり返った。
+    // 後ろへ転がるぶんは転がり抵抗だけで静かに止める。
+    // 主脚より後ろに車輪（尾輪）がある機体は、後ろへ転がっていても踏んでよい（起きた尻を尾輪が受ける）。
+    // 1号（尾輪式）は踏まないと、尾が下りて後ろへ傾いた垂直エンジンの推力に押され、後ろへ1m/sまで転がった。
+    const fwdT = apForward(state.headingDeg);
+    const vFwdT = state.velocity.x * fwdT.x + state.velocity.z * fwdT.z;
+    const backOk = vFwdT > -AP_VTOL_PARK_MPS || apHasWheelBehindMains(model);
+    controls.brake = backOk ? 1 - controls.vtolThrottle : 0;
+    // **垂直エンジンを抜ききってから「着陸しました」にする**。以前は止まった（1.5m/s未満）
+    // 時点で自動操縦を切っていたので、接地した瞬間（速度はもう0）に抜きはじめる前の出力のまま
+    // 手放していた——実測でTB1_21は垂直エンジン61%、TB2_18は76%のまま点きっぱなしになり、
+    // 車輪に重さが乗らないので、風8m/sで60秒のうちに587m・164m流された。
+    // ほぼ止まったら駐機ブレーキを掛けて、抜ききるのを待つ。
+    // 一度止まったら駐機ブレーキは掛けたままにする（段の頭で毎フレーム外しているので、
+    // 抜いている途中に少し動くと外れて、そのまま転がっていった）
+    if (state.groundSpeed < AP_VTOL_PARK_MPS) ap.vtolParked = true;
+    if (ap.vtolParked) {
       controls.brake = 0;
       controls.parkingBrake = true;
-      say('done', `${plan.label || plan.airportId} に着陸しました`);
-      ap.full = false;
+      if (controls.vtolThrottle <= 0) {
+        controls.vtolThrottle = 0;
+        say('done', `${plan.label || plan.airportId} に着陸しました`);
+        ap.full = false;
+      }
     }
     return;
   }
@@ -2993,6 +3058,13 @@ const AP_FIELD_AIR_M = 600;
 const AP_FIELD_MIN_M = 900;
 const AP_FIELD_MAX_M = 5000;
 const AP_FIELD_VTOL_M = 600;
+// 垂直着陸の降り場の大きさ（四方）。翼幅と脚の前後の広がりの大きいほうの1.5倍（40m以上）
+function apVtolPadSize(model) {
+  let zMin = 0, zMax = 0;
+  for (const c of model.contacts || []) { zMin = Math.min(zMin, c.position.z); zMax = Math.max(zMax, c.position.z); }
+  return Math.max(Math.max(model.wingSpan || 0, zMax - zMin) * 1.5, 40);
+}
+
 function apFieldLengthFor(model, vtolLanding) {
   if (vtolLanding && model.hasVtol) return AP_FIELD_VTOL_M;
   const v = apSpeedSchedule(model, 80000).approach;
@@ -3004,20 +3076,32 @@ function apPickLandingField(x, z) {
   const f = EnvState.flight;
   const ap = flightAutopilot();
   if (!f.active || !f.aircraft) { announceFlight('先に飛行を始めてください'); return false; }
-  const L = apFieldLengthFor(f.aircraft.model, ap.vtolLanding);
-  const field = worldFindLandingField(x, z, L);
+  const model = f.aircraft.model;
+  // **垂直着陸なら長い帯は探さない**。選んだ所のすぐそばの、機体が収まる大きさの平らな所に
+  // 真下へ降りる（worldFindVtolPad）。以前は垂直着陸でも600mの帯を探していたので、
+  // 選んだ所から何kmも離れた所に降りたり、丘陵では見つからなかったりした。
+  // 機首は風上へ向ける（風に向かってホバリングするほうが持ち場を保ちやすい）。
+  const vtol = !!(ap.vtolLanding && model.hasVtol);
+  const L = vtol ? apVtolPadSize(model) : apFieldLengthFor(model, false);
+  const field = vtol
+    ? worldFindVtolPad(x, z, L, EnvState.env.windDirectionDeg || 0)
+    : worldFindLandingField(x, z, L);
   if (!field) {
-    const hint = f.aircraft.model.hasVtol && !ap.vtolLanding ? '（垂直着陸を入れると、600mの平地で降りられます）' : '';
-    announceFlight(`近くに降りられる平地（長さ${Math.round(L)}m）が見つかりませんでした${hint}`);
+    const hint = model.hasVtol && !ap.vtolLanding ? '（垂直着陸を入れると、選んだ所のすぐそばに降りられます）' : '';
+    announceFlight(vtol ? `近くに垂直着陸できる平らな所（${Math.round(L)}m四方）が見つかりませんでした`
+      : `近くに降りられる平地（長さ${Math.round(L)}m）が見つかりませんでした${hint}`);
     return false;
   }
+  field.pickX = x; field.pickZ = z;
   ap.destField = field;
   ap.destAirportId = null;
   if (ap.full) {
     const d = autopilotDestination();
     ap.plan = apMakeApproachPlan(d, apDestinationSettings(d), EnvState.env.windDirectionDeg);
   }
-  announceFlight(`着陸地点：選んだ所から${(field.searchR / 1000).toFixed(1)}km・長さ${Math.round(L)}m・標高${Math.round(field.elevationM)}m`);
+  announceFlight(vtol
+    ? `垂直着陸の地点：選んだ所から${Math.round(field.searchR)}m・標高${Math.round(field.elevationM)}m`
+    : `着陸地点：選んだ所から${(field.searchR / 1000).toFixed(1)}km・長さ${Math.round(L)}m・標高${Math.round(field.elevationM)}m`);
   updateAutopilotUI();
   return true;
 }
@@ -3196,7 +3280,11 @@ function setupAutopilotUI() {
   const pick = document.getElementById('envApPickField');
   if (pick) pick.addEventListener('click', () => {
     EnvState.flight.pickingField = !EnvState.flight.pickingField;
-    if (EnvState.flight.pickingField) announceFlight('右の地図をクリックすると、そのそばの平地を探して着陸地点にします');
+    // 右のメニューを閉じていると地図が見えないので開く
+    if (EnvState.flight.pickingField && typeof setEnvPanelCollapsed === 'function') setEnvPanelCollapsed(false);
+    if (EnvState.flight.pickingField) announceFlight(flightAutopilot().vtolLanding && EnvState.flight.aircraft && EnvState.flight.aircraft.model.hasVtol
+      ? '右の地図をクリックすると、そのすぐそばに垂直着陸します（地図はドラッグで動かし、ホイール・2本指で拡大）'
+      : '右の地図をクリックすると、そのそばの平地を探して着陸地点にします（地図はドラッグで動かし、ホイール・2本指で拡大）');
     updateAutopilotUI();
     pick.blur();
   });
@@ -3231,7 +3319,14 @@ function setupAutopilotUI() {
   });
   const vtolLanding = document.getElementById('envApVtolLanding');
   if (vtolLanding) vtolLanding.addEventListener('change', () => {
-    flightAutopilot().vtolLanding = vtolLanding.checked;
+    const ap = flightAutopilot();
+    ap.vtolLanding = vtolLanding.checked;
+    // 地図で選んだ着陸地点は、垂直着陸かどうかで探し方が違う（小さな降り場／長い帯）。
+    // 切り替えたら、同じ選んだ地点で探し直す——垂直着陸用の降り場のまま滑走で降りると帯が足りない
+    const fd = ap.destField;
+    if (fd && !!fd.vtolPad !== !!(ap.vtolLanding && EnvState.flight.aircraft && EnvState.flight.aircraft.model.hasVtol)) {
+      apPickLandingField(fd.pickX !== undefined ? fd.pickX : fd.x, fd.pickZ !== undefined ? fd.pickZ : fd.z);
+    }
     onEnvSettingsChanged();
   });
 

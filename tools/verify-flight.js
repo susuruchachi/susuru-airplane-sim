@@ -2873,8 +2873,13 @@ function autopilotFlight(opts) {
     if (p.type !== 'wing' || !p.props || !p.props.corners || p.props.role !== 'main') continue;
     for (const k in p.props.corners) { const v = p.props.corners[k]; v.x *= 0.45; v.z *= 0.45; }
   }
-  // 脚を後ろ寄りにする（前に転びやすい機体）
-  for (const p of cfg.parts) if (p.type === 'landing_gear') p.position.z += 1.2;
+  // 主脚を後ろ寄りにする（前に転びやすい機体）。
+  // **前脚は動かさない**。以前は前脚ごと1.2m下げていたので、前脚が重心の0.2m後ろになり、
+  // 止まって垂直エンジンを抜くと（抜ききってから着陸にするようにしたら）その場で前へ倒れた
+  // ——車輪がぜんぶ重心より後ろの機体は、駐機しているだけで立っていられない。
+  for (const p of cfg.parts) {
+    if (p.type === 'landing_gear' && !(p.props && p.props.gearPosition === 'nose')) p.position.z += 1.2;
+  }
   const lift = cfg.modelWeightKg * 1.6 / 4;
   const eng = (id, x, z) => ({ id, type: 'engine', name: '垂直' + id,
     position: { x, y: 0.4, z }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
@@ -4087,6 +4092,59 @@ function autopilotFlight(opts) {
     check(Math.abs(along) <= field.lengthM * 0.5 + 100 && Math.abs(cross) < 40,
       `平地への着陸（${label}）：探した帯の上で止まる`, `縦${Math.round(along)}m 横${Math.round(cross)}m`);
     check(searchMs < 1000, `平地への着陸（${label}）：探すのが1秒以内`, `${searchMs}ms`);
+  }
+
+  // 垂直着陸なら長い帯は探さない。選んだ所のすぐそばの、機体が収まる平らな所に真下へ降りる。
+  // 降りたら垂直エンジンを抜ききってから「着陸しました」にする（以前は出力を残したまま
+  // 手放していて、車輪に重さが乗らずに風で流された）。横風8m/sでも試す。
+  const vtolEngine = (id, x, zz) => ({
+    id, type: 'engine', name: '垂直' + id, position: { x, y: 1.05, z: zz }, rotation: { x: 0, y: 0, z: 0 },
+    scale: { x: 1, y: 1, z: 1 }, props: { thrustKgf: 900, spinAxis: 'y' },
+  });
+  const vcfg = defaultAircraftConfig();
+  vcfg.parts = vcfg.parts.concat([vtolEngine('1', -1, -1.5), vtolEngine('2', 1, -1.5), vtolEngine('3', -1, 1.5), vtolEngine('4', 1, 1.5)]);
+  for (const [label, px, pz, windMps] of [
+    ['平野', 40000, 20000, 0], ['丘陵', -150000, 600000, 0], ['丘陵・横風8m/s', -150000, 600000, 8],
+  ]) {
+    const m = buildAircraftModel(JSON.parse(JSON.stringify(vcfg)));
+    const size = ctx.apVtolPadSize(m);
+    const t0 = Date.now();
+    const pad = W.worldFindVtolPad(px, pz, size, 0);
+    const searchMs = Date.now() - t0;
+    if (!check(!!pad, `垂直着陸の地点（${label}）：${Math.round(size)}m四方の平らな所が見つかる`, pad ? '' : 'なし')) continue;
+    const dest = ctx.apFieldAirport(pad);
+    const ap = createAutopilotState();
+    ap.full = true; ap.phase = 'cruise'; ap.targetAltitudeM = pad.elevationM + 1200; ap.vtolLanding = true;
+    ap.destField = pad;
+    ap.plan = apMakeApproachPlan(dest, { runwayLengthM: pad.lengthM, headingDeg: pad.headingDeg }, 0);
+    const spd = apSpeedSchedule(m, 25000);
+    const st = createFlightState(), c = createFlightControls();
+    const sx = pad.x, sz = pad.z + 25000;
+    st.position.set(sx, ground(sx, sz) + 1200, sz); st.velocity.set(0, 0, -spd.cruise);
+    const sol = solveLevelTrim(m, spd.cruise, st.position.y);
+    st.quaternion.setFromEuler(new THREE.Euler(sol.alphaDeg * Math.PI / 180, 0, 0, 'YXZ'));
+    c.gearDown = false; c.parkingBrake = false; c.throttle = sol.throttle; c.trim = sol.trim;
+    const wind = new THREE.Vector3(windMps, 0, 0);
+    let t = 0;
+    for (; t < 1800 && ap.full && !st.crashed; t += 1 / 60) {
+      stepAutopilot(m, st, c, ap, 1 / 60, { groundHeightAt: ground });
+      advanceFlight(m, st, c, wind, ground, 1 / 60);
+    }
+    const miss = Math.hypot(st.position.x - pad.x, st.position.z - pad.z);
+    const vthr = c.vtolThrottle || 0;
+    // 着陸しましたのあと、そのまま30秒置いて流されないか
+    const x0 = st.position.x, z0 = st.position.z;
+    for (let k = 0; k < 30 * 60; k++) advanceFlight(m, st, c, wind, ground, 1 / 60);
+    const drift = Math.hypot(st.position.x - x0, st.position.z - z0);
+    note(`垂直着陸の地点（${label}）`, `探索 ${searchMs}ms・選んだ所から${Math.round(pad.searchR)}m・${Math.round(size)}m四方・勾配${(pad.grade * 100).toFixed(2)}%／`
+      + `${t.toFixed(0)}秒で${ap.phase}・降り場の中心から${miss.toFixed(1)}m・垂直エンジン${(vthr * 100).toFixed(0)}%・その後30秒で${drift.toFixed(2)}m動いた`);
+    check(!ap.full && ap.phase === 'done' && !st.crashed, `垂直着陸の地点（${label}）：墜落せず降りる`, st.crashed ? '墜落' : ap.phase);
+    // 推力の小さい練習機はホバーで傾ける力が弱く、降り場（40m四方）の中心から12〜29mずれる
+    // （TB1_21・TB2_18は0.2〜6.5m）。選んだ所のそばに降りることを見る
+    check(miss < 40, `垂直着陸の地点（${label}）：降り場のそば（40m以内）に降りる`, `${miss.toFixed(1)}m`);
+    check(vthr === 0, `垂直着陸の地点（${label}）：着陸したら垂直エンジンを止める`, `${(vthr * 100).toFixed(0)}%`);
+    check(drift < 1, `垂直着陸の地点（${label}）：着陸後に流されない`, `${drift.toFixed(2)}m`);
+    check(pad.searchR <= 2000, `垂直着陸の地点（${label}）：選んだ所から2km以内`, `${Math.round(pad.searchR)}m`);
   }
 }
 

@@ -20,12 +20,24 @@ const MINIMAP_RADAR_STRIDE = 4;
 const MINIMAP_RADAR_CELLS = MINIMAP_SIZE / MINIMAP_RADAR_STRIDE; // 58
 const MINIMAP_RADAR_REFRESH_MS = 300;
 
-// 表示範囲。世界全体は原点固定、それ以外はカメラを中心にする。
+// 表示範囲。世界全体は原点固定、それ以外はカメラを中心にする（ドラッグで動かしたらそこを中心にする）。
+// 「近郊」「詳細」は空港の滑走路・誘導路の形や、道路・街路が分かるところまで寄る。
 const MINIMAP_ZOOMS = [
   { id: 'world', label: '世界', span: 0 },       // span=0 は「世界全体」の意味
   { id: 'wide', label: '広域', span: 700000 },
   { id: 'local', label: '周辺', span: 160000 },
+  { id: 'near', label: '近郊', span: 40000 },
+  { id: 'detail', label: '詳細', span: 6000 },
 ];
+// ホイール・ピンチで寄れる範囲（一辺 m）
+const MINIMAP_SPAN_MIN = 4000;
+const MINIMAP_SPAN_MAX = 1400000;
+// 重ねて描くものが出はじめる範囲（一辺がこれ以下のとき）
+const MINIMAP_ROADS_SPAN = 260000;    // 道路
+const MINIMAP_AIRPORT_SPAN = 90000;   // 空港の滑走路・誘導路・エプロン・ターミナルの形
+const MINIMAP_STREETS_SPAN = 30000;   // 街の街路
+// ドラッグ・ズームのあと、これだけ動かなければ新しい範囲で地図を焼き直す（ms）
+const MINIMAP_REBAKE_IDLE_MS = 250;
 
 let _minimapCanvas = null;
 let _minimapCtx = null;
@@ -34,6 +46,11 @@ let _minimapBaseView = null;    // その地形がどの範囲を表している
 let _minimapWorldCache = null;  // 「世界」ズームは一度焼いたら使い回す
 let _minimapBakeJob = null;
 let _minimapZoom = 0;
+let _minimapSpan = null;        // ホイール・ピンチで決めた一辺（null ならズームの段の値）
+let _minimapCenter = null;      // ドラッグで決めた中心（null ならカメラ＝機体に付いていく）
+let _minimapInteractAt = 0;     // 最後にドラッグ・ズームした時刻
+let _minimapDrag = null;        // ドラッグ中の状態
+const _minimapPointers = new Map();
 
 let _radarClimate = null;       // { view, temp, dry }（地図と同じ範囲の気候。時間では変わらない）
 let _radarCanvas = null;        // 58×58 のオフスクリーン
@@ -61,9 +78,63 @@ function minimapColorFor(h) {
 
 function minimapCurrentView() {
   const z = MINIMAP_ZOOMS[_minimapZoom];
-  if (z.span === 0) return { cx: 0, cz: 0, span: WORLD_SIZE };
+  const span = _minimapSpan !== null ? _minimapSpan : z.span;
+  if (span === 0 || span >= WORLD_SIZE) return { cx: 0, cz: 0, span: WORLD_SIZE };
   const cam = EnvState.camera.position;
-  return { cx: cam.x, cz: cam.z, span: z.span };
+  const c = _minimapCenter || { x: cam.x, z: cam.z };
+  return { cx: c.x, cz: c.z, span };
+}
+
+// 画面の点（キャンバスの左上からの px）→ 世界の座標
+function minimapPxToWorld(view, px, py) {
+  return { x: view.cx - view.span / 2 + (px / MINIMAP_SIZE) * view.span,
+    z: view.cz - view.span / 2 + (py / MINIMAP_SIZE) * view.span };
+}
+function minimapEventPx(ev) {
+  const rect = _minimapCanvas.getBoundingClientRect();
+  return { px: ((ev.clientX - rect.left) / rect.width) * MINIMAP_SIZE,
+    py: ((ev.clientY - rect.top) / rect.height) * MINIMAP_SIZE };
+}
+
+// いま表示している範囲。カメラに付いていっていて触っていないときは、焼けている範囲そのもの
+// （毎フレーム範囲を変えると、地名の配置を毎フレーム作り直すことになる）。
+// ドラッグ・ズームしたときは、その範囲をすぐに表示し、焼けている地図は拡大縮小して重ねる。
+let _minimapDisplayView = null;
+function minimapDisplayView(want) {
+  const following = !_minimapCenter && _minimapSpan === null;
+  const recent = performance.now() - _minimapInteractAt < MINIMAP_REBAKE_IDLE_MS * 2;
+  if (following && !recent && _minimapBaseView) return _minimapBaseView;
+  const d = _minimapDisplayView;
+  if (d && d.cx === want.cx && d.cz === want.cz && d.span === want.span) return d;
+  _minimapDisplayView = want;
+  return want;
+}
+
+// 寄る・引く。(px, py) の地点が画面の同じ所に留まるようにする
+function minimapZoomAt(factor, px, py) {
+  const v = minimapCurrentView();
+  let span = Math.min(Math.max(v.span * factor, MINIMAP_SPAN_MIN), MINIMAP_SPAN_MAX);
+  if (span >= WORLD_SIZE) { _minimapSpan = WORLD_SIZE; _minimapCenter = null; minimapMarkZoomButtons(); return; }
+  const p = minimapPxToWorld(v, px, py);
+  const cx = p.x - (px / MINIMAP_SIZE - 0.5) * span, cz = p.z - (py / MINIMAP_SIZE - 0.5) * span;
+  _minimapSpan = span;
+  _minimapCenter = { x: cx, z: cz };
+  _minimapInteractAt = performance.now();
+  minimapMarkZoomButtons();
+}
+
+// ズームの段のボタンのうち、いまの範囲にいちばん近いものを光らせる
+function minimapMarkZoomButtons() {
+  const host = document.getElementById('envMinimapZoom');
+  if (!host) return;
+  const span = minimapCurrentView().span;
+  let best = 0, bestD = Infinity;
+  MINIMAP_ZOOMS.forEach((z, i) => {
+    const zs = z.span || WORLD_SIZE;
+    const d = Math.abs(Math.log(zs / span));
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  host.querySelectorAll('button[data-zoom]').forEach((b) => b.classList.toggle('active', b.dataset.zoom === String(best)));
 }
 
 function initMinimap() {
@@ -74,7 +145,18 @@ function initMinimap() {
   _minimapCanvas.width = Math.round(MINIMAP_SIZE * _minimapDpr);
   _minimapCanvas.height = Math.round(MINIMAP_SIZE * _minimapDpr);
   _minimapCtx = _minimapCanvas.getContext('2d');
-  _minimapCanvas.addEventListener('click', onMinimapClick);
+  // ドラッグで動かす・ホイールとピンチで寄る・引く。動かさずに離したら従来どおりのクリック。
+  // 飛行中も使える（中心をドラッグで決めたら、機体に付いていくのをやめる。「現在地」で戻る）。
+  _minimapCanvas.addEventListener('pointerdown', onMinimapPointerDown);
+  _minimapCanvas.addEventListener('pointermove', onMinimapPointerMove);
+  _minimapCanvas.addEventListener('pointerup', onMinimapPointerUp);
+  _minimapCanvas.addEventListener('pointercancel', onMinimapPointerUp);
+  _minimapCanvas.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    const p = minimapEventPx(ev);
+    minimapZoomAt(Math.exp(ev.deltaY * 0.0015), p.px, p.py);
+  }, { passive: false });
+  _minimapCanvas.style.touchAction = 'none';
   _minimapCanvas.style.cursor = 'crosshair';
   EnvState.minimap = { canvas: _minimapCanvas };
   startMinimapBake(minimapCurrentView());
@@ -104,7 +186,8 @@ function stepMinimapBake() {
   const { view, img } = job;
   const half = view.span / 2;
   const step = view.span / MINIMAP_SIZE;
-  const shadeStep = Math.max(step * 1.4, 700);
+  // 陰影は数百mの起伏を拾う。寄ったときは細かく（以前は700m固定＝「周辺」でちょうどよい値）
+  const shadeStep = Math.max(step * 1.4, Math.min(700, view.span / 100));
   const end = Math.min(job.row + MINIMAP_BAKE_ROWS_PER_FRAME, MINIMAP_SIZE);
 
   for (let j = job.row; j < end; j++) {
@@ -276,7 +359,7 @@ function bakeMinimapRadar(view) {
   _radarSnowShare = wet ? snowy / wet : 0;
 }
 
-function drawMinimapRadar(ctx, view) {
+function drawMinimapRadar(ctx, view, rect) {
   if (!EnvState.env.radarVisible) return;
   if (!_radarClimate || _radarClimate.view !== view) return;
   if (typeof deriveWeather !== 'function' || !EnvState.weather.current) return;
@@ -290,7 +373,8 @@ function drawMinimapRadar(ctx, view) {
 
   // 粗い格子のまま拡大すると四角が並ぶので、なめらかに伸ばす
   ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(_radarCanvas, 0, 0, MINIMAP_SIZE, MINIMAP_SIZE);
+  if (rect) ctx.drawImage(_radarCanvas, rect.x, rect.y, rect.s, rect.s);
+  else ctx.drawImage(_radarCanvas, 0, 0, MINIMAP_SIZE, MINIMAP_SIZE);
 }
 
 // レーダーの凡例。色が何を意味するかは見ただけでは分からないので出しておく。
@@ -339,12 +423,18 @@ function updateMinimap() {
   if (!_minimapCtx) return;
   stepMinimapBake();
 
-  // 表示したい範囲と、いま焼けている範囲がずれてきたら焼き直す
+  // 表示したい範囲と、いま焼けている範囲がずれてきたら焼き直す。
+  // ドラッグ・ズームの最中は焼き直さない（手を止めてから MINIMAP_REBAKE_IDLE_MS 後）——
+  // 焼くのに20フレームほど掛かるので、動かすたびに始め直すといつまでも焼き上がらない。
   const want = minimapCurrentView();
-  if (!_minimapBakeJob && _minimapBaseView) {
-    const moved = Math.hypot(want.cx - _minimapBaseView.cx, want.cz - _minimapBaseView.cz);
-    if (want.span !== _minimapBaseView.span || moved > want.span * 0.12) {
+  const idle = !_minimapDrag && performance.now() - _minimapInteractAt > MINIMAP_REBAKE_IDLE_MS;
+  const bakingView = _minimapBakeJob ? _minimapBakeJob.view : _minimapBaseView;
+  if (idle && bakingView) {
+    const moved = Math.hypot(want.cx - bakingView.cx, want.cz - bakingView.cz);
+    const zoomed = Math.abs(Math.log(want.span / bakingView.span)) > 0.02;
+    if (zoomed || moved > want.span * 0.12) {
       if (want.span === WORLD_SIZE && _minimapWorldCache) {
+        _minimapBakeJob = null;
         _minimapBase = _minimapWorldCache.canvas;
         _minimapBaseView = _minimapWorldCache.view;
         _radarClimate = _minimapWorldCache.climate;
@@ -356,11 +446,19 @@ function updateMinimap() {
   }
   if (!_minimapBase) return;
 
-  const view = _minimapBaseView;
+  const view = minimapDisplayView(want);
   const ctx = _minimapCtx;
   ctx.setTransform(_minimapDpr, 0, 0, _minimapDpr, 0, 0);
   ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(_minimapBase, 0, 0, MINIMAP_SIZE, MINIMAP_SIZE);
+  // 焼けている地図を、いま表示している範囲に合わせて拡大縮小して置く（はみ出した所は海の色）
+  const bv = _minimapBaseView;
+  const baseRect = {
+    x: ((bv.cx - bv.span / 2) - (view.cx - view.span / 2)) / view.span * MINIMAP_SIZE,
+    y: ((bv.cz - bv.span / 2) - (view.cz - view.span / 2)) / view.span * MINIMAP_SIZE,
+    s: bv.span / view.span * MINIMAP_SIZE,
+  };
+  if (bv !== view) { ctx.fillStyle = '#0f2a44'; ctx.fillRect(0, 0, MINIMAP_SIZE, MINIMAP_SIZE); }
+  ctx.drawImage(_minimapBase, baseRect.x, baseRect.y, baseRect.s, baseRect.s);
 
   // 地名の配置は範囲・選んでいる空港・レーダーの有無が変わったときだけ決め直す
   const selected = EnvState.selectedAirportId;
@@ -381,8 +479,11 @@ function updateMinimap() {
     ctx.stroke(r.path);
   }
 
+  // 道路・街路・空港の形（寄ったときだけ）。川・湖の上、レーダーの下
+  drawMinimapGround(ctx, view);
+
   // 降水は地形の上・記号の下に重ねる（街や空港がレーダーで隠れないように）
-  drawMinimapRadar(ctx, view);
+  drawMinimapRadar(ctx, bv, baseRect);
 
   drawMinimapSymbols(ctx, L.symbols);
   drawMinimapLabelText(ctx, L.labels);
@@ -437,7 +538,9 @@ function updateMinimap() {
   ctx.stroke();
   ctx.fillStyle = 'rgba(255,255,255,0.9)';
   ctx.font = '10px system-ui, sans-serif';
-  ctx.fillText(`${Math.round(barM / 1000).toLocaleString()} km`, 10, MINIMAP_SIZE - 14);
+  const barText = barM < 1000 ? `${Math.round(barM)} m`
+    : (barM < 10000 ? `${(barM / 1000).toFixed(barM % 1000 ? 1 : 0)} km` : `${Math.round(barM / 1000).toLocaleString()} km`);
+  ctx.fillText(barText, 10, MINIMAP_SIZE - 14);
 
   drawMinimapRadarLegend(ctx);
 
@@ -447,6 +550,141 @@ function updateMinimap() {
     ctx.fillRect(0, 0, MINIMAP_SIZE, 14);
     ctx.fillStyle = '#cfe3ff';
     ctx.fillText('地図を描画中…', 6, 10);
+  }
+}
+
+// --- 道路・街路・空港の形（寄ったとき） ---------------------------------------------
+//
+// 「周辺」より寄ったときに、3Dで描いているのと同じ形を地図にも描く。
+//   道路 … WORLD_ROADS（幹線は白、空港への取り付け道路は薄い黄）。実際の幅を縮尺に直す（細すぎれば下限）
+//   街路 … 03j-city-layout.js の街路網（3Dの舗装と建物が使うものと同じ）
+//   空港 … 滑走路（平行滑走路も）・誘導路・エプロン・ターミナル。いまの設定（長さ・幅・向き）で描く
+// 形は範囲が変わったときだけ Path2D に組み直す（地名と同じ）。
+let _minimapGround = null;
+
+function minimapRoadBox(road) {
+  if (road._mmBox) return road._mmBox;
+  let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+  for (const p of road.points) {
+    if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x;
+    if (p.z < z0) z0 = p.z; if (p.z > z1) z1 = p.z;
+  }
+  road._mmBox = { x0, z0, x1, z1 };
+  return road._mmBox;
+}
+
+function buildMinimapGround(view) {
+  const N = MINIMAP_SIZE, mPerPx = view.span / N;
+  const half = view.span / 2, pad = view.span * 0.05;
+  const vx0 = view.cx - half - pad, vx1 = view.cx + half + pad;
+  const vz0 = view.cz - half - pad, vz1 = view.cz + half + pad;
+  const toPx = (x, z) => minimapWorldToPx(view, x, z);
+  const out = { view, roads: [], streets: null, streetWidth: 1, airports: [] };
+
+  if (view.span <= MINIMAP_ROADS_SPAN && typeof WORLD_ROADS !== 'undefined') {
+    const byKind = new Map();
+    for (const r of WORLD_ROADS) {
+      const b = minimapRoadBox(r);
+      if (b.x1 < vx0 || b.x0 > vx1 || b.z1 < vz0 || b.z0 > vz1) continue;
+      const kind = r.kind || 'trunk';
+      if (!byKind.has(kind)) byKind.set(kind, { path: new Path2D(), width: Math.max(kind === 'trunk' ? 1.1 : 0.8, (2 * (r.halfWidth || 6)) / mPerPx) });
+      const g = byKind.get(kind);
+      let last = null;
+      for (let i = 0; i < r.points.length; i++) {
+        const q = r.points[i];
+        const p = toPx(q.x, q.z);
+        if (last && i !== r.points.length - 1 && Math.hypot(p.px - last.px, p.py - last.py) < 0.8) continue;
+        if (!last) g.path.moveTo(p.px, p.py); else g.path.lineTo(p.px, p.py);
+        last = p;
+      }
+    }
+    for (const [kind, g] of byKind) out.roads.push({ kind, path: g.path, width: g.width });
+  }
+
+  if (view.span <= MINIMAP_STREETS_SPAN && typeof cityStreetNetwork === 'function') {
+    const path = new Path2D();
+    for (const c of WORLD_CITIES) {
+      const R = (c.builtRadiusM || c.flatInnerR || 2000) * 1.1;
+      if (c.x + R < vx0 || c.x - R > vx1 || c.z + R < vz0 || c.z - R > vz1) continue;
+      for (const st of cityStreetNetwork(c).streets) {
+        const pts = st.pts;
+        for (let i = 0; i < pts.length; i++) {
+          const p = toPx(c.x + pts[i].x, c.z + pts[i].z);
+          if (i === 0) path.moveTo(p.px, p.py); else path.lineTo(p.px, p.py);
+        }
+      }
+    }
+    out.streets = path;
+    out.streetWidth = Math.max(0.6, 12 / mPerPx);
+  }
+
+  if (view.span <= MINIMAP_AIRPORT_SPAN && typeof getAirportSettings === 'function') {
+    for (const a of WORLD_AIRPORTS) {
+      const reach = a.flatOuterR || 6000;
+      if (a.x + reach < vx0 || a.x - reach > vx1 || a.z + reach < vz0 || a.z - reach > vz1) continue;
+      const st = getAirportSettings(a.id);
+      if (!st) continue;
+      const frame = Object.assign({}, a, { headingDeg: st.headingDeg });
+      const L = st.runwayLengthM, W = st.runwayWidthM;
+      // ローカルの長方形（中心 lx,lz・長さ lw・幅 ld）を画面の四角形に
+      const rect = (lx, lz, lw, ld, minPx) => {
+        const hw = lw / 2, hd = Math.max(ld, (minPx || 0) * mPerPx) / 2;
+        const path = new Path2D();
+        [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]].forEach(([dx, dz], k) => {
+          const w = airportLocalToWorld(frame, lx + dx, lz + dz);
+          const p = toPx(w.x, w.z);
+          if (k === 0) path.moveTo(p.px, p.py); else path.lineTo(p.px, p.py);
+        });
+        path.closePath();
+        return path;
+      };
+      const pave = new Path2D(), concrete = new Path2D(), runways = new Path2D(), building = new Path2D();
+      const n = a.runwayCount || 1, spacing = a.runwaySpacingM || 480, span = airportRunwayHalfSpan(a);
+      for (let k = 0; k < n; k++) runways.addPath(rect(0, -span + k * spacing, L, W, 1.4));
+      if (typeof airportTaxiLayout === 'function') {
+        const lay = airportTaxiLayout(L, W, a);
+        for (const sg of lay.segments) {
+          const cx = (sg.x0 + sg.x1) / 2, cz = (sg.z0 + sg.z1) / 2;
+          const horiz = sg.z0 === sg.z1;
+          pave.addPath(horiz ? rect(cx, cz, Math.abs(sg.x1 - sg.x0) + TAXIWAY_WIDTH_M, TAXIWAY_WIDTH_M, 0.7)
+            : rect(cx, cz, Math.max(TAXIWAY_WIDTH_M, 0.7 * mPerPx), Math.abs(sg.z1 - sg.z0) + TAXIWAY_WIDTH_M, 0));
+        }
+        const b = airportBuildings(a);
+        concrete.addPath(rect(lay.apronX, lay.apronZ, b.termW + 80, APRON_DEPTH_M, 0.8));
+        building.addPath(rect(a.terminalLocalX, a.terminalLocalZ, b.termW, b.termD, 0.8));
+      }
+      out.airports.push({ id: a.id, pave, concrete, runways, building });
+    }
+  }
+  return out;
+}
+
+function drawMinimapGround(ctx, view) {
+  if (view.span > MINIMAP_ROADS_SPAN) return;
+  let G = _minimapGround;
+  if (!G || G.view !== view) G = _minimapGround = buildMinimapGround(view);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  if (G.streets) {
+    ctx.strokeStyle = 'rgba(214,206,190,0.75)';
+    ctx.lineWidth = G.streetWidth;
+    ctx.stroke(G.streets);
+  }
+  for (const r of G.roads) {
+    // 縁取りを付けて、地形の色の上でも見分けられるようにする
+    ctx.strokeStyle = 'rgba(40,36,30,0.55)';
+    ctx.lineWidth = r.width + 1.2;
+    ctx.stroke(r.path);
+    ctx.strokeStyle = r.kind === 'trunk' ? 'rgba(250,246,236,0.95)' : 'rgba(246,222,150,0.95)';
+    ctx.lineWidth = r.width;
+    ctx.stroke(r.path);
+  }
+  for (const a of G.airports) {
+    ctx.fillStyle = 'rgba(176,180,184,0.95)'; ctx.fill(a.concrete);
+    ctx.fillStyle = 'rgba(74,78,84,0.98)'; ctx.fill(a.pave);
+    ctx.fillStyle = 'rgba(46,49,54,1)'; ctx.fill(a.runways);
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 0.6; ctx.stroke(a.runways);
+    ctx.fillStyle = 'rgba(92,110,132,1)'; ctx.fill(a.building);
   }
 }
 
@@ -549,7 +787,8 @@ function buildMinimapLabels(ctx, view, selected, radar) {
     if (!zoomedIn && !isSel && a.runwayLengthM < 2600) continue;
     const p = toPx(a.x, a.z);
     const s = isSel ? 4.5 : 2.6;
-    symbols.push({ kind: 'airport', px: p.px, py: p.py, s, selected: isSel });
+    // 滑走路の形が見えるほど寄ったら、十字の記号は描かない（滑走路の上に重なって形が隠れる）
+    if (view.span > MINIMAP_AIRPORT_SPAN * 0.5) symbols.push({ kind: 'airport', px: p.px, py: p.py, s, selected: isSel });
     placed.push({ x0: p.px - s, y0: p.py - s, x1: p.px + s, y1: p.py + s });
     airports.push({ a, p, s, isSel });
   }
@@ -749,17 +988,69 @@ function drawMinimapLabelText(ctx, labels) {
   ctx.textAlign = 'left';
 }
 
+// --- ドラッグ・ピンチ -----------------------------------------------------------
+const MINIMAP_DRAG_START_PX = 4;   // これより動いたらクリックではなくドラッグ
+
+function onMinimapPointerDown(ev) {
+  _minimapCanvas.setPointerCapture(ev.pointerId);
+  const p = minimapEventPx(ev);
+  _minimapPointers.set(ev.pointerId, p);
+  const v = minimapCurrentView();
+  if (_minimapPointers.size === 1) {
+    _minimapDrag = { start: p, view: v, moved: false, pinch: null };
+  } else if (_minimapPointers.size === 2 && _minimapDrag) {
+    const [a, b] = [..._minimapPointers.values()];
+    _minimapDrag.pinch = { dist: Math.hypot(a.px - b.px, a.py - b.py) || 1, span: v.span };
+    _minimapDrag.moved = true;
+  }
+}
+
+function onMinimapPointerMove(ev) {
+  if (!_minimapDrag || !_minimapPointers.has(ev.pointerId)) return;
+  const p = minimapEventPx(ev);
+  _minimapPointers.set(ev.pointerId, p);
+  const d = _minimapDrag;
+  if (d.pinch && _minimapPointers.size >= 2) {
+    const [a, b] = [..._minimapPointers.values()];
+    const dist = Math.hypot(a.px - b.px, a.py - b.py) || 1;
+    const want = d.pinch.span * d.pinch.dist / dist;
+    const cur = minimapCurrentView().span;
+    minimapZoomAt(want / cur, (a.px + b.px) / 2, (a.py + b.py) / 2);
+    return;
+  }
+  if (!d.moved && Math.hypot(p.px - d.start.px, p.py - d.start.py) < MINIMAP_DRAG_START_PX) return;
+  d.moved = true;
+  if (d.view.span >= WORLD_SIZE) return; // 世界全体は動かせない
+  const k = d.view.span / MINIMAP_SIZE;
+  _minimapSpan = d.view.span;
+  _minimapCenter = { x: d.view.cx - (p.px - d.start.px) * k, z: d.view.cz - (p.py - d.start.py) * k };
+  _minimapInteractAt = performance.now();
+  _minimapCanvas.style.cursor = 'grabbing';
+}
+
+function onMinimapPointerUp(ev) {
+  const had = _minimapPointers.has(ev.pointerId);
+  _minimapPointers.delete(ev.pointerId);
+  if (!_minimapDrag || !had) return;
+  if (_minimapPointers.size > 0) return; // ピンチの片方の指が離れただけ
+  const d = _minimapDrag;
+  _minimapDrag = null;
+  _minimapCanvas.style.cursor = 'crosshair';
+  if (!d.moved && ev.type === 'pointerup') onMinimapClick(ev);
+}
+
+// 地図の中心を機体（カメラ）へ戻して、付いていくようにする
+function minimapRecenter() {
+  _minimapCenter = null;
+  _minimapInteractAt = performance.now();
+}
+
 // クリックした地点へカメラを移す。高さは地形に合わせ、寄り具合は今の距離を保つ。
 function onMinimapClick(ev) {
-  if (!_minimapBaseView) return;
-  const rect = _minimapCanvas.getBoundingClientRect();
-  const px = ((ev.clientX - rect.left) / rect.width) * MINIMAP_SIZE;
-  const py = ((ev.clientY - rect.top) / rect.height) * MINIMAP_SIZE;
-
-  const view = _minimapBaseView;
-  const half = view.span / 2;
-  const wx = view.cx - half + (px / MINIMAP_SIZE) * view.span;
-  const wz = view.cz - half + (py / MINIMAP_SIZE) * view.span;
+  const view = _minimapDisplayView || _minimapBaseView;
+  if (!view) return;
+  const { px, py } = minimapEventPx(ev);
+  const { x: wx, z: wz } = minimapPxToWorld(view, px, py);
 
   // 自動操縦の「地図で着陸地点を選ぶ」を押したあとなら、そのそばの平地を探して目的地にする
   if (EnvState.flight && EnvState.flight.pickingField && typeof apPickLandingField === 'function') {
@@ -793,10 +1084,17 @@ function setupMinimapUI() {
     btn.className = i === _minimapZoom ? 'active' : '';
     btn.addEventListener('click', () => {
       _minimapZoom = i;
-      host.querySelectorAll('button').forEach((b) => {
-        b.classList.toggle('active', b.dataset.zoom === String(i));
-      });
+      _minimapSpan = null;               // ホイールで決めた範囲は捨てて、段の範囲にする
+      if (z.span === 0) _minimapCenter = null;
+      _minimapInteractAt = performance.now();
+      minimapMarkZoomButtons();
     });
     host.appendChild(btn);
   });
+  // 地図の中心を機体（カメラ）へ戻す
+  const home = document.createElement('button');
+  home.textContent = '現在地';
+  home.title = 'ドラッグで動かした地図を、機体（カメラ）の位置へ戻す';
+  home.addEventListener('click', minimapRecenter);
+  host.appendChild(home);
 }

@@ -598,6 +598,7 @@ const VTOL_RCS_DEG = { pitch: 14, roll: 34, yaw: 10 }; // 舵一杯のときの�
 const VTOL_RCS_DAMP = 1.3;      // 角速度を戻す強さ（1/s）
 const VTOL_RCS_LEVEL = 0.7;     // 水平へ戻す強さ（rad/s² / 傾きのsin）
 const VTOL_RCS_FADE_MPS = 60;   // 機首方向の速度がこれに達するまででノズルの効きを0にし、舵に任せる
+const VTOL_RCS_AUTH_MAX = 1.5;  // 効きの上限（支えている重さの割合で見る。accumulateVtolControl）
 
 const _vtolUp = new THREE.Vector3();
 
@@ -606,7 +607,12 @@ function accumulateVtolControl(model, state, controls, out) {
   const power = controls.vtolThrottle || 0;
   if (power < 0.02) return;
   const fade = THREE.MathUtils.clamp(1 - (state.forwardAirspeed || 0) / VTOL_RCS_FADE_MPS, 0, 1);
-  const auth = power * fade;
+  // 効きは**垂直エンジンが支えている重さの割合**で決める（ホバーでどの機体も1前後）。
+  // レバーの位置そのもので決めていたので、推力が桁外れな機体ほどホバーのレバーが小さく、
+  // 姿勢を変える力が無かった——実測でサンダーバード2号（旧データ）はホバーに6%しか使わず、
+  // 効きが0.06しか無いので傾けられず、降り場の74m横に降りていた。
+  const lift = model.vtolThrustN > 0 ? model.vtolThrustN / (model.massKg * 9.80665) : 1;
+  const auth = Math.min(power * lift, VTOL_RCS_AUTH_MAX) * fade;
   if (auth <= 1e-4) return;
 
   const I = model.inertia;
