@@ -265,6 +265,9 @@ async function createAircraft(config, cgOverride) {
   // ノズルの太さを抑える基準は、Builderと同じ**メッシュの境界箱**で測る。
   const meshUnit = aircraftMeshUnit(visual, model);
   const plumes = buildEnginePlumes(model, group, meshUnit);
+  // Builderで「飛行画面でも仮モデルを出す」にした部品（脚・エンジン・翼・舵面）の形。
+  // モデルに作り込まれていない部品を補うためのもので、当たり判定（hull）には入れない（09e-part-proxy.js）。
+  const proxies = typeof buildPartProxies === 'function' ? buildPartProxies(config, modelXform, group, meshUnit) : null;
   // 衝撃波（音速まわりの白い雲と、抜けていく輪）。機体と一緒に動く。
   const boom = buildSonicBoom(model, group);
 
@@ -281,7 +284,7 @@ async function createAircraft(config, cgOverride) {
 
   return {
     model, group, orient, modelRoot, modelXform, visual, lights, landingPool,
-    plumes, boom, contrail, smoke, tyreSmoke, fx: contrail.group, bones, hull,
+    plumes, boom, contrail, smoke, tyreSmoke, fx: contrail.group, bones, hull, proxies,
     source,
     name: config.name || (source === 'builder' ? '機体' : '内蔵の練習機'),
     propeller: visual.userData ? visual.userData.propeller : null,
@@ -2205,6 +2208,8 @@ function updateAircraftVisual(ac, controls, state, dt, elapsed) {
 
   // GLBに舵のボーンがあれば、操縦に合わせて振る（09c-aircraft-bones.js）
   if (typeof updateAircraftBones === 'function') updateAircraftBones(ac, controls, dt);
+  // 仮モデルの脚の上げ下げと舵面（09e-part-proxy.js）
+  if (typeof updatePartProxies === 'function') updatePartProxies(ac, controls, dt);
 
   updateLandingCloudLight(ac, controls);
   updateLandingLightPool(ac, controls, state);

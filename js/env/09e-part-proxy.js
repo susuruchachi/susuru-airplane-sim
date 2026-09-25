@@ -1,0 +1,381 @@
+// 09e-part-proxy.js — 部品の「仮モデル」（Builder と flight.html の両方が読む）
+//
+// Builder で部品を置くと、画面にはその部品を表す仮の形が出る（銀色の脚、エンジンの筒、
+// 翼の板、舵面の板）。機体のモデル（GLB）にその部品が作り込まれていないとき——たとえば
+// 脚の無いモデルに脚の部品だけ置いたとき——飛行画面では何も描かれず、機体が宙に浮いて見えた。
+// 部品ごとに「飛行画面でも仮モデルを出す」（props.proxyInFlight）を選べるようにし、
+// オンの部品は飛行画面にも同じ形を出す。
+//
+// 形の作り方は**ここ1か所**にまとめ、Builder（js/05-part-system.js）もここを呼ぶ。
+// 2か所に書くと、Builder で見ている形と飛行画面の形がいつの間にか食い違う。
+//
+// 飛行画面では、仮モデルは操縦に合わせて動く：
+//   ・脚 … 脚の上げ下げ（G）で格納・展開する（PART_PROXY_GEAR_S かけて）
+//   ・舵面 … 昇降舵・補助翼・方向舵・フラップ・スポイラーを操縦のとおりに振る
+//   ・エンジンと翼 … 動かない
+// 見た目だけで、飛び方（物理）は何も変わらない。当たり判定（09d）にも入れない。
+
+const PART_PROXY_TYPES = ['landing_gear', 'engine', 'wing', 'control_surface'];
+const PART_PROXY_GEAR_S = 4;          // 脚を出し切る／しまい切るまでの秒数
+const PART_PROXY_SURFACE_SMOOTH_S = 0.08;
+
+// ---- 翼の板 ------------------------------------------------------------------
+
+// 翼の4頂点（rootLeading, rootTrailing, tipLeading, tipTrailing）から、厚みを持つ板状のジオメトリを生成する。
+// モデルの実際の羽根形状に頂点を合わせたとき、翼のプレースホルダー自体の見た目もそれに追従させるためのもの。
+// 水平翼(main/htail)は厚みをY方向に、垂直尾翼(vtail)は厚みをX方向に加える（板が広がる平面が違うため）
+function partShapeWingGeometry(corners, role) {
+  const rl = corners.rootLeading, rt = corners.rootTrailing, tl = corners.tipLeading, tt = corners.tipTrailing;
+  const thickness = 0.025; // 板の厚み（半分ずつオフセット）
+  const half = thickness / 2;
+  const thicknessAxis = role === 'vtail' ? 'x' : 'y';
+
+  const positions = [];
+  const addTri = (a, b, c) => { positions.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z); };
+  const offset = (p, sign) => ({
+    x: p.x + (thicknessAxis === 'x' ? sign * half : 0),
+    y: p.y + (thicknessAxis === 'y' ? sign * half : 0),
+    z: p.z,
+  });
+
+  const rlU = offset(rl, 1), rtU = offset(rt, 1), tlU = offset(tl, 1), ttU = offset(tt, 1);
+  const rlD = offset(rl, -1), rtD = offset(rt, -1), tlD = offset(tl, -1), ttD = offset(tt, -1);
+
+  // 表面（+方向側。rootLeading, tipLeading, tipTrailing, rootTrailingの順で四角形を三角形2枚に分割）
+  addTri(rlU, tlU, ttU); addTri(rlU, ttU, rtU);
+  // 裏面（-方向側。法線が逆になるよう頂点順を反転）
+  addTri(rlD, ttD, tlD); addTri(rlD, rtD, ttD);
+  // 前縁の側面（rootLeading-tipLeadingの帯）
+  addTri(rlU, rlD, tlD); addTri(rlU, tlD, tlU);
+  // 後縁の側面（rootTrailing-tipTrailingの帯）
+  addTri(rtU, ttD, rtD); addTri(rtU, ttU, ttD);
+  // 翼端の側面（tipLeading-tipTrailingの帯）
+  addTri(tlU, ttD, tlD); addTri(tlU, ttU, ttD);
+  // 付け根の側面（rootLeading-rootTrailingの帯）
+  addTri(rlU, rtD, rlD); addTri(rlU, rtU, rtD);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+// ---- エンジンの筒 ------------------------------------------------------------
+
+// エンジンのギズモを**噴射の向き**に合わせる回転。
+//
+// 円柱は既定で軸が+Y、**大きいほうの円（＝ノズル）が-Y側**にある。
+// 噴射は推力と逆向きなので、-Y を噴射の向きへ向ける
+// （＝ +Y を推力の向きへ向ける）。推力の向きは 09-aircraft.js と同じ約束で、
+// spinAxis が 'z' なら -Z（機首の向き）、'x' なら +X、'y' なら +Y。
+//
+// **メッシュの rotation ではなくジオメトリを回す**。メッシュの rotation は
+// パーツの回転（applyPartToGizmo）で上書きされるので、パーツを動かした瞬間や
+// 保存から読み直した瞬間に向きが消えてしまう——実際、ノズル径を入れ直した
+// ときだけ正しく、そのあと位置を動かすとまた横を向いていた。
+function partShapeOrientEngine(geo, spinAxis) {
+  if (spinAxis === 'y') return geo;                  // 上向き：+Yが推力、ノズルは下。そのまま
+  if (spinAxis === 'x') { geo.rotateZ(-Math.PI / 2); return geo; }   // +Y → +X
+  geo.rotateX(-Math.PI / 2);                         // 既定：+Y → -Z（機首の向き）
+  return geo;
+}
+
+// ノズル（大きいほうの円）が -Y 側。吸い込み側は少し細くして、どちらが噴射口か見ただけで分かるようにする。
+// d はノズルの直径（部品の座標系での長さ）。
+function partShapeEngineGeometry(d, spinAxis) {
+  const r = d / 2;
+  return partShapeOrientEngine(new THREE.CylinderGeometry(r * 0.62, r, d * 1.8, 16), spinAxis);
+}
+
+// 推力からノズルの直径(m)を決める（Builder の engineNozzleDiameter と同じ式）。
+// unit は機体のいちばん長い辺(m)。0 なら抑えない。
+function partShapeNozzleDiameter(props, unit) {
+  const w = props && props.plumeWidth;
+  if (w > 0) return w;
+  const kgf = Math.max((props && props.thrustKgf) || 0, 0);
+  let d = Math.max(0.0016 * Math.sqrt(kgf * 9.80665), 0.06);
+  if (unit > 0.2) d = Math.min(Math.max(d, unit * 0.004), unit * 0.024);
+  return d;
+}
+
+// ---- 着陸脚 ------------------------------------------------------------------
+// 構造：基点(Group) → [関節(Group,回転) → 伸縮節(Group,軸方向移動) → 関節 → ...] → 先端の車輪的マーカー
+// joints/strutsの配列順が、そのまま基点から先端に向かうチェーンの順序になる
+// 見た目は「軸を示す記号」ではなく、脚そのものを表す銀色の円柱にする（実機の脚を模した仮モデル）
+const GEAR_METAL_COLOR = 0xc8ccd2;   // 銀色（脚の支柱本体）
+const GEAR_ACCENT_COLOR = 0x8a8f99;  // 関節部分のアクセント（やや暗い銀）
+const GEAR_TIRE_COLOR = 0x1a1a1a;    // タイヤ（先端マーカー）
+
+function partShapeGearMaterial(color, opts) {
+  return new THREE.MeshStandardMaterial(Object.assign({
+    color, roughness: 0.28, metalness: 0.75,
+    emissive: color, emissiveIntensity: 0.06,
+  }, opts || {}));
+}
+
+function partShapeGearJoint() {
+  // 関節部分：脚の支柱と同じ太さの短い円柱（回転軸そのものが脚の一部に見えるようにする）
+  const group = new THREE.Group();
+  const axisMesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.045, 0.045, 0.16, 14),
+    partShapeGearMaterial(GEAR_ACCENT_COLOR)
+  );
+  group.add(axisMesh);
+  // 関節の可動を示す薄いリング（円柱よりわずかに太い径で、繋ぎ目の存在がわかるように）
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.052, 0.008, 8, 24),
+    partShapeGearMaterial(0xdddddd, { metalness: 0.9, roughness: 0.15 })
+  );
+  ring.rotation.x = Math.PI / 2;
+  group.add(ring);
+  return group;
+}
+
+function partShapeGearStrut(length) {
+  // テレスコピック（入れ子シリンダー）の脚支柱。銀色の太い円柱（外筒）＋少し細い円柱（内筒）
+  // 着陸脚は機体の下（-Y方向）へ伸びて地面に届く想定なので、-Y方向に伸ばす
+  const group = new THREE.Group();
+  const outer = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.06, 0.05, length, 14),
+    partShapeGearMaterial(GEAR_METAL_COLOR)
+  );
+  outer.position.y = -length / 2; // 基点(付け根)から-Y方向（下方向）に伸びる形にする
+  group.add(outer);
+  const inner = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.032, 0.032, length * 0.55, 14),
+    partShapeGearMaterial(0xe8eaed, { metalness: 0.85, roughness: 0.2 })
+  );
+  inner.position.y = -length * 0.78;
+  group.add(inner);
+  group.userData.isStrutVisual = true;
+  group.userData.baseLength = length;
+
+  // 次のセグメント（関節や先端）をぶら下げるためのアンカー。伸縮節の先端位置（-Y方向）に置く。
+  // 長さが変わるたびに partShapeApplyGearDeploy 側でこのアンカーのposition.yも更新すること。
+  const endAnchor = new THREE.Group();
+  endAnchor.position.y = -length;
+  endAnchor.userData.isStrutEndAnchor = true;
+  group.add(endAnchor);
+
+  return group;
+}
+
+// jointsとstrutsの定義から、実際の3D階層（基点→関節→伸縮節→関節→...→先端）を組み立てる
+// 各関節/伸縮節のGroupはuserDataにidと種別を持つので、展開状態（partShapeApplyGearDeploy）で
+// id照合して角度・長さを反映できる
+function partShapeGearHierarchy(props) {
+  const root = new THREE.Group();
+  root.userData.isPartGizmo = true;
+  root.userData.isLandingGearRoot = true;
+
+  // 基点マーカー（付け根の位置を示す小さな球、脚の取付部分）
+  const baseMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(0.07, 12, 12),
+    partShapeGearMaterial(GEAR_ACCENT_COLOR)
+  );
+  root.add(baseMarker);
+
+  let current = root; // チェーンの末端（次のセグメントをここにぶら下げる）
+  const joints = props.joints || [], struts = props.struts || [];
+
+  // joints[i] と struts[i] を交互に、定義順（関節→伸縮節→関節→伸縮節...）でチェーンする。
+  // 数が揃っていなくても対応できるよう、長い方の配列に合わせてループする
+  const n = Math.max(joints.length, struts.length);
+  for (let i = 0; i < n; i++) {
+    const jointDef = joints[i];
+    if (jointDef) {
+      const jointVisual = partShapeGearJoint();
+      jointVisual.userData.isJointVisual = true;
+      jointVisual.userData.jointId = jointDef.id;
+      current.add(jointVisual);
+      current = jointVisual;
+    }
+    const strutDef = struts[i];
+    if (strutDef) {
+      const len = strutDef.minLength;
+      const strutVisual = partShapeGearStrut(Math.max(len, 0.05));
+      strutVisual.userData.strutId = strutDef.id;
+      current.add(strutVisual);
+      // 次のセグメントは伸縮節の「先端アンカー」にぶら下げる（伸縮節自体ではなく、その子）
+      current = strutVisual.children.find(c => c.userData.isStrutEndAnchor);
+    }
+  }
+
+  // 先端マーカー（車輪＝タイヤ相当。黒めのトーラスでそれらしく）
+  const tip = new THREE.Mesh(
+    new THREE.TorusGeometry(0.09, 0.045, 10, 20),
+    new THREE.MeshStandardMaterial({ color: GEAR_TIRE_COLOR, roughness: 0.8, metalness: 0.1 })
+  );
+  tip.userData.isGearTip = true;
+  current.add(tip);
+
+  return root;
+}
+
+// deployState(0〜1)に応じて、各関節の角度・各伸縮節の長さを線形補間して反映する。
+// 0〜1 の意味は retractedAtZero で決まる（true なら 0＝格納・1＝展開）。
+function partShapeApplyGearDeploy(root, props, deployState) {
+  if (!root) return;
+  const t = props.retractedAtZero === false ? (1 - deployState) : deployState;
+  const joints = props.joints || [], struts = props.struts || [];
+
+  root.traverse(obj => {
+    if (obj.userData.isJointVisual) {
+      const jointDef = joints.find(j => j.id === obj.userData.jointId);
+      if (!jointDef) return;
+      const rad = THREE.MathUtils.degToRad(THREE.MathUtils.lerp(jointDef.minDeg || 0, jointDef.maxDeg || 0, t));
+      obj.rotation.set(0, 0, 0);
+      if (jointDef.axis === 'x') obj.rotation.x = rad;
+      else if (jointDef.axis === 'y') obj.rotation.y = rad;
+      else obj.rotation.z = rad;
+    }
+    if (obj.userData.isStrutVisual && obj.userData.strutId) {
+      const strutDef = struts.find(s => s.id === obj.userData.strutId);
+      if (!strutDef) return;
+      const len = Math.max(THREE.MathUtils.lerp(strutDef.minLength || 0, strutDef.maxLength || 0, t), 0.05);
+      // 外筒・内筒を長さに合わせて伸ばし、endAnchor（次のセグメントの接続点）もこの長さぶん
+      // 先端（-Y方向）へ押し出す——これが無いと伸縮しても先のパーツ（関節や車輪）が動かない。
+      // 形は作り直さずに縦の拡縮で伸ばす（毎フレーム動かす飛行画面でジオメトリを作り直さないため）。
+      const outer = obj.children[0], inner = obj.children[1], endAnchor = obj.children[2];
+      const base = obj.userData.baseLength || len;
+      if (outer) { outer.scale.y = len / base; outer.position.y = -len / 2; }
+      if (inner) { inner.scale.y = len / base; inner.position.y = -len * 0.78; }
+      if (endAnchor && endAnchor.userData.isStrutEndAnchor) endAnchor.position.y = -len;
+    }
+  });
+}
+
+// ---- 飛行画面の仮モデル ------------------------------------------------------
+
+const _ppQ = new THREE.Quaternion();
+const _ppV = new THREE.Vector3();
+const _ppAft = new THREE.Vector3();
+const _ppAxis = new THREE.Vector3();
+
+// 部品を置く入れ物（Builder の State.model.root にあたる modelXform）へ、仮モデルを足す。
+// body は機体座標の入れ物（機首が-Z・上が+Y・右が+X、重心が原点）。舵の向きを測るのに使う。
+// unit は機体のいちばん長い辺(m)（エンジンの筒の太さを抑える基準。Builder と同じ）。
+// 返すのは毎フレーム動かすための一覧。
+function buildPartProxies(config, modelXform, body, unit) {
+  const out = { gears: [], surfaces: [], group: new THREE.Group(), gearT: 1 };
+  out.group.name = 'partProxies';
+  modelXform.add(out.group);
+  const parts = (config.parts || []).filter(p => p.props && p.props.proxyInFlight
+    && PART_PROXY_TYPES.includes(p.type));
+  if (!parts.length) return out;
+
+  // エンジンの筒の直径は実寸(m)。機体まるごとの拡縮ぶんで割ってから形にする（Builder と同じ）
+  const s = modelXform.scale;
+  const rootScale = (Math.abs(s.x) + Math.abs(s.y) + Math.abs(s.z)) / 3 || 1;
+  const paint = (color, opts) => new THREE.MeshStandardMaterial(
+    Object.assign({ color, roughness: 0.55, metalness: 0.15 }, opts || {}));
+  const skin = paint(0xd6dbe1);
+  const engineMat = paint(0x3a3f47, { metalness: 0.6, roughness: 0.35 });
+
+  const placed = [];
+  for (const p of parts) {
+    let obj = null;
+    if (p.type === 'landing_gear') {
+      obj = partShapeGearHierarchy(p.props);
+      partShapeApplyGearDeploy(obj, p.props, 1);
+      out.gears.push({ root: obj, props: p.props });
+    } else if (p.type === 'engine') {
+      const d = partShapeNozzleDiameter(p.props, unit) / rootScale;
+      obj = new THREE.Mesh(partShapeEngineGeometry(d, p.props.spinAxis), engineMat);
+    } else if (p.type === 'wing' && p.props.corners) {
+      obj = new THREE.Mesh(partShapeWingGeometry(p.props.corners, p.props.role), paint(0xd6dbe1, { side: THREE.DoubleSide }));
+    } else if (p.type === 'control_surface') {
+      // 舵面は回転の中心（ヒンジ）が前縁に来るよう、形を後ろへずらしてから回す（下の aft で決める）
+      const geo = new THREE.BoxGeometry(0.4, 0.04, 0.18);
+      const pivot = new THREE.Group();
+      pivot.add(new THREE.Mesh(geo, skin));
+      obj = pivot;
+    }
+    if (!obj) continue;
+    obj.position.set(p.position.x, p.position.y, p.position.z);
+    obj.rotation.set(THREE.MathUtils.degToRad(p.rotation.x), THREE.MathUtils.degToRad(p.rotation.y),
+      THREE.MathUtils.degToRad(p.rotation.z));
+    obj.scale.set(p.scale.x, p.scale.y, p.scale.z);
+    out.group.add(obj);
+    placed.push({ part: p, obj });
+  }
+
+  // 舵面：操縦のどの入力で、どちらへ回すかを**機体座標で測って**決める。
+  // 部品の回転・機体まるごとの回転（前後反転など）が掛かっているので、ローカルの軸のままでは
+  // 向きが分からない。「ヒンジ軸のまわりに回したとき後縁が動く向き」を機体座標で出し、
+  // 昇降舵なら「引いたとき上」、補助翼なら「右へ倒したとき右翼が上・左翼が下」……と合わせる。
+  body.updateMatrixWorld(true);
+  const bodyInv = new THREE.Quaternion();
+  body.getWorldQuaternion(bodyInv).invert();
+  for (const { part, obj } of placed) {
+    if (part.type !== 'control_surface') continue;
+    const props = part.props;
+    const kind = props.kind || 'aileron';
+    let localAxis = props.hingeAxis === 'y' ? new THREE.Vector3(0, 1, 0)
+      : props.hingeAxis === 'z' ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
+    obj.getWorldQuaternion(_ppQ).premultiply(bodyInv);      // 部品 → 機体座標
+    let axisBody = _ppAxis.copy(localAxis).applyQuaternion(_ppQ).normalize();
+    // 決めてあるヒンジ軸では、その舵の動くべき向き（方向舵なら左右、ほかは上下）へ後縁が動かない
+    // ときは、その向きへ動く軸（方向舵は機体の上下、ほかは左右の軸）に替える。
+    // 内蔵の練習機の方向舵はヒンジ軸がXのままで、仮モデルが上下に振れていた。
+    const want = kind === 'rudder' ? 'x' : 'y';
+    const moveTry = new THREE.Vector3().crossVectors(axisBody, new THREE.Vector3(0, 0, 1));
+    if (Math.abs(moveTry[want]) < 0.3) {
+      axisBody.set(kind === 'rudder' ? 0 : 1, kind === 'rudder' ? 1 : 0, 0);
+      localAxis = axisBody.clone().applyQuaternion(_ppQ.clone().invert()).normalize();
+    }
+    // 後ろ（機体の+Z）のうち、ヒンジ軸に直交する成分を「後縁の向き」にする
+    _ppAft.set(0, 0, 1).addScaledVector(axisBody, -axisBody.z);
+    if (_ppAft.lengthSq() < 1e-4) continue;                // ヒンジが前後を向いている舵は回せない
+    _ppAft.normalize();
+    // 形を後ろへ半分ずらして、前縁をヒンジ（部品の原点）に合わせる
+    const aftLocal = _ppV.copy(_ppAft).applyQuaternion(_ppQ.clone().invert());
+    const mesh = obj.children[0];
+    mesh.position.copy(aftLocal).multiplyScalar(0.09);
+    // 回したときの後縁の動き（機体座標）
+    const move = new THREE.Vector3().crossVectors(axisBody, _ppAft);
+    obj.getWorldPosition(_ppV).applyMatrix4(new THREE.Matrix4().copy(body.matrixWorld).invert());
+    const right = _ppV.x >= 0;
+    const up = move.y, side = move.x;
+    const g = { pitch: 0, roll: 0, yaw: 0, flap: 0, spoiler: 0 };
+    if (kind === 'elevator') g.pitch = Math.sign(up) || 1;
+    else if (kind === 'aileron') g.roll = (right ? 1 : -1) * (Math.sign(up) || 1);
+    else if (kind === 'rudder') g.yaw = Math.sign(side) || 1;
+    else if (kind === 'flap') g.flap = -(Math.sign(up) || 1);
+    else if (kind === 'spoiler') g.spoiler = Math.sign(up) || 1;
+    const maxDeg = Math.max(Math.abs(props.maxDeg || 0), Math.abs(props.minDeg || 0)) || 20;
+    out.surfaces.push({
+      obj, gain: g, maxRad: THREE.MathUtils.degToRad(maxDeg), angle: 0,
+      rest: obj.quaternion.clone(), axis: localAxis,
+    });
+  }
+  return out;
+}
+
+// 毎フレーム：脚の上げ下げと舵面の振れ
+function updatePartProxies(ac, controls, dt) {
+  const px = ac && ac.proxies;
+  if (!px) return;
+  if (px.gears.length) {
+    const want = controls.gearDown ? 1 : 0;
+    const step = dt / PART_PROXY_GEAR_S;
+    const t = px.gearT + THREE.MathUtils.clamp(want - px.gearT, -step, step);
+    if (t !== px.gearT) {
+      px.gearT = t;
+      for (const g of px.gears) partShapeApplyGearDeploy(g.root, g.props, t);
+    }
+  }
+  if (px.surfaces.length) {
+    const k = dt > 0 ? 1 - Math.exp(-dt / PART_PROXY_SURFACE_SMOOTH_S) : 1;
+    const c = THREE.MathUtils.clamp;
+    const pitch = c(controls.pitch || 0, -1, 1), roll = c(controls.roll || 0, -1, 1);
+    const yaw = c(controls.yaw || 0, -1, 1), flap = c(controls.flap || 0, 0, 1);
+    const spoiler = c(controls.spoiler || 0, 0, 1);
+    for (const s of px.surfaces) {
+      const g = s.gain;
+      const cmd = c(g.pitch * pitch + g.roll * roll + g.yaw * yaw + g.flap * flap + g.spoiler * spoiler, -1, 1);
+      s.angle += (cmd * s.maxRad - s.angle) * k;
+      s.obj.quaternion.copy(s.rest).multiply(_ppQ.setFromAxisAngle(s.axis, s.angle));
+    }
+  }
+}

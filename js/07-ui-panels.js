@@ -335,6 +335,18 @@ function renderInspector() {
     <div class="divider"></div>
     <div id="typeSpecificFields"></div>
 
+    ${PART_PROXY_TYPES.includes(part.type) ? `
+    <div class="divider"></div>
+    <div class="toggle-row">
+      <label>飛行画面でも仮モデルを出す</label>
+      <label class="switch">
+        <input type="checkbox" id="fProxyInFlight" ${part.props.proxyInFlight ? 'checked' : ''}>
+        <span class="slider-toggle"></span>
+      </label>
+    </div>
+    <div class="hint">この画面に出ている仮の形（${part.type === 'landing_gear' ? '銀色の脚' : part.type === 'engine' ? 'エンジンの筒' : part.type === 'wing' ? '翼の板' : '舵面の板'}）を、飛行画面の機体にも出します。機体のモデルにこの部品が作り込まれていないときに使ってください。${part.type === 'landing_gear' ? '脚の上げ下げ（G）で格納・展開します。' : part.type === 'control_surface' ? '操縦に合わせて動きます。' : ''}見た目だけで、飛び方は変わりません。</div>
+    ` : ''}
+
     <div class="divider"></div>
     <button class="btn-danger-outline" id="btnDeletePart">このパーツを削除</button>
   `;
@@ -349,6 +361,9 @@ function renderInspector() {
   bindXyzFields('scl', part.scale, () => applyPartToGizmo(part));
 
   renderTypeSpecificFields(part);
+
+  const proxyBox = document.getElementById('fProxyInFlight');
+  if (proxyBox) proxyBox.addEventListener('change', (e) => { part.props.proxyInFlight = e.target.checked; });
 
   document.getElementById('btnDeletePart').addEventListener('click', () => removePart(part.id));
 }

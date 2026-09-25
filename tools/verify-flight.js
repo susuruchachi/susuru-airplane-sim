@@ -33,7 +33,7 @@ if (!THREE) {
 
 // ブラウザ用のファイルを1つのスコープに並べて読む（flight.html と同じ読み方）
 const ctx = vm.createContext({ THREE, console, module: undefined, Math, Number, Array, Object, JSON });
-for (const f of ['09-aircraft.js', '10-flight.js', '13-autopilot.js']) {
+for (const f of ['09-aircraft.js', '09e-part-proxy.js', '10-flight.js', '13-autopilot.js']) {
   const src = fs.readFileSync(path.join(__dirname, '..', 'js', 'env', f), 'utf8');
   vm.runInContext(src, ctx, { filename: f });
 }
@@ -4176,6 +4176,61 @@ function autopilotFlight(opts) {
     check(drift < 1, `垂直着陸の地点（${label}）：着陸後に流されない`, `${drift.toFixed(2)}m`);
     check(pad.searchR <= 2000, `垂直着陸の地点（${label}）：選んだ所から2km以内`, `${Math.round(pad.searchR)}m`);
   }
+}
+
+// --- 部品の仮モデル（09e-part-proxy.js）---------------------------------------
+// 「飛行画面でも仮モデルを出す」にした舵面が、操縦のとおりの向きへ振れること。
+// 機体のモデルを前後逆に置いた（機体まるごとを180°回した）ときも同じ向きになること。
+// 方向舵のヒンジ軸がXのままでも、左右に振れること（内蔵機がそうなっている）。
+{
+  console.log('\n(仮モデル) 舵面の振れる向き');
+  for (const flip of [false, true]) {
+    const cfg = defaultAircraftConfig();
+    for (const p of cfg.parts) if (p.type === 'control_surface') p.props.proxyInFlight = true;
+    const body = new THREE.Group(), orient = new THREE.Group(), mx = new THREE.Group();
+    body.add(orient); orient.add(mx);
+    if (flip) { mx.rotation.y = Math.PI; orient.rotation.y = Math.PI; }
+    const px = ctx.buildPartProxies(cfg, mx, body, 10);
+    const kinds = cfg.parts.filter((p) => p.type === 'control_surface').map((p) => p.props.kind);
+    const te = (sf) => { sf.obj.updateMatrixWorld(true); return sf.obj.localToWorld(sf.obj.children[0].position.clone().multiplyScalar(2)); };
+    const base = px.surfaces.map(te);
+    const move = (c) => {
+      for (const sf of px.surfaces) sf.angle = 0;
+      const ctl = Object.assign({ pitch: 0, roll: 0, yaw: 0, flap: 0, spoiler: 0, gearDown: true }, c);
+      for (let i = 0; i < 60; i++) ctx.updatePartProxies({ proxies: px }, ctl, 1 / 60);
+      return px.surfaces.map((sf, i) => ({ kind: kinds[i], right: sf.obj.getWorldPosition(new THREE.Vector3()).x > 0, d: te(sf).sub(base[i]) }));
+    };
+    const label = flip ? '（前後逆のモデル）' : '';
+    const pull = move({ pitch: 1 }).filter((r) => r.kind === 'elevator');
+    check(pull.length > 0 && pull.every((r) => r.d.y > 0.01), `仮モデル${label}：引くと昇降舵の後縁が上がる`, pull.map((r) => r.d.y.toFixed(3)).join('/'));
+    const rollR = move({ roll: 1 }).filter((r) => r.kind === 'aileron');
+    check(rollR.length > 0 && rollR.every((r) => (r.right ? r.d.y > 0.01 : r.d.y < -0.01)), `仮モデル${label}：右へ倒すと右の補助翼が上・左が下`, rollR.map((r) => (r.right ? 'R' : 'L') + r.d.y.toFixed(3)).join(' '));
+    const yawR = move({ yaw: 1 }).filter((r) => r.kind === 'rudder');
+    check(yawR.length > 0 && yawR.every((r) => r.d.x > 0.01), `仮モデル${label}：右ラダーで方向舵の後縁が右へ`, yawR.map((r) => r.d.x.toFixed(3)).join('/'));
+    const flap = move({ flap: 1 }).filter((r) => r.kind === 'flap');
+    check(flap.length > 0 && flap.every((r) => r.d.y < -0.01), `仮モデル${label}：フラップは下がる`, flap.map((r) => r.d.y.toFixed(3)).join('/'));
+  }
+  // 脚：上げると4秒でしまい切り、下げると出し切る
+  const cfg = defaultAircraftConfig();
+  const gear = cfg.parts.find((p) => p.type === 'landing_gear');
+  gear.props.proxyInFlight = true;
+  gear.props.joints = [{ id: 'j1', axis: 'x', minDeg: -90, maxDeg: 0 }];
+  gear.props.struts = [{ id: 's1', axis: 'y', minLength: 0.3, maxLength: 0.9 }];
+  const body = new THREE.Group(), mx = new THREE.Group(); body.add(mx);
+  const px = ctx.buildPartProxies(cfg, mx, body, 10);
+  const tipY = () => { let y = 0; px.gears[0].root.updateMatrixWorld(true); px.gears[0].root.traverse((o) => { if (o.userData.isGearTip) y = o.getWorldPosition(new THREE.Vector3()).y; }); return y; };
+  const down = tipY();
+  const run = (gd, sec) => { for (let i = 0; i < sec * 60; i++) ctx.updatePartProxies({ proxies: px }, { gearDown: gd }, 1 / 60); };
+  run(false, 2); const half = px.gearT; run(false, 2.1); const up = tipY(); const tUp = px.gearT;
+  run(true, 4.1);
+  note('仮モデルの脚', `先端の高さ 出し切り ${down.toFixed(2)} → 上げて2秒 ${half.toFixed(2)} → しまい切り ${up.toFixed(2)} → 下げて ${tipY().toFixed(2)}`);
+  check(Math.abs(half - 0.5) < 0.02 && tUp === 0 && up > down + 0.3 && Math.abs(tipY() - down) < 1e-6,
+    '仮モデルの脚：上げ下げの操作で4秒かけて格納・展開する', `${half.toFixed(2)} / ${tUp}`);
+  // 脚の先端は、物理が接地に使う先端（acGearTipLocal）と同じ所
+  const phys = ctx.acGearTipLocal(gear.props);
+  const root = px.gears[0].root; root.position.set(0, 0, 0); root.rotation.set(0, 0, 0); root.scale.set(1, 1, 1);
+  const vis = tipY();
+  check(Math.abs(vis - phys.y) < 1e-6, '仮モデルの脚の先端は、接地に使う点と同じ高さ', `${vis.toFixed(4)} / ${phys.y.toFixed(4)}`);
 }
 
 console.log(`\n${failures === 0 ? '✅ すべて通過' : `❌ ${failures} 件の失敗`}`);
