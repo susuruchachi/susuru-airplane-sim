@@ -336,6 +336,69 @@ function applyVtolSpeedTarget() {
   return true;
 }
 
+// --- ヘリコプター：最高速度に見合うローターの推力 ----------------------------------
+//
+// ヘリは翼で浮かないので、前へ進むのも浮くのもローター1つ。速度 v で水平に飛ぶには、
+// 回転面を前へ θ 傾けて T·sinθ＝抗力、T·cosθ＝重さ にする——要る推力は √(重さ²＋抗力²)。
+// 飛行側（10-flight.js）と同じ式で見積もる（Builderは飛行モデルを読まないので値を複製してある。
+// 変えるときは両方合わせること）:
+//   ・胴体とローターの頭の抗力 … 重さ1kgあたり EP_HELI_DRAG_AREA_PER_KG m²（09-aircraft.js の HELI_DRAG_AREA_PER_KG）
+//   ・ローターの効き … 前へ進むと増え（転移揚力）、速すぎると後退側の羽根が失速して落ちる（heliRotorFactor）
+//   ・傾けられるのは前へ EP_HELI_TILT_USABLE_DEG まで。操縦桿の上限は25°（HELI_PITCH_MAX_DEG）だが、
+//     速いと尾翼が機首を起こすので実際に届くのは20°前後——実測で内蔵のヘリ（2,400kg）は
+//     前いっぱいで機首-20°・128kt、8,000kgにすると-22°・139kt（コレクティブは7割で推力は余っていた）
+// 傾きの上限があるので、**推力をいくら積んでも出せない速さ**がある（胴体の抗力は重さに比例するので、
+// 重さによらず130kt前後）。それを超える目標には、出せる速さまでの推力を積んで知らせる。
+const EP_HELI_DRAG_AREA_PER_KG = 0.0013;
+const EP_HELI_TILT_USABLE_DEG = 20;
+const EP_HELI_SPEED_MARGIN = 1.15;   // 巡航の余裕（上昇・旋回・風のぶん）
+function epHeliRotorFactor(v) {
+  const sm = (x, a, b) => { const t = Math.min(Math.max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t); };
+  return 1 + 0.18 * sm(v, 5, 20) - 0.35 * sm(v, 72, 95);
+}
+function epHeliDragN(v) {
+  const m = Math.max(State.model.weightKg, 1);
+  return 0.5 * EP_RHO0 * v * v * m * EP_HELI_DRAG_AREA_PER_KG;
+}
+// 傾きの上限で出せるいちばん速い速さ（海面）
+function epHeliTiltLimitedMps() {
+  const W = Math.max(State.model.weightKg, 1) * 9.80665;
+  const tan = Math.tan(EP_HELI_TILT_USABLE_DEG * Math.PI / 180);
+  return Math.sqrt(tan * W / (0.5 * EP_RHO0 * Math.max(State.model.weightKg, 1) * EP_HELI_DRAG_AREA_PER_KG));
+}
+// 速度 v で水平に飛ぶのに要るローターの推力（kgf）。ホバリングと上昇のぶん（重さの EP_VTOL_TWR_TARGET 倍）は必ず残す
+function epHeliThrustForSpeedKgf(v) {
+  const m = Math.max(State.model.weightKg, 1);
+  const W = m * 9.80665, D = epHeliDragN(v);
+  const need = Math.sqrt(W * W + D * D) / Math.max(epHeliRotorFactor(v), 0.1) * EP_HELI_SPEED_MARGIN;
+  return Math.max(need, W * EP_VTOL_TWR_TARGET) / 9.80665;
+}
+
+// 「ローターを最高速度相応の出力へ」
+function applyHeliSpeedTarget() {
+  const rotors = typeof cgRotorEngines === 'function' ? cgRotorEngines() : [];
+  if (!rotors.length) { showToast('ヘリのローター（エンジン種別「ヘリのローター」）がありません', true); return false; }
+  const want = epMaxSpeedMps();
+  const lim = epHeliTiltLimitedMps();
+  const v = Math.min(want, lim);
+  const targetKgf = epHeliThrustForSpeedKgf(v);
+  const before = rotors.reduce((s, p) => s + Math.max(p.props.thrustKgf || 0, 0), 0);
+  if (before > 1e-6) {
+    for (const p of rotors) p.props.thrustKgf = Math.max(Math.round((p.props.thrustKgf || 0) * targetKgf / before), 0);
+  } else {
+    for (const p of rotors) p.props.thrustKgf = Math.max(Math.round(targetKgf / rotors.length), 0);
+  }
+  renderPartList();
+  renderInspector();
+  renderModelSettingsPanel();
+  const W = Math.max(State.model.weightKg, 1);
+  showToast(`ローターの推力を ${Math.round(before).toLocaleString()} → ${Math.round(targetKgf).toLocaleString()} kgf にしました`
+    + `（${epFormatSpeed(v)}・推力は重さの${(targetKgf / W).toFixed(2)}倍）`
+    + (want > lim ? `。ヘリは前へ${EP_HELI_TILT_USABLE_DEG}°ほどまでしか傾かないので、${epFormatSpeed(want)}は出せません（この重さでは${epFormatSpeed(lim)}まで）` : ''),
+    want > lim);
+  return true;
+}
+
 // 通常／垂直エンジンをまとめて倍率で増減する。
 function epScaleEngines(isVtol, factor) {
   if (!(factor > 0)) { showToast('倍率は0より大きい数で指定してください', true); return false; }
@@ -365,6 +428,7 @@ function engineFleetPanelHtml() {
   const W = Math.max(State.model.weightKg, 1);
 
   const groups = epForwardGroups();
+  const heli = typeof cgRotorEngines === 'function' && cgRotorEngines().length > 0;
 
   return `
     <div class="subgroup-title">エンジン出力</div>
@@ -399,6 +463,13 @@ function engineFleetPanelHtml() {
       </div>
     </div>
     ` : ''}
+    ${heli ? `
+    <button class="btn-danger-outline" id="btnHeliSpeedTarget" style="color:var(--accent);border-color:var(--accent-dim);margin-top:6px;">
+      ローターを ${epFormatSpeed(Math.min(epMaxSpeedMps(), epHeliTiltLimitedMps()))} 相応の出力へ
+    </button>
+    <div class="hint" style="margin-top:4px;">回転面を前へ傾けて進むぶん（√(重さ²＋抗力²)）と、速いときのローターの効きの落ち方を見込んで、ローターの推力を解き直します。
+      ヘリは前へ${EP_HELI_TILT_USABLE_DEG}°ほどまでしか傾かないので、出せるのは ${epFormatSpeed(epHeliTiltLimitedMps())} まで${epMaxSpeedMps() > epHeliTiltLimitedMps() ? '（機体設定の最高速度はそれより速いので、そこまでで解きます）' : ''}。</div>
+    ` : ''}
     ${vtol.length ? `
     <button class="btn-danger-outline" id="btnVtolSpeedTarget" style="color:var(--accent);border-color:var(--accent-dim);margin-top:10px;">
       垂直離陸に必要な出力へ自動設定
@@ -422,6 +493,8 @@ function bindEngineFleetPanel() {
     const id = parseInt(btn.getAttribute('data-eng-group'), 10);
     btn.addEventListener('click', () => applyEngineSpeedTargetForGroup(id));
   }
+  const btnHeli = document.getElementById('btnHeliSpeedTarget');
+  if (btnHeli) btnHeli.addEventListener('click', () => applyHeliSpeedTarget());
   const btnVtol = document.getElementById('btnVtolSpeedTarget');
   if (btnVtol) btnVtol.addEventListener('click', () => applyVtolSpeedTarget());
 

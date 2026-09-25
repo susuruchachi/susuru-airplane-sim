@@ -502,6 +502,17 @@ function apBankSinkFactor(state, ap) {
     AP_BANK_SINK_MIN, 1);
 }
 
+// 逆に、**指示より速く上がっている**ときも翼を戻す。上がりすぎを止めるには機首を押す（負のG）しかなく、
+// 深く傾けたまま押すと、押した力が横向きに働いて**曲がりたい向きと逆へ**回ってしまう。
+// 実測でTB1が上昇の段から巡航へ渡った直後（マッハ3で毎秒120m上昇中）に右へ69°倒したまま-4.5Gで押し、
+// 方位が2°→339°と左へ23°回ってから戻ってきた。沈むときと同じ幅で戻す。
+function apBankRiseFactor(state, ap) {
+  const cmd = ap && Number.isFinite(ap.vsCmd) ? ap.vsCmd : 0;
+  const excess = state.verticalSpeed - cmd;
+  return apClamp(1 - (excess - AP_BANK_SINK_FROM_MPS) / AP_BANK_SINK_SPAN_MPS * (1 - AP_BANK_SINK_MIN),
+    AP_BANK_SINK_MIN, 1);
+}
+
 function apBankClimbFactor(state, vsNeededMps, spd) {
   if (!(vsNeededMps > 0)) return 1;
   const up = Math.max(apVsLimits(state, spd).up, 0.1);
@@ -550,8 +561,19 @@ const AP_HIGH_ON_PATH_BAND = 60;
 // 1.5 のままだと「まだ落とさなくていい」と判断して減速を先送りし、
 // 進入開始に244kt（進入速度168kt）で入って、やり直しを26回繰り返していた。
 const AP_DECEL_MPS2 = 0.7;
-// ルートのうち、減速に使っていいと見なす割合（apSpeedSchedule の slowableV）
-const AP_DECEL_ROUTE_FRACTION = 0.5;
+// 抗力で落とせる速さの見積もり（apSlowableSpeed）。
+// 以前は「残り距離の半分で落とせる速さ」にしていたので、
+// 目標速度が**抗力の半分の速さでしか下がらず**、そのぶん早くから・長く減速していた
+// ——TB1が高度3000mのマッハ9.4から、残り1,000kmで減速を始め、出力5〜19%を残したまま
+// 何百kmもかけて落としていた（抗力だけで落とせば395km）。
+// いまは「抗力の 1/AP_DECEL_DRAG_MARGIN の速さで落とす」＋「最後に AP_DECEL_MARGIN_M の余裕」。
+const AP_DECEL_DRAG_MARGIN = 1.2;
+const AP_DECEL_MARGIN_M = 20000;
+function apSlowableSpeed(vEndMps, distM, dragLengthM) {
+  if (!(dragLengthM > 0)) return Infinity;
+  const d = Math.max(distM - AP_DECEL_MARGIN_M, 0);
+  return vEndMps * Math.exp(Math.min(d / (dragLengthM * AP_DECEL_DRAG_MARGIN), 50));
+}
 
 // --- 減速装置（スポイラー・逆噴射） ---------------------------------------------
 //
@@ -922,6 +944,26 @@ function apAileronForTrack(state, wantTrackDeg, bankMax, spd) {
   return apAileronForBank(state, apClamp(err * AP_HDG_KP, -lim, lim), spd);
 }
 
+// 旋回の終わりを**速さによらず同じ時間で**詰める（巡航・上昇・降下の nav 用）。
+//
+// バンクを「ずれ1°あたり1.5°」の比例で決めると、旋回率は g·tanφ/v なので、ずれが縮む
+// 時定数は v/(1.5g)——練習機（60m/s）なら4秒でも、TB1の2,100m/sでは**143秒**になる。
+// 旋回の後半は、ずれが小さくなるほどバンクも浅くなり、いつまでも曲がりきれない
+// （実測で、方位のずれ40°を詰めるのに300秒、旋回半径にして1,000km）。
+// 時定数が AP_HDG_TAU_MAX_S を超える速さでは、「ずれ÷時定数」の旋回率を出すバンクにする。
+// それより遅い機体はいままでの比例のまま（1ノットも変わらない）。
+const AP_HDG_TAU_MAX_S = 8;
+function apBankForTurnErr(state, errDeg, lim) {
+  const v = Math.max(state.airspeed || 0, 1);
+  if (v / (AP_HDG_KP * 9.80665) <= AP_HDG_TAU_MAX_S) return apClamp(errDeg * AP_HDG_KP, -lim, lim);
+  const w = (errDeg * Math.PI / 180) / AP_HDG_TAU_MAX_S;   // 欲しい旋回率(rad/s)
+  return apClamp(Math.atan(v * w / 9.80665) * 180 / Math.PI, -lim, lim);
+}
+function apAileronForTrackNav(state, wantTrackDeg, bankMax, spd) {
+  const err = apWrap180(wantTrackDeg - apGroundTrackDeg(state));
+  return apAileronForBank(state, apBankForTurnErr(state, err, bankMax === undefined ? AP_BANK_MAX : bankMax), spd);
+}
+
 // 速度を保つスロットル（今の値から少しずつ動かす）
 // 出力は「目標速度からの**割合**のずれ」で動かす。
 //
@@ -940,6 +982,27 @@ function apThrottleForSpeed(state, controls, targetMps, dt) {
 // 割合で見る——出力と同じ理由で、絶対値だと速い機体ほど同じずれで激しく動く。
 // 出力が入っているあいだは立てない（推力とエアブレーキを同時に使うのは、
 // 自分で自分と綱引きしているだけ）。
+// スポイラーで失っていい揚力（重さに対して）。スポイラーは翼のキャンバーを逆に折る扱いなので、
+// 失う揚力は動圧に比例する。全部立てたときに失うのは、進入の速さで重さの0.37倍・上昇の速さで0.40倍
+// （TB1・TB2・三式戦闘機とも同じ）だが、高度3000mのマッハ9では**重さの71倍**になる。
+// 自動操縦が巡航中の減速に立てたら、ピッチの輪が追いつく前に-26Gまで振れた。
+// 立てる量を「失う揚力が重さの AP_SPOILER_LIFT_LOSS_W 倍まで」に抑える——進入・着陸は今までどおり
+// 全部立てられ、極超音速ではほぼ立てない（マッハ9で1.4%。抗力も動圧に比例して大きいので、減速には困らない）。
+// 0.6倍にしたら、進入の1.5倍の速さで降りてくる旧TB1が67%しか立てられず、速いまま引き起こして
+// 浮き上がり、-964fpmで落ちるように接地した（1倍なら-36fpm）。
+const AP_SPOILER_LIFT_LOSS_W = 1.0;
+function apSpoilerLiftCap(model, state) {
+  if (model._spoilerArea === undefined) {
+    let k = 0;
+    for (const s of model.surfaces || []) k += (s.spoiler || 0) * (s.area || 0);
+    model._spoilerArea = k;
+  }
+  if (!(model._spoilerArea > 0)) return 1;
+  const q = 0.5 * airDensityAt(state.altitudeM || 0) * state.airspeed * state.airspeed;
+  const lossFullN = 2 * Math.PI * model._spoilerArea * q;
+  return apClamp(AP_SPOILER_LIFT_LOSS_W * model.massKg * FLIGHT_GRAVITY / Math.max(lossFullN, 1), 0, 1);
+}
+
 function apSpoilerCommand(model, controls, state, targetSpeedMps, aboveM) {
   if (!model.hasSpoiler) return 0;
   let fast = apClamp((state.airspeed / Math.max(targetSpeedMps, 1) - 1)
@@ -951,7 +1014,7 @@ function apSpoilerCommand(model, controls, state, targetSpeedMps, aboveM) {
   if (aboveM < 0) fast *= apClamp(1 + aboveM / AP_SPOILER_PATH_M, 0, 1);
   const high = apClamp((aboveM || 0) / AP_SPOILER_PATH_M, 0, 1);
   const idle = apClamp(1 - controls.throttle / AP_SPOILER_THR_GATE, 0, 1);
-  return Math.max(fast, high) * idle;
+  return Math.max(fast, high) * idle * apSpoilerLiftCap(model, state);
 }
 
 // いま実際に使える逆推力(N)。
@@ -1067,6 +1130,15 @@ function apBankLimit(vMps, stallMps) {
   return apClamp(deg, AP_BANK_MAX, AP_BANK_MAX_HARD);
 }
 
+// 旋回で深く倒していいのは、**速度に余裕があるとき**だけ。失速の AP_BANK_ENERGY_K0 倍までは
+// いままでどおり AP_BANK_MAX（25°）、そこから K1 倍にかけて、翼が出せる上限（apBankLimit）まで広げる。
+// 遅いときに深く倒すと、誘導抗力で速度を失って機首が落ちる——実測で練習機がやり直しの旋回を
+// 40m/s（失速の1.4倍）で52°まで倒し、対地364mから156m沈んで、前にあった500mの尾根の壁に突っ込んだ。
+// 推力で保てる荷重倍数から決めることも試したが、胴体・尾翼・トリムの抗力を見落として楽観的に出た。
+// 速い側（Boeing 747 の巡航は失速の3.2倍、TB1は22倍）は、旋回で速度を削りながら深く倒していい。
+const AP_BANK_ENERGY_K0 = 1.6;
+const AP_BANK_ENERGY_K1 = 2.6;
+
 // その速度で、許せる旋回半径に収めるのに実際に使うバンク角の上限(°)
 function apBankMaxFor(vMps, stallMps, radiusMax) {
   const r = radiusMax === undefined ? AP_CRUISE_TURN_RADIUS_MAX : radiusMax;
@@ -1083,7 +1155,7 @@ function apBankMaxFor(vMps, stallMps, radiusMax) {
 // 直線に入ったかどうかの判定（行って来いしないよう、入る／出るの境目をずらす）
 const AP_STRAIGHT_IN_DEG = 6;    // 目的地の方角とのずれがこれ以下になったら「直線」
 const AP_STRAIGHT_OUT_DEG = 14;  // これを超えたら「まだ曲がる」に戻す
-function apSpeedSchedule(model, distToGoM, currentVMps, controls, straight) {
+function apSpeedSchedule(model, distToGoM, currentVMps, controls, straight, altitudeM) {
   const W = model.massKg * 9.80665;
   const S = Math.max(model.wingArea, 0.01);
   const stall = Math.sqrt((2 * W) / (1.225 * S * 1.5));
@@ -1098,19 +1170,25 @@ function apSpeedSchedule(model, distToGoM, currentVMps, controls, straight) {
   // 順序が逆（先にバンク角を決めて速さを頭打ちにする）だと、速い機体は
   // 曲がるために遅く飛ぶしかなくなる。
   const vWant = vMax * 0.97;
-  const bankPlan = apBankMaxFor(vWant, stall, radiusMax);
+  // **曲がるときは、その速さで保てるいちばん深いバンクまで使う**（apBankLimit）。
+  // 以前は「許せる半径 radiusMax（40kmか、目的地までの1/6）に収まるぶん」だけ倒していたので、
+  // 翼にはもっと余裕があるのに、どの機体も40km前後の大きな輪でしか曲がらなかった
+  // （Concordeがマッハ2で42°、半径40km。倒せる上限は85°で半径3.5km）。
+  const bankPlan = apBankLimit(vWant, stall);
   const turnableV = Math.sqrt(radiusMax * 9.80665
     * Math.tan(bankPlan * Math.PI / 180));
   // 実際に舵を切るときの上限は、いまの速度で保てるぶん。上昇中など巡航より
   // 遅いときに巡航ぶんの深いバンクを許すと、その揚力が出せず失速するだけになる。
   const bankMax = currentVMps === undefined ? bankPlan
-    : apBankMaxFor(currentVMps, stall, radiusMax);
+    : apBankLimit(currentVMps, stall);
   // 目的地までに進入速度まで落としきれる速さ（cruise の説明を参照）
   const approach = stall * 1.3;
   let slowableV = Infinity;
   if (distToGoM > 0 && typeof aircraftDragLengthM === 'function') {
-    const L = aircraftDragLengthM(model);
-    if (L > 0) slowableV = approach * Math.exp((distToGoM * AP_DECEL_ROUTE_FRACTION) / L);
+    // 高さを渡されたら、その高さでの抗力長さで見積もる（apDecelLengthM）。海面の値のままだと、
+    // 空気の薄い巡航高度では抗力を多く見積もりすぎる。
+    const L = altitudeM !== undefined ? apDecelLengthM(model, altitudeM) : aircraftDragLengthM(model);
+    if (L > 0) slowableV = apSlowableSpeed(approach, distToGoM, L);
   }
   return {
     stall,
@@ -1452,7 +1530,8 @@ const AP_ENTRY_RADII = 2.5;       // 中心線に乗っていたい、FAFから�
 // 折り返しで旋回半径の2倍ぶん横へずれ、そこから中心線に乗るのにさらに2倍ほど要る。
 // 3.3倍では足りず、ConcordeがFAFに37°ずれて着いた。
 const AP_ENTRY_GATE_RADII = 4.5;
-const AP_ENTRY_ALIGN_DEG = 45;    // 最終進入に入るときに許す、機首と滑走路の向きのずれ
+const AP_ENTRY_ALIGN_DEG = 45;
+const AP_ENTRY_CLOSE_ALIGN_DEG = 60; // 中心線のすぐ近くなら、中心線に乗りにいってよい向きのずれ    // 最終進入に入るときに許す、機首と滑走路の向きのずれ
 const AP_ENTRY_MIN_M = 3000;
 // 入口から戻るときは、FAFの点ではなく**中心線に乗りにいく**。点へまっすぐ向かうと、
 // 入口で振り向いたぶんの横ずれを斜めに詰めながらFAFに着くので、機首が滑走路の向きから
@@ -1487,7 +1566,7 @@ function apTurnRadiusM(state, spd) {
 }
 
 // いま向かう点（FAFか入口）と、そこを通ってFAFまでの道のり
-function apApproachNavTarget(plan, state, ap, spd, straightOnly) {
+function apApproachNavTarget(plan, state, ap, spd, straightOnly, model) {
   const faf = plan.faf, f = plan.forward, r = plan.right;
   const dx = state.position.x - faf.x, dz = state.position.z - faf.z;
   const dFaf = Math.hypot(dx, dz);
@@ -1512,9 +1591,16 @@ function apApproachNavTarget(plan, state, ap, spd, straightOnly) {
     // 「内向き」は滑走路の向きから45°以内。90°以内にしていたら、中心線を真横に横切って
     // いるところで切り替わり、寄せきれずにFAFへ横から着いて、入口とのあいだを往復した
     // （実測でBoeing 747）。入口の上を回っているうちに、いずれこの向きになる。
-    const inbound = Math.abs(apWrap180(plan.heading - state.headingDeg)) <= AP_ENTRY_ALIGN_DEG;
+    const hdgErr = Math.abs(apWrap180(plan.heading - state.headingDeg));
+    const inbound = hdgErr <= AP_ENTRY_ALIGN_DEG;
     // 中心線からの横ずれも旋回半径の1.5倍まで（それより離れていると、FAFまでに寄せきれない）
     if (out >= sMin && Math.abs(cross) <= R * AP_ENTRY_CAPTURE_RADII && inbound) ap.navMode = 'capture';
+    // **中心線のすぐ近く（横ずれ1旋回半径以内）なら、向きは AP_ENTRY_CLOSE_ALIGN_DEG まで許す**。
+    // 入口へ斜めに入ってくると、入口の上で向きのずれが45°をわずかに超えたまま通り過ぎ、
+    // 折り返して入口のまわりを一周してから乗ることになる——実測でTB1がずれ48°で入口を過ぎ、
+    // 4分かけて一周していた。中心線の近くなら、寄せる向き（最大45°）へは少し回るだけで済む。
+    // 遠いところでまで広げると、中心線を真横に横切るところで乗りにいってしまう（上の747の実測）。
+    else if (out >= sMin && Math.abs(cross) <= R && hdgErr <= AP_ENTRY_CLOSE_ALIGN_DEG) ap.navMode = 'capture';
   }
   if (ap.navMode === 'faf') return { x: faf.x, z: faf.z, distM: dFaf };
   // 入口を回るときの速さの上限。入口まで残り dGate で、そこで上限の速さに落ちている速さ
@@ -1532,7 +1618,16 @@ function apApproachNavTarget(plan, state, ap, spd, straightOnly) {
     const fx = Math.sin(hd), fz = -Math.cos(hd);
     return { x: state.position.x + fx * 5000, z: state.position.z + fz * 5000, distM: dFaf };
   }
-  ap.entrySpeedLimitMps = Math.sqrt(cap * cap + 2 * AP_DECEL_MPS2 * dGate);
+  // 抗力は速さの2乗で効くので、速いうちほど大きく減速できる。一定の減速度（AP_DECEL_MPS2）だけで
+  // 見積もると、入口まで2,800kmあるTB1でも「3,850ktまで」になり、残り距離に比例して
+  // 目標速度が下がりつづけた（実測でマッハ5.8から巡航中ずっと落ち、マッハ3を切った）。
+  // 実際は抗力だけでもマッハ9.7から395kmで進入速度まで落ちる。抗力長さ
+  // （apDecelLengthM）で落とせる速さも出し、大きいほうを採る。落とせる距離の半分
+  // 見積もりは apSlowableSpeed（抗力の1/1.2の速さで落とし、最後に20kmの余裕）。
+  const constDecel = Math.sqrt(cap * cap + 2 * AP_DECEL_MPS2 * dGate);
+  const Ld = model ? apDecelLengthM(model, Number.isFinite(ap.targetAltitudeM) ? ap.targetAltitudeM : state.altitudeM) : 0;
+  const dragDecel = Ld > 0 ? apSlowableSpeed(cap, dGate, Ld) : 0;
+  ap.entrySpeedLimitMps = Math.max(constDecel, dragDecel);
   return { x: gx, z: gz, distM: dGate + lg };
 }
 
@@ -1700,7 +1795,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   // （apApproachNavTarget）。そのときの距離は入口を通る道のり。
   // 垂直着陸は中心線に乗る必要が無いので、まっすぐ向かう。
   const navT = plan
-    ? apApproachNavTarget(plan, state, ap, spd, !!(ap.vtolLanding && model.hasVtol)) : null;
+    ? apApproachNavTarget(plan, state, ap, spd, !!(ap.vtolLanding && model.hasVtol), model) : null;
   const tx = navT ? navT.x : state.position.x;
   const tz = navT ? navT.z : state.position.z;
   const distFaf = navT ? navT.distM : 0;
@@ -1811,7 +1906,11 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 全開にしていたので、推力が重さの325倍あるサンダーバード1号は切り替えた0.75秒で
     // 1271ktに達し、翼が支えを引き受ける前に「速すぎるので渡す」抜け道に入って
     // 垂直エンジンを対地60mで一度に切り、機首が少し下がったまま7000ktで地面に突っ込んだ。
-    controls.throttle = Math.min(1, AP_VTOL_TRANS_ACCEL_G * apTaxiThrottlePerWeight(model));
+    // 推力は「抗力＋重さの AP_VTOL_TRANS_ACCEL_G 倍」を、はしごを踏まえたレバーに直して出す
+    // （apLeverForThrustN。比例で解くと、遅いグループの小さいエンジンにしか届かない）。
+    controls.throttle = apLeverForThrustN(model, controls,
+      AP_VTOL_TRANS_ACCEL_G * model.massKg * FLIGHT_GRAVITY + apDragEstimateN(model, state.airspeed, state.altitudeM),
+      state.airspeed, state.altitudeM);
     // 高さは**そのときの高度を目標にした輪で**保つ。
     // 「昇降率3m/sぶんの姿勢」を開ループで指示していたので、垂直エンジンを
     // 抜きはじめて沈んでも、指示ピッチは+1°のまま動かなかった——迎角が足りず
@@ -1935,9 +2034,13 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     ap.targetHeadingDeg = (want + 360) % 360;
     // 対地高度が低いうちは浅く（apBankAglFactor）、地形を越えるのに昇降率が
     // 要るときも浅く（apBankClimbFactor）——登るほうを旋回より優先する。
-    const bankLim = spd.bankMax * apBankAglFactor(state) * apBankClimbFactor(state, terrain.vsNeed, spd)
-      * Math.max(turnFactor, 0.02) * apBankSinkFactor(state, ap);
-    controls.roll = apAileronForTrack(state, want, bankLim, spd);
+    // 深く倒すのは速度に余裕があるときだけ（AP_BANK_ENERGY_K0 の説明を参照）
+    const kStall = state.airspeed / Math.max(spd.stall, 1);
+    const bankCap = Math.min(spd.bankMax, AP_BANK_MAX + Math.max(spd.bankMax - AP_BANK_MAX, 0)
+      * apClamp((kStall - AP_BANK_ENERGY_K0) / (AP_BANK_ENERGY_K1 - AP_BANK_ENERGY_K0), 0, 1));
+    const bankLim = bankCap * apBankAglFactor(state) * apBankClimbFactor(state, terrain.vsNeed, spd)
+      * Math.max(turnFactor, 0.02) * apBankSinkFactor(state, ap) * apBankRiseFactor(state, ap);
+    controls.roll = apAileronForTrackNav(state, want, bankLim, spd);
     // 上昇の段はヨーダンパーも掛ける（離陸の直後の首振りを持ち越さない）
     controls.yaw = ap.phase === 'climb' ? apRudderYawDamped(state) : apRudderForCoordination(state);
   };
@@ -1979,7 +2082,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 1フレームの全開だけで秒速50m以上伸びる。垂直離陸から上昇の段に渡った474ktが
     // 1.5秒で3018ktになり、機首を下げきれないまま高度100km超まで上がっていった。
     // 推力重量比がこれより小さいふつうの機体には効かない。
-    controls.throttle = Math.min(Math.max(overspeedCut, sinkUrgency), apAirThrottleCap(model));
+    controls.throttle = Math.min(Math.max(overspeedCut, sinkUrgency), apAirThrottleCap(model, state, controls));
     // 山に追われているあいだは姿勢の頭打ちも上げる。上昇の姿勢は「上昇速度を
     // 保つところまで」で自分から止まるので、上限を上げても速度は割らない
     // （出せない機体は、上げたところで速度が落ちて勝手に戻る）。
@@ -2099,14 +2202,18 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     if (ap.entrySpeedLimitMps > 0 && state.airspeed > cruiseV * 1.05) sinkUrgency = 0;
     // 推力の上限は上昇の段と同じ（apAirThrottleCap）
     controls.throttle = Math.min(Math.max(apThrottleForSpeed(state, controls, cruiseV, dt), sinkUrgency),
-      apAirThrottleCap(model));
+      apAirThrottleCap(model, state, controls));
     // 入口に向けて落としきれないぶんはスポイラーで（降下と同じ）
     if (cruiseV < spd.cruise && !terrainPushing) {
       controls.spoiler = apSpoilerCommand(model, controls, state, cruiseV, 0);
     }
     ap.vsCmd = overTerrainVs(apVsForAltitude(state, overTerrain(ap.targetAltitudeM), apClimbCap(state, spd), undefined, spd));
+    // 旋回中はバンクのぶん機首を上げる（apTurnPitchComp、高度維持と同じ）。深く倒すようになって、
+    // 無しでは速い機体が90°旋回で202m沈んだ（入れて34m）。ただし速い機体ほど1Gに要る迎角は小さいので、
+    // 舵の効き（apSurfaceGain）の平方根で割り引く——そのまま足すとTB1がマッハ9で機首を12°上げて
+    // 3,318mまで上がり、旋回に176秒かかった。
     controls.pitch = apElevatorForPitch(state, controls,
-      apPitchForVs(state, ap.vsCmd, undefined, terrainPitchMax()), dt, spd, ap);
+      apPitchForVs(state, ap.vsCmd, undefined, terrainPitchMax()) + apTurnPitchComp(state.rollDeg) * Math.sqrt(apSurfaceGain(state, spd)), dt, spd, ap);
     // 3°で降りきれる距離まで詰まったら降下へ。少し余裕を持たせる。
     if (plan) {
       const drop = Math.max(state.altitudeM - plan.fafAltM, 0);
@@ -2145,7 +2252,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 入口を回っているあいだは、旋回半径を見積もった速さまで落とす
     if (ap.entrySpeedLimitMps > 0) ap.targetSpeedMps = Math.min(ap.targetSpeedMps, ap.entrySpeedLimitMps);
     controls.throttle = Math.min(apThrottleForSpeed(state, controls, ap.targetSpeedMps, dt),
-      apAirThrottleCap(model));
+      apAirThrottleCap(model, state, controls));
     // 最終進入開始点の高度へ、一定の勾配で降りる
     const wantAlt = overTerrain(
       Math.min(plan.fafAltM + distFaf * AP_DESCENT_SLOPE, ap.targetAltitudeM));
@@ -2171,7 +2278,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     const onSlope = wantAlt < ap.targetAltitudeM - 1;
     ap.vsCmd = overTerrainVs(apVsForPath(state, wantAlt, onSlope ? AP_DESCENT_SLOPE : 0, apClimbCap(state, spd), spd));
     controls.pitch = apElevatorForPitch(state, controls,
-      apPitchForVs(state, ap.vsCmd, undefined, terrainPitchMax()), dt, spd, ap);
+      apPitchForVs(state, ap.vsCmd, undefined, terrainPitchMax()) + apTurnPitchComp(state.rollDeg) * Math.sqrt(apSurfaceGain(state, spd)), dt, spd, ap);
     if (distFaf < 2500) {
       if (ap.vtolLanding && model.hasVtol) say('vtol_approach', '最終進入（垂直着陸）');
       // 滑走路の向きを向いていなければ、最終進入に入らず入口からやり直す
@@ -2185,7 +2292,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   if (ap.phase === 'vtol_approach') {
     const want = apBearingTo(state.position.x, state.position.z, plan.pad.x, plan.pad.z);
     ap.targetHeadingDeg = want;
-    controls.roll = apAileronForTrack(state, want, spd.bankMax, spd);
+    controls.roll = apAileronForTrackNav(state, want, spd.bankMax, spd);
     controls.yaw = apRudderForCoordination(state);
 
     const distToTouchdown = Math.hypot(
@@ -2847,12 +2954,62 @@ function apTaxiThrottlePerWeight(model) {
   return model._taxiPerW;
 }
 
-const AP_CLIMB_THRUST_MAX_W = 3;    // 上昇・巡航・降下で使う推力の上限（重さに対して）
-const AP_VTOL_TRANS_ACCEL_G = 0.35;  // 垂直離陸の前進切替で許す加速（重さに対する推力の割合）
-// 上昇・巡航・降下で使う出力レバーの上限（推力が重さの AP_CLIMB_THRUST_MAX_W 倍になる量）。
-// 推力重量比がそれより小さい機体では1（上限なし）。
-function apAirThrottleCap(model) {
-  return Math.min(1, AP_CLIMB_THRUST_MAX_W * apTaxiThrottlePerWeight(model));
+const AP_CLIMB_THRUST_MAX_W = 3;    // 上昇・巡航・降下で使う「抗力を超えるぶんの推力」の上限（重さに対して）
+const AP_VTOL_TRANS_ACCEL_G = 0.5;   // 垂直離陸の前進切替で許す加速（重さに対する、抗力を超えるぶんの推力）
+
+// 前へ進むエンジンで推力 wantN を出す出力レバー。
+// **レバーは遅いグループから順に上がる**（engineGroupLadder）ので、「推力の合計に比例する」とは
+// かぎらない。比例として解いていたので、TB2（グループ1のロケット2基2954kN・グループ2のAB付き
+// ジェット2基5920kN・グループ3の小さいジェット2基426kN、重さ4960kN）の前進切替は
+// 「重さの0.35倍＝レバー18.7%」のつもりが、はしごのいちばん下のグループ3に37%を渡しただけ
+// ——出ていたのは重さの3%で、355ktから先へ加速せず、翼が支えられる速さに届かなかった。
+// はしごを下から積み上げて、そのグループの中で割り振る。推力はいまの速さ・高さで測る。
+function apLeverForThrustN(model, controls, wantN, speedMps, altitudeM) {
+  const ladder = engineGroupLadder(model, controls);
+  const n = ladder.length;
+  if (!n || !(wantN > 0)) return 0;
+  const rho = airDensityAt(altitudeM || 0);
+  const cut = aircraftVMaxCutMps(model, controls);
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    let g = 0;
+    for (const e of ladder[i].engines || []) {
+      if (e.lift) continue;
+      g += e.thrustN * Math.max(-e.axis.z, 0) * engineThrustScale(e, speedMps, rho, 1, cut);
+    }
+    if (g > 0 && acc + g >= wantN) return (i + (wantN - acc) / g) / n;
+    acc += g;
+  }
+  return 1;
+}
+
+// いまの速さ・高さでの抗力の見積もり(N)。抗力長さ（aircraftDragLengthM、海面の密度で測ったもの）から
+// D = m·v²/L を、空気の薄さのぶん減らして出す。
+function apDragEstimateN(model, speedMps, altitudeM) {
+  const L = aircraftDragLengthM(model);
+  if (!(L > 0)) return 0;
+  return model.massKg * speedMps * speedMps / L * (airDensityAt(altitudeM || 0) / FLIGHT_RHO0);
+}
+
+// 減速の見積もりに使う抗力長さ(m)。その高さの空気の薄さぶん伸ばす（薄いほど抗力が小さく、
+// 止まるまでに長く走る）。
+// **スポイラーは数に入れない**。立てれば半分ほどの距離で落ちる（TB1がマッハ9.7から395km→208km）が、
+// マッハ8で巡航中に立てると揚力が一度に抜け、ピッチの輪が追いつかずに毎秒200m沈み、
+// 沈んだぶん出力が戻って畳む——の往復で±20〜30Gに振れた。抗力だけで落ちるぶんで見積もる。
+function apDecelLengthM(model, altitudeM) {
+  const L = aircraftDragLengthM(model);
+  return L * FLIGHT_RHO0 / Math.max(airDensityAt(Math.max(altitudeM || 0, 0)), 1e-3);
+}
+
+// 上昇・巡航・降下で使う出力レバーの上限。**抗力を超えるぶんの推力が重さの AP_CLIMB_THRUST_MAX_W 倍**
+// になる量まで（推力が重さの325倍あった頃のTB1が、1フレームの全開で秒速50m伸びたため）。
+// 以前は「推力そのものを重さの3倍まで」にしていたので、抗力が重さの3倍を超える速さ
+// ——TB1（推力は重さの6.7倍）なら高度3000mでマッハ6あたり——から先は、レバーが45%で
+// 止まったまま加速できなかった。抗力のぶんを足せば、最高速度の近くでも全開まで使える。
+function apAirThrottleCap(model, state, controls) {
+  const W = model.massKg * FLIGHT_GRAVITY;
+  const v = state ? state.airspeed : 0, h = state ? state.altitudeM : 0;
+  return Math.min(1, apLeverForThrustN(model, controls, AP_CLIMB_THRUST_MAX_W * W + apDragEstimateN(model, v, h), v, h));
 }
 
 function apStartTaxi(plan, state, ap) {
@@ -3273,7 +3430,12 @@ function stepAutopilot(model, state, controls, ap, dt, env) {
   } else {
     ap.straightRun = false;
   }
-  const spd = apSpeedSchedule(model, distToGoM, state.airspeed, controls, ap.straightRun);
+  // 減速の見積もりの高さは**巡航の目標高度**（いまの高さではなく）。いまの高さで測ると、
+  // 沈むほど空気が濃くなって「もっと速くていい」になり、出力が戻ってまた浮く——実測でTB1が
+  // マッハ9からの減速中、目標速度が上下して出力0⇔100%（推力にして重さの6.7倍）を4秒ごとに
+  // 繰り返し、±30Gで振れた。目標高度で測れば、巡航中は動かない。
+  const spd = apSpeedSchedule(model, distToGoM, state.airspeed, controls, ap.straightRun,
+    ap.full && Number.isFinite(ap.targetAltitudeM) ? Math.max(ap.targetAltitudeM, 0) : state.altitudeM);
   if (ap.full) apStepFull(model, state, controls, ap, spd, dt, env);
   else if (ap.hover) apStepHover(model, state, controls, ap, spd, dt, env);
   else if (ap.altHold) apStepAltHold(model, state, controls, ap, spd, dt);

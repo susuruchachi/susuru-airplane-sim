@@ -603,6 +603,13 @@ function buildAircraftModel(config) {
         : ROTOR_DIAMETER_K * Math.sqrt(Math.max((p.props && p.props.thrustKgf) || 0, 0)),
     };
   }).filter((e) => e.thrustN > 0);
+  // **ヘリの横向きのエンジンは尾部ローター**として、推力を出さない（antiTorque）。
+  // この飛行モデルはメインローターの反トルクを持たない（向きは姿勢保持のヨー指示で決まる）ので、
+  // Builderで尾部ローターをエンジンとして置くと、打ち消す相手のいない横向きの推力になって、
+  // 出力（＝コレクティブ）を上げるたびに尾を横へ押し出してしまう。見た目の回転は出力に合わせて回る。
+  if (engines.some((e) => e.lift && e.kind === 'rotor')) {
+    for (const e of engines) if (!e.lift && Math.abs(e.axis.x) > 0.7) e.antiTorque = true;
+  }
   applyVtolTrim(engines);
   const engineTiltIgnored = dropHarmfulEngineTilt(engines);
   const engineGroups = buildEngineGroups(engines, vMaxMps);
@@ -672,7 +679,7 @@ function buildAircraftModel(config) {
     // 出した脚の前面投影。実機の旅客機は脚を出すと有害抗力がほぼ倍になるので、
     // 胴体の前面（0.022×翼面積）と同じくらいの大きさに取る。
     gearDragArea: 0.020 * wingArea,
-    totalThrustN: engines.reduce((a, e) => a + (e.lift ? 0 : e.thrustN), 0),
+    totalThrustN: engines.reduce((a, e) => a + (e.lift || e.antiTorque ? 0 : e.thrustN), 0),
     // 前後バランスで絞ったぶんを差し引いた「実際に使える」垂直推力
     vtolThrustN: engines.reduce((a, e) => a + (e.lift ? e.thrustN * e.trimScale : 0), 0),
     vtolThrustNRaw: engines.reduce((a, e) => a + (e.lift ? e.thrustN : 0), 0),

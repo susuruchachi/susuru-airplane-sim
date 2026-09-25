@@ -265,6 +265,7 @@ function escapeHtml(s) {
 function renderCgInspector(el) {
   const mainWings = State.parts.filter(p => p.type === 'wing' && p.props.role === 'main');
   const hasLeftRight = mainWings.some(w => w.props.side === 'left') && mainWings.some(w => w.props.side === 'right');
+  const hasRotor = typeof cgRotorEngines === 'function' && cgRotorEngines().length > 0;
 
   el.innerHTML = `
     <div class="section-title">プロパティ — 重心（原点）</div>
@@ -282,12 +283,21 @@ function renderCgInspector(el) {
       主翼から決定
     </button>
     ${!hasLeftRight ? '<div class="hint" style="color:var(--warn);margin-top:8px;">左翼・右翼それぞれ1つ以上必要です</div>' : ''}
+    ${hasRotor ? `
+    <div class="divider"></div>
+    <div class="subgroup-title">ローターから決定（ヘリ）</div>
+    <div class="hint" style="margin-bottom:8px;">ヘリは主翼を持たないので、重心をローターの回転軸の真下へ合わせます。X・Z＝ローターの真下、Y＝ローターより下（上にあればローターの直径の2割だけ下）。軸からずれていると、ローターの推力で機体が傾いて姿勢を保てません。</div>
+    <button class="btn-danger-outline" id="btnCgFromRotors" style="color:var(--accent);border-color:var(--accent-dim);">
+      ローターから決定
+    </button>` : ''}
     ${typeof pbBalancePanelHtml === 'function' ? pbBalancePanelHtml() : ''}
   `;
 
   bindXyzFields('cg', State.cg.position, () => applyCgToGizmo());
 
   document.getElementById('btnCgFromWings').addEventListener('click', () => setCgFromWings());
+  const btnRotor = document.getElementById('btnCgFromRotors');
+  if (btnRotor) btnRotor.addEventListener('click', () => setCgFromRotors());
   const btnPb = document.getElementById('btnPitchBalance');
   if (btnPb) btnPb.addEventListener('click', () => balancePitchTrim());
 }

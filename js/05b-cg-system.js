@@ -227,3 +227,45 @@ function setCgFromWings() {
     + ` X ${midX.toFixed(2)} / Y ${ac.point.y.toFixed(2)} / Z ${ac.point.z.toFixed(2)}`);
   return true;
 }
+
+// ヘリコプターのローター（エンジン種別 rotor・回転軸Y）。推力の重み付きで並べる
+function cgRotorEngines() {
+  return State.parts.filter(p => p.type === 'engine' && p.props
+    && p.props.engineKind === 'rotor' && p.props.spinAxis === 'y');
+}
+
+// 「ローターから決定」— ヘリの重心をローターの真下へ合わせる
+//
+//   X・Z … ローター（複数あれば推力の重み付き平均）の回転軸の真下
+//   Y    … いまの重心がローターより下ならそのまま。上にあれば、ローターの直径の2割だけ下
+//          （ヘリの重心は胴体の中、ローターの頭より下にある。下にあるほど振り子のように落ち着く）
+//
+// ヘリは主翼を持たないので「主翼から決定」が使えない。重心がローターの軸から前後左右にずれていると、
+// ローターの推力がそのまま機体を傾ける力になる——飛行側ではサイクリックのトリムでローター直径の5%
+// （11mのローターで0.55m）までは打ち消すが、それを超えると姿勢を保てず、自動操縦でも降りられない
+// （実測で前後2mずれた内蔵のヘリは、降り場の上で止まれずに通り過ぎつづけた）。
+function setCgFromRotors() {
+  const rotors = cgRotorEngines();
+  if (!rotors.length) {
+    showToast('ヘリのローター（エンジン種別「ヘリのローター」）がありません', true);
+    return false;
+  }
+  let w = 0, x = 0, y = 0, z = 0, dia = 0;
+  for (const r of rotors) {
+    const t = Math.max(r.props.thrustKgf || 0, 1);
+    w += t; x += r.position.x * t; y += r.position.y * t; z += r.position.z * t;
+    // 飛行側と同じ見積もり（09-aircraft.js の ROTOR_DIAMETER_K）
+    dia = Math.max(dia, (r.props.rotorDiameter || 0) > 0 ? r.props.rotorDiameter : 0.19 * Math.sqrt(t));
+  }
+  x /= w; y /= w; z /= w;
+  const cgY = State.cg.position.y < y ? State.cg.position.y : y - dia * 0.2;
+  State.cg.position.x = x;
+  State.cg.position.y = cgY;
+  State.cg.position.z = z;
+  applyCgToGizmo();
+  if (State.cg.selected) updateInspectorNumbersOnly(null, true);
+  renderInspector();
+  showToast('ローターの回転軸の真下へ重心を合わせました'
+    + ` X ${x.toFixed(2)} / Y ${cgY.toFixed(2)} / Z ${z.toFixed(2)}`);
+  return true;
+}

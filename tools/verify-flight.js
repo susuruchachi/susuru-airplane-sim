@@ -49,7 +49,7 @@ const {
   apAileronForBank, apSpoilerCommand, apReverseCommand, apStartTaxi,
   aircraftBestClimb, apUpdateTerrainFloor,
   maxForwardThrustAt, aircraftVMaxMps, engineThrustScale, engineAfterburner,
-  apManageEngineGroups, speedOfSoundAt, machNumberAt,
+  apManageEngineGroups, speedOfSoundAt, machNumberAt, apSlowableSpeed, apLeverForThrustN,
 } = ctx;
 
 // 13-autopilot.js / 10-flight.js の同名の定数と同じ値。vmコンテキストの外からは
@@ -2728,8 +2728,8 @@ function autopilotFlight(opts) {
     + ` / 2000km先なら${(far.cruise * KT).toFixed(0)}kt / 80km先なら${(near.cruise * KT).toFixed(0)}kt`);
   check(near.cruise < far.cruise, '目的地が近いほど、落としきれる速さまで巡航を絞る',
     `${(near.cruise * KT).toFixed(0)}kt < ${(far.cruise * KT).toFixed(0)}kt`);
-  check(near.cruise <= near.approach * Math.exp(80000 * 0.5 / L) * 1.01,
-    '巡航速度は「残りの半分で進入速度まで落とせる速さ」に収まる',
+  check(near.cruise <= apSlowableSpeed(near.approach, 80000, L) * 1.01,
+    '巡航速度は「抗力で進入速度まで落とせる速さ」に収まる',
     `${(near.cruise * KT).toFixed(0)}kt`);
 }
 
@@ -3154,15 +3154,18 @@ function autopilotFlight(opts) {
   // (e) 自動操縦が、進入では速すぎるときだけスポイラーを立て、
   //     接地したら全開にして逆噴射も入れること
   {
+    // 速さは進入の速さのまわり（スポイラーで失う揚力は動圧に比例するので、速い機体では
+    // 立てる量を抑える——下の「極超音速では立てない」を参照）
     const st = createFlightState(), c = createFlightControls();
     st.position.set(0, 1000, 0); st.altitudeM = 1000; st.altitudeAglM = 1000;
-    st.airspeed = 100;
+    const va = apSpeedSchedule(sp).approach;
+    st.airspeed = va * 1.2;
     c.throttle = 0;
-    const onSpeed = apSpoilerCommand(sp, c, st, 100, 0);
-    const tooFast = apSpoilerCommand(sp, c, st, 80, 0);
-    const tooHigh = apSpoilerCommand(sp, c, st, 100, 300);
+    const onSpeed = apSpoilerCommand(sp, c, st, st.airspeed, 0);
+    const tooFast = apSpoilerCommand(sp, c, st, va, 0);
+    const tooHigh = apSpoilerCommand(sp, c, st, st.airspeed, 300);
     c.throttle = 0.8;
-    const powered = apSpoilerCommand(sp, c, st, 80, 300);
+    const powered = apSpoilerCommand(sp, c, st, va, 300);
     note('自動操縦のスポイラー', `速度・高さとも合っている:${(onSpeed * 100).toFixed(0)}%`
       + ` 速すぎ:${(tooFast * 100).toFixed(0)}% 高すぎ:${(tooHigh * 100).toFixed(0)}%`
       + ` 出力80%で速すぎ:${(powered * 100).toFixed(0)}%`);
@@ -3173,6 +3176,22 @@ function autopilotFlight(opts) {
       (powered * 100).toFixed(0) + '%');
     const noneModel = apSpoilerCommand(plain, c, st, 80, 300);
     check(noneModel === 0, 'スポイラーの無い機体には指示を出さない', String(noneModel));
+
+    // 極超音速では、失う揚力が重さの1倍までしか立てない（動圧が大きいと、少し立てただけで
+    // 重さの何十倍もの揚力が抜ける——TB1がマッハ9で立てて-26Gまで振れた）
+    {
+      const hs = createFlightState(), hc = createFlightControls();
+      hs.position.set(0, 3000, 0); hs.altitudeM = 3000; hs.airspeed = va * 20;
+      hc.throttle = 0;
+      const cmd = apSpoilerCommand(sp, hc, hs, va * 10, 300);
+      let k = 0;
+      for (const s of sp.surfaces) k += (s.spoiler || 0) * s.area;
+      const lossW = cmd * 2 * Math.PI * k * 0.5 * airDensityAt(3000) * hs.airspeed * hs.airspeed
+        / (sp.massKg * FLIGHT_GRAVITY_FOR_TEST);
+      note('極超音速のスポイラー', `進入の20倍の速さで ${(cmd * 100).toFixed(1)}%・失う揚力は重さの${lossW.toFixed(2)}倍`);
+      check(cmd > 0 && lossW <= 1.001, '極超音速では、失う揚力が重さの1倍までしか立てない',
+        `${(cmd * 100).toFixed(1)}%・重さの${lossW.toFixed(2)}倍`);
+    }
 
     // 逆噴射は「狙った減速度になるぶんだけ」。推力が桁外れでも一杯には入れない
     const big = (() => {
@@ -3520,6 +3539,29 @@ function autopilotFlight(opts) {
     && Math.abs(two.engineGroups[1].vMaxMps - 21 * 340) < 1,
     'グループごとの最高速度が読めている',
     two.engineGroups.map((g) => `${g.id}:${(g.vMaxMps / 340).toFixed(0)}M`).join(' '));
+
+  // 出力レバー→推力は、遅いグループから順に上がる（はしご）。狙った推力を出すレバーは
+  // それを踏まえて解く（apLeverForThrustN）。小さいジェット（遅い）と20倍のロケット（速い）の機体で、
+  // 推力の半分を出すレバーは「はしごの1段目を使い切って、2段目の中ほど」になる
+  // ——比例で解くと50%になり、実際にはジェットだけで推力の5%しか出ない（TB2の前進切替が加速しなかった形）。
+  {
+    const lc = defaultAircraftConfig();
+    const le = lc.parts.find((p) => p.type === 'engine');
+    Object.assign(le.props, { engineKind: 'jet', engineGroup: 1, groupMaxSpeedValue: 2, groupMaxSpeedUnit: 'mach' });
+    const lr = JSON.parse(JSON.stringify(le));
+    lr.id = 'eng_big_rocket';
+    Object.assign(lr.props, { engineKind: 'rocket', engineGroup: 2, groupMaxSpeedValue: 21, groupMaxSpeedUnit: 'mach',
+      thrustKgf: le.props.thrustKgf * 20 });
+    lc.parts.push(lr);
+    const lm = buildAircraftModel(lc);
+    const g1 = lm.engines.filter((e) => !e.lift && e.group === 1).reduce((a, e) => a + e.thrustN * Math.max(-e.axis.z, 0), 0);
+    const g2 = lm.engines.filter((e) => !e.lift && e.group === 2).reduce((a, e) => a + e.thrustN * Math.max(-e.axis.z, 0), 0);
+    const lever = apLeverForThrustN(lm, createFlightControls(), (g1 + g2) / 2, 0, 0);
+    const want = (1 + ((g1 + g2) / 2 - g1) / g2) / 2;
+    note('推力を狙うレバー（はしご）', `推力の半分：レバー${(lever * 100).toFixed(1)}%（比例なら50%）`);
+    check(Math.abs(lever - want) < 1e-6 && lever > 0.7, '狙った推力を出すレバーは、遅いグループから順に上がるはしごを踏まえて解く',
+      `${(lever * 100).toFixed(1)}%（期待${(want * 100).toFixed(1)}%）`);
+  }
 
   const cAll = createFlightControls();
   const cJetOnly = createFlightControls(); cJetOnly.engineGroupOff = { 2: true };
@@ -4253,6 +4295,44 @@ function autopilotFlight(opts) {
     }
     note('ヘリのホバリング（横風6m/s）', `10〜30秒で位置のずれ最大 ${drift.toFixed(1)}m・高さのずれ ${dy.toFixed(1)}m`);
     check(drift < 5 && dy < 3, 'ヘリのホバリング：横風でもその場に止まる', `${drift.toFixed(1)}m / ${dy.toFixed(1)}m`);
+  }
+
+  // Builderで作ったヘリは、重心がローターの軸からずれていたり、尾部ローターをエンジンとして
+  // 置いていたりする。重心が前後1m・左右0.5mずれていても（サイクリックのトリム）、尾部ローターを
+  // 横向きのエンジンで置いても（推力を出さない antiTorque）、全自動で降りられること。
+  {
+    const flyHeli = (mut) => {
+      const cfg = ctx.defaultHelicopterConfig();
+      cfg.builtin = false; delete cfg.builtinShape;
+      mut(cfg);
+      const hm = buildAircraftModel(cfg);
+      const st = createFlightState(), c = createFlightControls();
+      placeAircraftOnGround(hm, st, 0, 0, 0, flatGround);
+      settleAircraftOnGround(hm, st, flatGround);
+      const ap = createAutopilotState();
+      ap.full = true; ap.targetAltitudeM = 500; ap.destAirportId = 'DST'; ap.phase = 'takeoff'; ap.takeoffHeadingDeg = 0;
+      ap.plan = apMakeApproachPlan({ id: 'DST', x: 0, z: -10000, elevationM: 0 }, { runwayLengthM: 2000, headingDeg: 0 }, 0);
+      let t = 0;
+      while (t < 900) {
+        stepAutopilot(hm, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+        advanceFlight(hm, st, c, noWind, flatGround, 1 / 60);
+        t += 1 / 60;
+        if (st.crashed || ap.phase === 'done') break;
+      }
+      return { hm, done: ap.phase === 'done' && !st.crashed, t, phase: st.crashed ? '墜落' : ap.phase };
+    };
+    const fwd = flyHeli((cfg) => { cfg.cg.z = 1; });
+    const side = flyHeli((cfg) => { cfg.cg.x = 0.5; });
+    const tail = flyHeli((cfg) => {
+      cfg.parts.push({ id: 'tr', type: 'engine', name: '尾部ローター', position: { x: 0.3, y: 2.2, z: 7.3 },
+        rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+        props: { thrustKgf: 300, spinAxis: 'x', engineKind: 'prop' } });
+    });
+    note('Builderのヘリ', `重心が前へ1m:${fwd.phase} ${fwd.t.toFixed(0)}秒 / 右へ0.5m:${side.phase} ${side.t.toFixed(0)}秒`
+      + ` / 尾部ローター付き:${tail.phase} ${tail.t.toFixed(0)}秒`);
+    check(fwd.done && side.done, 'ヘリ：重心がローターの軸から少しずれていても全自動で降りる', `${fwd.phase} / ${side.phase}`);
+    check(tail.done && tail.hm.engines.some((e) => e.antiTorque) && tail.hm.isHelicopter,
+      'ヘリ：横向きのエンジン（尾部ローター）は推力を出さず、全自動で降りる', tail.phase);
   }
 }
 

@@ -546,8 +546,8 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
   const vMaxCut = aircraftVMaxCutMps(model, controls);
   let thrustTotal = 0, vtolTotal = 0, abTotal = 0;
   for (const e of model.engines) {
-    // 止めているグループは推力を出さない
-    if (engineGroupOff(controls, e.group)) continue;
+    // 止めているグループは推力を出さない。ヘリの尾部ローターも（09-aircraft.js の antiTorque）
+    if (engineGroupOff(controls, e.group) || e.antiTorque) continue;
     // **グループごとのレバー**（遅いグループから順に上がる。engineGroupLadder）
     const lever = e.lift ? vtolLever : engineDeliveredLever(model, state, controls, e);
     const scale = engineThrustScale(e, airspeed, rho, lever, vMaxCut);
@@ -559,7 +559,18 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
     if (e.lift) vtolTotal += t; else thrustTotal += t;
     if (e.kind === 'jet_ab') abTotal = Math.max(abTotal, engineAfterburner(lever));
     out.force.addScaledVector(e.axis, t);
-    out.torque.add(_fv.tmp.crossVectors(e.position, _fv.f.copy(e.axis).multiplyScalar(t)));
+    // ヘリのローターは**サイクリックのトリム**で、推力の向きを少し傾けて重心の上を通せる
+    // （実機も重心の許容範囲はこの幅で決まる）。重心が回転軸から前後左右にずれていても、
+    // ローターの直径の HELI_CYCLIC_TRIM_FRAC までは、ずれのぶんの傾ける力を打ち消す。
+    // これが無いと、重心が1mずれただけで姿勢の保持が追いつかず、自動操縦の降下で
+    // 機首が振れて降りられなかった（左右0.5mなら75°まで傾いた）。
+    let arm = e.position;
+    if (e.kind === 'rotor') {
+      const lim = HELI_CYCLIC_TRIM_FRAC * Math.max(e.rotorDiameterM || model.rotorDiameterM || 0, 0);
+      const cx = THREE.MathUtils.clamp(e.position.x, -lim, lim), cz = THREE.MathUtils.clamp(e.position.z, -lim, lim);
+      arm = _fv.local.set(e.position.x - cx, e.position.y, e.position.z - cz);
+    }
+    out.torque.add(_fv.tmp.crossVectors(arm, _fv.f.copy(e.axis).multiplyScalar(t)));
   }
   // 炎の見た目に使う（0〜1）
   state.afterburner = model.hasAfterburner ? THREE.MathUtils.clamp(abTotal, 0, 1) : 0;
@@ -617,6 +628,7 @@ const HELI_ETL_GAIN = 0.18;           // 転移揚力で増える割合
 const HELI_ETL_FROM_MPS = 5, HELI_ETL_FULL_MPS = 20;
 const HELI_RBS_FROM_MPS = 72, HELI_RBS_FULL_MPS = 95, HELI_RBS_LOSS = 0.35;  // 後退側の羽根の失速
 const HELI_GROUND_EFFECT = 0.12;      // 地面すれすれで増える割合
+const HELI_CYCLIC_TRIM_FRAC = 0.05;   // サイクリックのトリムで打ち消せる重心のずれ（ローターの直径に対して）
 function heliRotorFactor(model, state, airspeed) {
   const sm = THREE.MathUtils.smoothstep;
   let f = 1 + HELI_ETL_GAIN * sm(airspeed, HELI_ETL_FROM_MPS, HELI_ETL_FULL_MPS)
