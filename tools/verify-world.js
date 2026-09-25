@@ -136,6 +136,52 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
     `${planned}/${target}（${(planned / target * 100).toFixed(0)}%）`);
   check(onPavement === 0, '舗装にかかる建物が無い', `${onPavement}軒`);
   check(worstMs < 100, '街1つの並べ方が100ms以内', `最大 ${worstMs}ms`);
+
+  // 街の性格：規模・山あい・気候で建物の形が変わり、どの街にも真ん中に名所がある
+  const tiers = {}, kinds = {}, marks = {};
+  let towerWrong = 0, houseInTown = 0, allInTown = 0, noMark = 0, markOnPave = 0, plazaHit = 0, highTall = 0;
+  let tallest = { h: 0 }, aridTowers = 0, aridGlass = 0;
+  for (const c of W.WORLD_CITIES) {
+    const ch = C.cityCharacterOf(c);
+    tiers[ch.tier] = (tiers[ch.tier] || 0) + 1;
+    const plan = C.cityBuildingPlan(c);
+    const net = C.cityStreetNetwork(c);
+    const lm = C.cityLandmarks(c);
+    if (!lm.some((m) => m.kind !== 'tvtower')) noMark++;
+    for (const m of lm) {
+      marks[m.kind] = (marks[m.kind] || 0) + 1;
+      // 敷地の円の中を4m格子で見て、舗装にかかる点があるか
+      let hit = false;
+      for (let u = -m.r; u <= m.r && !hit; u += 4) {
+        for (let v = -m.r; v <= m.r && !hit; v += 4) {
+          if (u * u + v * v <= m.r * m.r && C.cityStreetClearance(net, m.x + u, m.z + v) < 0) hit = true;
+        }
+      }
+      if (hit) markOnPave++;
+      for (const b of plan) if (Math.hypot(b.x - m.x, b.z - m.z) < m.r) plazaHit++;
+    }
+    for (const b of plan) {
+      kinds[b.kind] = (kinds[b.kind] || 0) + 1;
+      if (b.kind === 'tower' && (ch.tier === 'town' || ch.tier === 'city' || ch.highland)) towerWrong++;
+      if (ch.tier === 'town') { allInTown++; if (b.kind === 'house') houseInTown++; }
+      if (ch.highland && b.h > 20) highTall++;
+      if (b.kind === 'tower' && b.h > tallest.h) tallest = { h: b.h, city: c.id };
+      if (b.kind === 'tower' && ch.climate === 'arid') { aridTowers++; if ((b.skin & 0xff) > ((b.skin >> 16) & 0xff)) aridGlass++; }
+    }
+  }
+  console.log(`[  --  ] 街の規模: ${Object.entries(tiers).map(([k, v]) => `${k} ${v}`).join(' / ')}`);
+  console.log(`[  --  ] 建物の形: ${Object.entries(kinds).map(([k, v]) => `${k} ${v}`).join(' / ')}（いちばん高いビル ${tallest.h.toFixed(0)}m・${tallest.city}）`);
+  console.log(`[  --  ] 名所: ${Object.entries(marks).map(([k, v]) => `${k} ${v}`).join(' / ')}`);
+  check(Object.keys(tiers).length === 4, '街の規模が4段階そろう', Object.keys(tiers).join(','));
+  check(towerWrong === 0, '高層ビルは大都市・巨大都市の平地にだけ建つ', `${towerWrong}軒`);
+  check(houseInTown >= allInTown * 0.9, '町の建物の9割以上が家', `${houseInTown}/${allInTown}`);
+  check(highTall === 0, '山あいの街に20mを超える建物が無い', `${highTall}軒`);
+  check(tallest.h > 300, '巨大都市に300mを超える超高層ビルがある', `${tallest.h.toFixed(0)}m`);
+  check(aridGlass === 0, '乾燥の街の高層ビルは石と砂の色（青いガラスにしない）', `${aridGlass}/${aridTowers}`);
+  check(noMark === 0, 'どの街にも真ん中に名所がある', `${noMark}都市に無い`);
+  check((marks.tvtower || 0) === (tiers.megalopolis || 0), '巨大都市には展望塔がある', `${marks.tvtower || 0}/${tiers.megalopolis || 0}`);
+  check(markOnPave === 0, '名所は舗装にかからない', `${markOnPave}か所`);
+  check(plazaHit === 0, '名所の敷地に建物が建たない', `${plazaHit}軒`);
 }
 
 // --- 空港：標高どおりに均されていて、滑走路の全長が平らか ---

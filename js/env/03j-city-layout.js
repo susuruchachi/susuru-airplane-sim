@@ -21,6 +21,9 @@
 const _CL_WORLD = (typeof module !== 'undefined' && module.exports) ? require('./03b-world.js') : null;
 const clRng = _CL_WORLD ? _CL_WORLD.worldRng : worldRng;
 const clFbm = _CL_WORLD ? _CL_WORLD.worldFbm : worldFbm;
+const clTemperatureAt = _CL_WORLD ? _CL_WORLD.worldTemperatureAt : worldTemperatureAt;
+const clDrynessAt = _CL_WORLD ? _CL_WORLD.worldDrynessAt : worldDrynessAt;
+const clLandValueAt = _CL_WORLD ? _CL_WORLD.worldLandValueAt : worldLandValueAt;
 
 // 街路の半幅（ふつう・大通り・路地）と、建物を街路から離す余白。
 // 余白が0だと、建物の角が舗装にかぶって街路が途切れて見える。
@@ -79,6 +82,65 @@ function cityLayoutOf(city) {
   for (const k in w) { r -= w[k]; if (r <= 0) { type = k; break; } }
   city._layout = { type, style };
   return city._layout;
+}
+
+// --- 街の性格（規模・山あい・気候・名所） -----------------------------------
+//
+// 以前はどの街も「大きさの違う同じ街」だった（違うのは街路の型と国ごとの色・高さだけ）。
+// 街ごとに次の3つを決め、建物の形・高さ・屋根と、街の真ん中の名所を変える。
+//   規模 … town（町・村）/ city（市）/ metro（大都市）/ megalopolis（首都級の巨大都市）
+//          町は2〜3階の家が並び、大都市は中心に高層ビル、巨大都市は超高層の摩天楼と展望塔
+//   山あい … 標高 CITY_HIGHLAND_M 以上の街。低く、屋根は急、建物はまばらで石の色
+//   気候 … 寒冷（急な切妻屋根）/ 温帯（切妻と寄棟）/ 乾燥（平屋根と丸屋根）/ 熱帯（軒の深い寄棟・白と淡い色）
+// 名所は国の性格で決める（尖塔の教会・丸屋根・丸屋根と尖塔（ミナレット）・五重塔・鐘楼）。
+const CITY_HIGHLAND_M = 900;
+const CITY_TIERS = [
+  { id: 'town', maxSize: 0.3 },
+  { id: 'city', maxSize: 0.6 },
+  { id: 'metro', maxSize: 0.85 },
+  { id: 'megalopolis', maxSize: Infinity },
+];
+const CITY_LANDMARK_BY_COUNTRY = {
+  vestaria: 'spire', nordheim: 'spire', borealis: 'spire', astra: 'dome',
+  kaldis: 'minarets', oriens: 'pagoda', meridia: 'campanile', thalassia: 'campanile',
+  serafina: 'campanile', xanadu: 'dome',
+};
+// 屋根の色（気候ごと）。壁は国の palette。出力が sRGB で明るく持ち上がるので、
+// 赤瓦も濃いめに置く（淡い値だと空から桃色に見えた）
+const CITY_ROOF_COLORS = {
+  cold: [0x2e1e1c, 0x262a2e, 0x3d201a, 0x22302a],
+  temperate: [0x5a2a1e, 0x66301f, 0x3e3d3c, 0x4d3528],
+  arid: [0x7d6c55, 0x6e5f4a],
+  tropical: [0x6e3822, 0x4a5648, 0x7a5236, 0x3e4a54],
+};
+// 熱帯・乾燥の街は壁を明るく（白壁・漆喰）。国の palette にこれを混ぜる
+const CITY_BRIGHT_WALLS = { arid: [0x8c8574, 0x958b76, 0x7f7866], tropical: [0x8e8a80, 0x7f8a86, 0x8f8272, 0x86808c] };
+// 家の壁は国の palette（中層ビル向けの暗い色）をこの色へ寄せる。暗い壁に淡い屋根で、明暗が逆に見えた
+const CITY_HOUSE_WALL_LIGHT = 0xb0a898;
+const CITY_HOUSE_WALL_MIX = 0.6;
+// 高層ビルの外装。乾燥の街は石と砂の色、ほかはガラス（熱帯は明るめ）
+const CITY_TOWER_COLORS = {
+  arid: [0x7a6e5a, 0x857a64, 0x6e6452, 0x8a806c],
+  tropical: [0x5d6d78, 0x6a7a80, 0x7a8288, 0x5a6a66],
+  other: [0x4a5a6a, 0x55626c, 0x5a6670, 0x46546a, 0x66707a, 0x566a64],
+};
+
+function clMixHex(a, b, t) {
+  const ch = (sh) => Math.round(((a >> sh) & 255) * (1 - t) + ((b >> sh) & 255) * t);
+  return (ch(16) << 16) | (ch(8) << 8) | ch(0);
+}
+
+function cityCharacterOf(city) {
+  if (city._character) return city._character;
+  const tier = CITY_TIERS.find((t) => city.size < t.maxSize).id;
+  const highland = (city.groundY || 0) >= CITY_HIGHLAND_M;
+  const temp = clTemperatureAt(city.x, city.z, city.groundY || 0);
+  const dry = clDrynessAt(city.x, city.z, clLandValueAt(city.x, city.z));
+  const climate = temp < 0.22 ? 'cold' : (dry > 0.55 && temp > 0.45) ? 'arid'
+    : (temp > 0.72 && dry < 0.45) ? 'tropical' : 'temperate';
+  const landmark = CITY_LANDMARK_BY_COUNTRY[city.country] || 'spire';
+  city._character = { tier, highland, climate, landmark, temp, dry };
+  return city._character;
 }
 
 // --- 街の外周 ---------------------------------------------------------------
@@ -354,22 +416,53 @@ function cityStreetClearance(net, x, z) {
 // --- 建物 -------------------------------------------------------------------
 
 // 建てる予定の軒数。以前（全都市が碁盤の目）と同じ 240+size×1100 に、国ごとの倍率を掛ける。
-// 路地の街は建物が小さい（間口8〜22m）ぶん、軒数を増やさないとまばらに見える
+// 路地の街は建物が小さい（間口8〜22m）ぶん、軒数を増やさないとまばらに見える。
+// 山あいの街はまばらにする（斜面に貼りつく小さな町）
 function cityBuildingTarget(city) {
   const L = cityLayoutOf(city);
-  return Math.round((240 + city.size * 1100) * L.style.density * (L.type === 'medina' ? 1.5 : 1));
+  const ch = cityCharacterOf(city);
+  return Math.round((240 + city.size * 1100) * L.style.density * (L.type === 'medina' ? 1.5 : 1)
+    * (ch.highland ? 0.8 : 1));
 }
 
-// 建物の並べ方。[{ x, z, w（間口・街路に沿う向き）, d（奥行き）, h, ang（街路の向き）, t（中心からの割合）, color }]
+// 建物の形。
+//   house … 2〜3階の家（屋根は気候で切妻・寄棟・平屋根）
+//   block … 中層の建物（平屋根。屋上に機械室を載せることがある）
+//   tower … 高層ビル（段々に細くなり、いちばん高いものは尖塔を載せる）
+// 町は家ばかり、市は中心が中層で外が家、大都市・巨大都市は中心に高層ビルが立つ。
+const CITY_HOUSE_H = [6, 11];
+const CITY_PLAZA_K = 2.4;
+const CITY_TOWER_FROM_T = { metro: 0.24, megalopolis: 0.36 };   // 中心からこの割合の内側に高層ビル
+const CITY_TOWER_P = { metro: 0.35, megalopolis: 0.6 };         // その範囲の建物が高層ビルになる確率
+const CITY_TOWER_H = { metro: [55, 150], megalopolis: [80, 380] };
+
+function cityRoofFor(ch, rand) {
+  if (ch.climate === 'arid') return rand() < 0.85 ? 'flat' : 'hip';
+  if (ch.climate === 'tropical') return rand() < 0.75 ? 'hip' : 'flat';
+  if (ch.climate === 'cold' || ch.highland) return rand() < 0.85 ? 'gable' : 'hip';
+  return rand() < 0.6 ? 'gable' : (rand() < 0.6 ? 'hip' : 'flat');
+}
+
+// 建物の並べ方。[{ x, z, w（間口・街路に沿う向き）, d（奥行き）, h, ang（街路の向き）, t（中心からの割合）, color,
+//   kind（house/block/tower）, roof（gable/hip/flat）, roofH, roofColor, skin（高層ビルの外装）, spire }]
 // 地面の高さと水の上かどうかは呼ぶ側で見る（ブラウザでは地形メッシュの高さを使うため）。
+// 名所は cityLandmarks が別に返す（その場所には建物を建てない）。
 function cityBuildingPlan(city) {
   const net = cityStreetNetwork(city);
   const L = cityLayoutOf(city);
+  const ch = cityCharacterOf(city);
   const style = L.style;
   const medina = L.type === 'medina';
   const rand = clRng(city.id);
+  // 形・屋根の乱数は配置の乱数とは別の列にする（配置は以前と同じ場所のまま）
+  const krand = clRng('kind:' + city.id);
   const count = cityBuildingTarget(city);
+  const marks = cityLandmarks(city);
+  const walls = CITY_BRIGHT_WALLS[ch.climate] ? style.palette.concat(CITY_BRIGHT_WALLS[ch.climate]) : style.palette;
+  const roofs = CITY_ROOF_COLORS[ch.climate];
+  const towerFrom = ch.highland ? 0 : (CITY_TOWER_FROM_T[ch.tier] || 0);
   const out = [];
+  let tallest = null;
   for (let i = 0; i < count; i++) {
     // 中心ほど密に（以前と同じ分布）
     const t = Math.pow(rand(), 0.65);
@@ -379,9 +472,32 @@ function cityBuildingPlan(city) {
     let w = medina ? 8 + rand() * 14 : 11 + rand() * 26;
     let d = medina ? 8 + rand() * 14 : 11 + rand() * 26;
     const hBase = (7 + rand() * 22) * (0.6 + city.size * 1.5) * (0.45 + (1 - t) * 1.5) * style.height;
-    const h = medina ? Math.min(hBase, 16) : hBase;
-    const color = style.palette[(rand() * style.palette.length) | 0];
+    const color = walls[(rand() * walls.length) | 0];
     const setJitter = rand() * 6;
+
+    // 形を決める
+    let kind = 'block', h = medina ? Math.min(hBase, 16) : hBase;
+    const outer = ch.tier === 'town' ? 0 : ch.tier === 'city' ? 0.5 : 0.62;
+    if (t < towerFrom && krand() < CITY_TOWER_P[ch.tier]) {
+      kind = 'tower';
+      const [h0, h1] = CITY_TOWER_H[ch.tier];
+      const k = krand();
+      // 中心に近いほど高い。いちばん高い数本だけが上限近くまで伸びる
+      h = (h0 + (h1 - h0) * k * k * k) * (1.15 - t / towerFrom * 0.5);
+      w = Math.max(w, 26 + krand() * 22); d = Math.max(d, 26 + krand() * 22);
+    } else if (t >= outer || ch.highland) {
+      kind = 'house';
+      h = CITY_HOUSE_H[0] + krand() * (CITY_HOUSE_H[1] - CITY_HOUSE_H[0]) * (ch.highland ? 0.7 : 1);
+      if (!medina) { w = 9 + krand() * 9; d = 8 + krand() * 7; }
+    } else if (ch.highland || ch.tier === 'town') {
+      h = Math.min(h, 14);
+    }
+    const roof = kind === 'tower' ? 'flat' : kind === 'house' ? cityRoofFor(ch, krand) : (krand() < 0.2 ? cityRoofFor(ch, krand) : 'flat');
+    const pitch = ch.climate === 'cold' || ch.highland ? 0.55 : ch.climate === 'tropical' ? 0.28 : 0.36;
+    const roofColor = roofs[(krand() * roofs.length) | 0];
+    const towers = CITY_TOWER_COLORS[ch.climate] || CITY_TOWER_COLORS.other;
+    const skin = kind === 'tower' ? towers[(krand() * towers.length) | 0] : 0;
+    const wall = kind === 'house' ? clMixHex(color, CITY_HOUSE_WALL_LIGHT, CITY_HOUSE_WALL_MIX) : color;
 
     // いちばん近い街路に面して、その向きに揃える。街区の奥にある（表の建物の
     // 奥行きより深い）ものは、その場所のまま向きだけ揃える（中庭側の建物）。
@@ -398,6 +514,9 @@ function cityBuildingPlan(city) {
         z = n.fz + pz * side * setback;
       }
     }
+    // 名所のまわりは広場にして建てない（敷地の半径の CITY_PLAZA_K 倍）。
+    // 敷地ぶんだけ空けていたら、中心の中層ビルに囲まれて名所が埋もれて見えなかった
+    if (marks.some((m) => Math.hypot(x - m.x, z - m.z) < m.r * (m.kind === 'tvtower' ? 1.5 : CITY_PLAZA_K) + Math.max(w, d) * 0.6)) continue;
     // 四隅がどの街路の舗装からも離れているか。かかるなら一回り小さくしてもう一度
     let ok = false;
     for (let tryN = 0; tryN < 2 && !ok; tryN++) {
@@ -405,9 +524,69 @@ function cityBuildingPlan(city) {
       if (!ok) { w *= 0.65; d *= 0.65; }
     }
     if (!ok) continue;
-    out.push({ x, z, w, d, h, ang: Math.atan2(dirZ, dirX), t, color });
+    const bld = { x, z, w, d, h, ang: Math.atan2(dirZ, dirX), t, color: wall, skin, kind, roof,
+      roofH: roof === 'flat' ? 0 : Math.min(w, d) * pitch, roofColor, spire: 0 };
+    if (kind === 'tower' && (!tallest || h > tallest.h)) tallest = bld;
+    out.push(bld);
   }
+  // 巨大都市のいちばん高いビルには尖塔を載せる（街の顔）
+  if (tallest && ch.tier === 'megalopolis') tallest.spire = tallest.h * 0.18;
   return out;
+}
+
+// 街の真ん中の名所。[{ kind, x, z, ang, r（敷地の半径）, h }]
+//   spire … 尖塔の教会 / dome … 丸屋根の大聖堂 / minarets … 丸屋根と尖塔（ミナレット）
+//   pagoda … 五重塔 / campanile … 鐘楼 / tvtower … 展望塔（巨大都市だけ。国によらない）
+// 中心のそばで、舗装にかからない場所を探して置く（中心から外へ渦を巻いて探す）。
+const CITY_LANDMARK_SIZE = {
+  spire: { r: 26, h: 62 }, dome: { r: 34, h: 48 }, minarets: { r: 36, h: 58 },
+  pagoda: { r: 16, h: 42 }, campanile: { r: 14, h: 58 }, tvtower: { r: 22, h: 360 },
+};
+function cityLandmarks(city) {
+  if (city._landmarks) return city._landmarks;
+  const net = cityStreetNetwork(city);
+  const ch = cityCharacterOf(city);
+  const rand = clRng('landmark:' + city.id);
+  const want = [ch.landmark];
+  if (ch.tier === 'megalopolis') want.push('tvtower');
+  const out = [];
+  const scale = ch.tier === 'town' ? 0.75 : ch.tier === 'city' ? 1 : 1.2;
+  for (const kind of want) {
+    const sz = CITY_LANDMARK_SIZE[kind];
+    const r = sz.r * (kind === 'tvtower' ? 1 : scale);
+    const h = sz.h * (kind === 'tvtower' ? 0.85 + rand() * 0.45 : scale);
+    const start = kind === 'tvtower' ? city.builtRadiusM * 0.3 : 0;
+    const a0 = rand() * Math.PI * 2;
+    let placed = null;
+    for (let k = 0; k < 400 && !placed; k++) {
+      const rr = start + Math.sqrt(k) * 22;
+      const a = a0 + k * 2.39996;
+      const x = Math.cos(a) * rr, z = Math.sin(a) * rr;
+      if (out.some((m) => Math.hypot(x - m.x, z - m.z) < m.r + r + 20)) continue;
+      const nb = cityNearestStreet(net, x, z);
+      const ang = nb ? Math.atan2(nb.tz, nb.tx) : city.streetAngle;
+      if (!clAreaClear(net, x, z, r)) continue;
+      placed = { kind, x, z, ang, r, h };
+    }
+    if (placed) out.push(placed);
+  }
+  city._landmarks = out;
+  return out;
+}
+
+// 半径 r の円の中が、どの街路の舗装からも CL_STREET_CLEAR 以上離れているか。
+// 名所の敷地は建物より広く（直径30〜70m）、四隅と辺の中点だけ見ると、そのあいだを
+// 街路が1本くぐり抜けていた（130都市のうち11か所）。8mより細かい格子で見る。
+function clAreaClear(net, x, z, r) {
+  const n = Math.max(2, Math.ceil(r / 8));
+  for (let i = -n; i <= n; i++) {
+    for (let j = -n; j <= n; j++) {
+      const u = (i / n) * r, v = (j / n) * r;
+      if (u * u + v * v > r * r * 1.02) continue;
+      if (cityStreetClearance(net, x + u, z + v) < CL_STREET_CLEAR) return false;
+    }
+  }
+  return true;
 }
 
 // 間口 w（向き dir）× 奥行き d の建物の中心と四隅が、どの街路の舗装からも CL_STREET_CLEAR 以上離れているか
@@ -426,6 +605,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     CITY_COUNTRY_STYLE, cityLayoutOf, cityStyleOf, cityStreetNetwork, cityNearestStreet,
     cityStreetClearance, cityBuildingPlan, cityBuildingTarget, cityEdgeFn,
+    cityCharacterOf, cityLandmarks, CITY_HIGHLAND_M,
     CL_STREET_CLEAR, CL_STREET_HALF_W, CL_MAJOR_HALF_W, CL_LANE_HALF_W,
   };
 }

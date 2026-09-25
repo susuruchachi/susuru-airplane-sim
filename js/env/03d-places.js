@@ -120,13 +120,19 @@ function refreshCities() {
   if (!EnvState.builtCities) return; // 地形の初期化のほうが先に走るため
   const cam = EnvState.camera.position;
   const R = cityActiveRadius();
+  // 作りかけの街（並べ方を決めた・建物を途中まで作った）は、列を作り直しても続きから進める。
+  // 地形のタイルが切り替わるたびにここが呼ばれるので、捨てると速い機体では建ち終わらない
+  const prev = new Map(_cityWork.map((w) => [w.city.id, w]));
   _cityWork = [];
   for (const city of WORLD_CITIES) {
     const d = Math.hypot(city.x - cam.x, city.z - cam.z);
     const entry = EnvState.builtCities.get(city.id);
     const built = !!entry;
     // 建物まで建って街路がまだの街も戻す（列を作り直すと、残りの仕事が消えるため）
-    if (d < R && (!built || !entry.streets)) _cityWork.push({ city, d, plan: built ? true : null });
+    if (d < R && (!built || !entry.streets)) {
+      const old = prev.get(city.id);
+      if (old) { old.d = d; _cityWork.push(old); } else _cityWork.push({ city, d, plan: built ? true : null });
+    }
     else if (d >= R && built) disposeCityInstance(city.id);
   }
   // 近い街から建てる（見ている場所ほど早く出てほしい）
@@ -142,7 +148,9 @@ function updateCities() {
       if (entry) { _cityWork.shift(); continue; } // もう建っている
       w.plan = cityBuildingPlan(w.city); // 街路網もここで作られる（街に持たせてある）
     } else if (!entry) {
-      buildCityInstance(w.city, w.plan);
+      // 建物は CITY_BUILD_CHUNK 軒ずつ、何フレームかに分けて作る
+      if (!w.job) w.job = cityBuildStart(w.city, w.plan);
+      if (cityBuildStep(w.job, CITY_BUILD_CHUNK)) { cityBuildFinish(w.job); w.job = null; }
     } else {
       _cityWork.shift();
       if (!entry.streets) addCityStreets(entry);
@@ -170,18 +178,26 @@ function disposeCityInstance(id) {
 
 // 都市1つぶんの建物メッシュと夜景の灯りを作る。
 // 頂点は街の中心からのローカル座標で持ち、位置はメッシュ側に入れる（遠方でのfloat32対策）。
-function buildCityInstance(city, plan) {
-  const rand = placesRng(city.id + ':lights');
-  const radius = city.builtRadiusM;
-  plan = plan || cityBuildingPlan(city);
-  const buildingCount = plan.length;
+//
+// **何フレームかに分けて作る**（cityBuildStart → cityBuildStep をくり返す → cityBuildFinish）。
+// 屋根・高層ビル・名所の形を付けたら、建物の多い街（路地の街タラバード1,927軒）で
+// 1回に78msかかるようになった。CITY_BUILD_CHUNK 軒ずつ進めて、1フレームの引っかかりを抑える。
+// buildCityInstance は一気に作る版（検証やその場で建て直すとき用）。
+const CITY_BUILD_CHUNK = 500;
 
-  const positions = [], normals = [], colors = [];
-  const lightPositions = [], lightColors = [];
+function cityBuildStart(city, plan) {
+  return { city, plan: plan || cityBuildingPlan(city), i: 0, S: cityShapeSink(), lit: [],
+    rand: placesRng(city.id + ':lights') };
+}
 
-  // 建物の並び（どこに・どの向きで・どの大きさで）は 03j-city-layout.js が決める。
+// n 軒ぶん進める。全部建て終わったら true
+function cityBuildStep(job, n) {
+  const { city, plan, S, lit, rand } = job;
+  const end = Math.min(plan.length, job.i + n);
+  // 建物の並び（どこに・どの向きで・どの大きさで・どの形で）は 03j-city-layout.js が決める。
   // いちばん近い街路に面して、その向きに揃えて建てる。
-  for (const bld of plan) {
+  for (; job.i < end; job.i++) {
+    const bld = plan[job.i];
     const ox = bld.x, oz = bld.z;
     // 地形メッシュの上の高さを使う。worldHeightAt の値だと、
     // 地形が格子点の間を三角形で結んでいるぶんだけ建物が浮いたり埋まったりする。
@@ -193,21 +209,33 @@ function buildCityInstance(city, plan) {
     // 向きを付けたぶん四隅は回るが、外接する正方形で見ておけば取りこぼさない。
     const span = Math.max(bld.w, bld.d);
     if (cityFootprintWet(city.x + ox, city.z + oz, span, span, ground)) continue;
-    const localY = ground - city.groundY;
-    const h = bld.h;
-
-    const hex = bld.color;
-    const r = ((hex >> 16) & 255) / 255, g = ((hex >> 8) & 255) / 255, b = (hex & 255) / 255;
-
-    // 斜面で建物が浮かないよう、少し地面へ埋める
-    pushBox(positions, normals, colors, ox, localY - 3, oz, bld.w, h + 3, bld.d, r, g, b, bld.ang);
-
-    for (let k = 0; k < 2; k++) {
-      const warm = 0.70 + rand() * 0.30;
-      lightPositions.push(ox, localY + (k === 0 ? h * 0.9 : CITY_LIGHT_Y * 0.4), oz);
-      lightColors.push(warm, warm * 0.66, warm * 0.34);
-    }
+    cityShapeBuilding(S, bld, ground - city.groundY, lit, rand);
   }
+  return job.i >= plan.length;
+}
+
+function buildCityInstance(city, plan) {
+  const job = cityBuildStart(city, plan);
+  cityBuildStep(job, Infinity);
+  cityBuildFinish(job);
+}
+
+function cityBuildFinish(job) {
+  const { city, plan, S, lit, rand } = job;
+  const radius = city.builtRadiusM;
+  const buildingCount = plan.length;
+  const lightPositions = [], lightColors = [];
+  // 街の真ん中の名所（教会・丸屋根・塔など）
+  for (const m of cityLandmarks(city)) {
+    const ground = terrainSurfaceHeightAt(city.x + m.x, city.z + m.z);
+    if (ground <= 0.5 || cityFootprintWet(city.x + m.x, city.z + m.z, m.r * 2, m.r * 2, ground)) continue;
+    cityShapeLandmark(S, m, ground - city.groundY, lit, city.country);
+  }
+  for (let i = 0; i < lit.length; i += 6) {
+    lightPositions.push(lit[i], lit[i + 1], lit[i + 2]);
+    lightColors.push(lit[i + 3], lit[i + 4], lit[i + 5]);
+  }
+  const positions = S.p, normals = S.n, colors = S.c;
 
   // 街の外側にも街灯をまばらに置いて、郊外のにじみを作る
   for (let i = 0, n = Math.round(buildingCount * 0.9); i < n; i++) {
