@@ -758,7 +758,7 @@ function updateSea(dt) {
   U.uWaterWind.value.set(Math.cos(d), Math.sin(d));
   U.uWaterWindMps.value = EnvState.env.windSpeedKmh / 3.6;
   if (EnvState.sunLight) {
-    U.uWaterSunDir.value.copy(EnvState.sunLight.position).normalize();
+    U.uWaterSunDir.value.copy(EnvState.sunDirection || EnvState.sunLight.position).normalize();
     U.uWaterSunColor.value.copy(EnvState.sunLight.color).multiplyScalar(EnvState.sunLight.intensity / 1.5);
   }
   if (EnvState.scene.fog) {

@@ -333,6 +333,10 @@ body.touch-controls #hudHelp { display:none; }
     <div class="env-group">
       <div class="env-row"><label>コマ落ちするとき</label><span id="envFpsReadout" class="val">-- fps</span></div>
       <div id="envQualityButtons" style="display:flex;gap:6px;margin-top:8px;"></div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;">
+        <input type="checkbox" id="envShadowsOn" checked>
+        <span>影を落とす（画質「高」「中」のとき）</span>
+      </label>
       <div class="env-note" style="margin-top:8px;">
         地形・街・木・雲を実体化する範囲と、画面の解像度を下げます。近くの地形の
         細かさ（滑走路など）や、脚・当たり判定には影響しません。
@@ -562,6 +566,7 @@ body.touch-controls #hudHelp { display:none; }
 <script src="js/00-version.js" onerror="_markFailed('js/00-version.js')"></script>
 <script src="js/env/01-env-state.js" onerror="_markFailed('js/env/01-env-state.js')"></script>
 <script src="js/env/02-env-scene.js" onerror="_markFailed('js/env/02-env-scene.js')"></script>
+<script src="js/env/03m-shadows.js" onerror="_markFailed('js/env/03m-shadows.js')"></script>
 <script src="js/env/03-sky.js" onerror="_markFailed('js/env/03-sky.js')"></script>
 <script src="js/env/03b-world.js" onerror="_markFailed('js/env/03b-world.js')"></script>
 <script src="js/env/03c-terrain.js" onerror="_markFailed('js/env/03c-terrain.js')"></script>

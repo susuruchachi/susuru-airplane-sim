@@ -91,6 +91,9 @@ function updateSkyForSunDirection(sunDir, elevationDeg) {
   EnvState.sunMesh.position.copy(sunDir).multiplyScalar(ENV_SUN_DISTANCE);
   EnvState.moonMesh.position.copy(moonDir).multiplyScalar(ENV_MOON_DISTANCE);
   EnvState.sunLight.position.copy(sunDir).multiplyScalar(500);
+  // 光の向きはここに持つ。影を描くときは光の位置と狙う点を見ている場所へ動かすので（03m-shadows.js）、
+  // 位置から向きを読むと狂う
+  EnvState.sunDirection = (EnvState.sunDirection || new THREE.Vector3()).copy(sunDir).normalize();
   EnvState.moonLight.position.copy(moonDir).multiplyScalar(500);
 
   // 日中度合い（市民薄明の目安：仰角-6°〜10°でなだらかに切り替える）

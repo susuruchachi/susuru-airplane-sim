@@ -7,6 +7,7 @@ function bootstrapEnv() {
     initWorld();     // 地形の高さ関数・国・都市・空港を用意する（以降すべての土台）
     initEnvScene();
     initSky();
+    initShadows();   // 太陽の影（03m-shadows.js）
     initTerrain();   // 地形と海。以降の都市・空港はこの高さの上に載る
     initWater();     // 川と湖の水面
     initRoads();     // 街と街・街と空港を結ぶ道路（地形の上に敷くので地形のあと）

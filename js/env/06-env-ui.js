@@ -154,6 +154,8 @@ function syncEnvUIToState() {
   document.getElementById('envShowLabels').checked = EnvState.env.labelsVisible !== false;
   document.getElementById('envShowTrees').checked = EnvState.env.treesVisible !== false;
   document.getElementById('envShowRadar').checked = EnvState.env.radarVisible === true;
+  const shadowsBox = document.getElementById('envShadowsOn');
+  if (shadowsBox) shadowsBox.checked = EnvState.env.shadowsOn !== false;
 
   const qualityHost = document.getElementById('envQualityButtons');
   if (qualityHost) {
@@ -199,6 +201,12 @@ function setupWorldUI() {
   const showTrees = document.getElementById('envShowTrees');
   showTrees.checked = EnvState.env.treesVisible !== false;
   showTrees.addEventListener('change', () => setTreesVisible(showTrees.checked));
+
+  const shadowsOn = document.getElementById('envShadowsOn');
+  if (shadowsOn) {
+    shadowsOn.checked = EnvState.env.shadowsOn !== false;
+    shadowsOn.addEventListener('change', () => { EnvState.env.shadowsOn = shadowsOn.checked; });
+  }
 
   const showRadar = document.getElementById('envShowRadar');
   showRadar.checked = EnvState.env.radarVisible === true;

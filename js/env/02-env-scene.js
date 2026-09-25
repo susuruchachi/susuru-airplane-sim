@@ -142,5 +142,6 @@ function animateEnv() {
   updateEnvWorldReadout();
   if (typeof updateFpsReadout === 'function') updateFpsReadout();
   if (typeof updateSound === 'function') updateSound(dt);  // 機体の状態から音を合成する
+  if (typeof updateShadows === 'function') updateShadows();  // 影の地図を見ている場所へ合わせる
   EnvState.renderer.render(EnvState.scene, EnvState.camera);
 }

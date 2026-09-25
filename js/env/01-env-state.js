@@ -155,6 +155,7 @@ const EnvState = {
     windFromWeather: true,   // 風速を天候に任せるか（風向はいつでも手動）
     soundOn: true,           // 音を鳴らすか
     soundVolume: 0.7,        // 音量（0〜1）
+    shadowsOn: true,         // 太陽の影（js/env/03m-shadows.js。画質「低」では描かない）
     quality: 'high',         // 画質プリセット 'high'|'medium'|'low'（js/env/03h-env-quality.js）
   },
 };
