@@ -519,19 +519,13 @@ const SEA_RING_COUNT = 64;
 const SEA_SECTOR_COUNT = 96;
 const SEA_INNER_R = 30;
 const SEA_OUTER_R = 400000;      // カメラのfarを全方位で覆える大きさ
-const SEA_WAVE_PATTERN_M = 9000; // ノーマルマップ1タイルぶんの実寸
 
-let _seaWaveDrift = { x: 0, y: 0 };
-
-// 中心が細かく外側ほど粗い円盤を作る。UVはワールド座標そのままにしておき、
-// 板をカメラへ動かしたぶんはテクスチャのoffsetで打ち消す（うねりが付いて来ないように）。
+// 中心が細かく外側ほど粗い円盤を作る。波の模様はシェーダーがワールド座標から決める（applyWaterSurface）。
 function buildSeaGeometry() {
   const rings = SEA_RING_COUNT, sectors = SEA_SECTOR_COUNT;
   const vertCount = 1 + rings * sectors;
   const positions = new Float32Array(vertCount * 3);
   const normals = new Float32Array(vertCount * 3);
-  const uvs = new Float32Array(vertCount * 2);
-  const P = SEA_WAVE_PATTERN_M;
 
   normals[1] = 1;
 
@@ -544,7 +538,6 @@ function buildSeaGeometry() {
       const x = Math.cos(a) * r, z = Math.sin(a) * r;
       positions[vi * 3] = x; positions[vi * 3 + 2] = z;
       normals[vi * 3 + 1] = 1;
-      uvs[vi * 2] = x / P; uvs[vi * 2 + 1] = z / P;
     }
   }
 
@@ -564,47 +557,153 @@ function buildSeaGeometry() {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
   geo.setIndex(indices);
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), SEA_OUTER_R);
   return geo;
 }
 
 // 浅瀬の色は海底（地形）側が持っているので、ここでは
-// 「深い青の半透明の水面＋太陽の映り込み」だけを用意する。
+// 「深い青の半透明の水面＋波・空の映り込み・太陽のきらめき」を用意する（applyWaterSurface）。
 function initSea() {
-  const nmap = buildSeaNormalTexture();
-  nmap.wrapS = nmap.wrapT = THREE.RepeatWrapping;
-
   const mat = new THREE.MeshPhongMaterial({
-    color: 0x0b2135, specular: 0x8fb4cf, shininess: 140,
-    transparent: true, opacity: 0.80, side: THREE.DoubleSide, normalMap: nmap,
+    color: 0x0b2135, specular: WATER_SPECULAR, shininess: 220,
+    transparent: true, opacity: 0.80, side: THREE.DoubleSide,
   });
-  mat.normalScale.set(0.32, 0.32);
+  applyWaterSurface(mat, { waves: 1 });
 
   EnvState.sea = new THREE.Mesh(buildSeaGeometry(), mat);
   EnvState.sea.frustumCulled = false; // 常にカメラの真下にあるので判定するだけ無駄
   EnvState.sea.renderOrder = ENV_ORDER.sea;   // 半透明なので地形より後に描く
   EnvState.scene.add(EnvState.sea);
-  EnvState.seaNormalMap = nmap;
 }
 
-// うねり用のノーマルマップ。サイン波の重ね合わせだけで作ると継ぎ目なくタイルできる。
-function buildSeaNormalTexture() {
+// --- 水面のシェーダー（海・川・湖で共有） ------------------------------------------
+//
+// 以前の海は「9km周期のゆるいうねりのノーマルマップ＋Phong」で、上から見ても低く見ても
+// のっぺりした青い板だった。次の3つを足す：
+//   ・波 … 周期の違う4枚の波のノーマルマップ（16m・64m・256m・1024m）を、それぞれ違う向き・速さで流して重ねる。
+//          細かい波は遠くでは縞（モアレ）になるので、周期の数十倍より遠くでは消す（遠くの海は鏡のように凪いで見える）
+//   ・空の映り込み … フレネル（真上からは2%、水平に近いほど100%）で空の色を映す。低く見るほど海が明るく空の色になる
+//   ・太陽のきらめき … 波の法線で太陽を映す鋭いハイライト。細かい波の1枚1枚が光るので、太陽の下にきらきらした道ができる
+//
+// 波の模様の座標：ワールド座標をそのまま使うと、原点から1,500km離れた所では float32 の精度が0.1m程度に
+// 落ちる（波の周期16mには十分）。さらに大きな数の sin を避けるため、カメラ位置を4096mで丸めた値を引いてから使う
+// （4096は4枚の周期すべての倍数なので、引いても模様は途切れない）。
+const WATER_WAVE_TILES = [16, 64, 256, 1024];
+// Phongの広いハイライトは弱くする（太陽の映り込みは波ごとの鋭いきらめきのほうに任せる。
+// 強いままだと、太陽の下が一面白くつぶれた）
+const WATER_SPECULAR = 0x2a3a48;
+const WATER_WAVE_SHIFT_M = 4096;
+const _waterUniforms = {
+  uWaterTime: { value: 0 },
+  uWaterShift: { value: new THREE.Vector2() },
+  uWaterWind: { value: new THREE.Vector2(1, 0) },   // 波の進む向き（xz）
+  uWaterWindMps: { value: 4 },
+  uWaterSunDir: { value: new THREE.Vector3(0, 1, 0) },
+  uWaterSunColor: { value: new THREE.Color(1, 1, 1) },
+  uWaterSkyHorizon: { value: new THREE.Color(0xbfd6e8) },
+  uWaterSkyZenith: { value: new THREE.Color(0x3d6aa3) },
+  uWaterNormalMap: { value: null },
+};
+
+function applyWaterSurface(material, opts) {
+  if (!_waterUniforms.uWaterNormalMap.value) {
+    const tex = buildWaterNormalTexture();
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    _waterUniforms.uWaterNormalMap.value = tex;
+  }
+  const waves = (opts && opts.waves !== undefined ? opts.waves : 1).toFixed(3);
+  const prev = material.onBeforeCompile;
+  // 既定の customProgramCacheKey は this.onBeforeCompile を読むので、自前で付けたもの（applyDepthPull）だけを引き継ぐ
+  const prevKey = Object.prototype.hasOwnProperty.call(material, 'customProgramCacheKey')
+    ? material.customProgramCacheKey : null;
+  material.onBeforeCompile = (shader, renderer) => {
+    if (prev) prev(shader, renderer);
+    Object.assign(shader.uniforms, _waterUniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vWaterWorld;')
+      .replace('#include <worldpos_vertex>', [
+        '#include <worldpos_vertex>',
+        'vWaterWorld = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;',
+      ].join('\n'));
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', [
+        '#include <common>',
+        'varying vec3 vWaterWorld;',
+        'uniform float uWaterTime;',
+        'uniform vec2 uWaterShift;',
+        'uniform vec2 uWaterWind;',
+        'uniform float uWaterWindMps;',
+        'uniform vec3 uWaterSunDir;',
+        'uniform vec3 uWaterSunColor;',
+        'uniform vec3 uWaterSkyHorizon;',
+        'uniform vec3 uWaterSkyZenith;',
+        'uniform sampler2D uWaterNormalMap;',
+        // 1枚ぶんの波。tile … 周期(m)、dir … 流れる向き、spd … 速さ(m/s)、fade … この距離より遠くでは消す
+        'vec2 waterWave( vec2 p, float tile, vec2 dir, float spd, float dist, float fade ) {',
+        '  vec2 uv = ( p + dir * ( uWaterTime * spd ) ) / tile;',
+        '  vec3 n = texture2D( uWaterNormalMap, uv ).xyz * 2.0 - 1.0;',
+        '  return n.xy / max( n.z, 0.2 ) * ( 1.0 - smoothstep( fade * 0.35, fade, dist ) );',
+        '}',
+      ].join('\n'))
+      .replace('#include <normal_fragment_maps>', [
+        '#include <normal_fragment_maps>',
+        '{',
+        '  vec2 p = vWaterWorld.xz - uWaterShift;',
+        '  float dist = length( cameraPosition - vWaterWorld );',
+        '  vec2 w = normalize( uWaterWind + vec2( 1e-4 ) );',
+        '  vec2 w2 = vec2( w.x * 0.8 - w.y * 0.6, w.x * 0.6 + w.y * 0.8 );',   // 37°ずらした向き
+        '  vec2 w3 = vec2( w.x * 0.8 + w.y * 0.6, -w.x * 0.6 + w.y * 0.8 );',
+        '  float calm = clamp( 0.55 + uWaterWindMps / 10.0, 0.55, 1.6 );',     // 風が強いほど波が立つ
+        '  vec2 s = waterWave( p, 16.0, w, 1.6, dist, 3000.0 ) * 0.55',
+        '         + waterWave( p, 64.0, w2, 3.0, dist, 10000.0 ) * 0.5',
+        '         + waterWave( p, 256.0, w3, 5.5, dist, 36000.0 ) * 0.5',
+        '         + waterWave( p, 1024.0, w, 9.0, dist, 120000.0 ) * 0.4;',
+        `  s *= calm * ${waves};`,
+        '  vec3 nW = normalize( vec3( -s.x, 1.0, -s.y ) );',
+        '  normal = normalize( ( viewMatrix * vec4( nW, 0.0 ) ).xyz );',
+        '}',
+      ].join('\n'))
+      .replace('#include <output_fragment>', [
+        '#include <output_fragment>',
+        '{',
+        '  vec3 nW = normalize( inverseTransformDirection( normal, viewMatrix ) );',
+        '  vec3 V = normalize( cameraPosition - vWaterWorld );',
+        '  if ( dot( nW, V ) < 0.0 ) nW = normalize( nW - 2.0 * dot( nW, V ) * V );',  // 裏からの見え方で縁が黒くならない
+        '  float cosV = clamp( dot( nW, V ), 0.0, 1.0 );',
+        '  float F = 0.02 + 0.98 * pow( 1.0 - cosV, 5.0 );',
+        '  vec3 R = reflect( -V, nW );',
+        '  vec3 sky = mix( uWaterSkyHorizon, uWaterSkyZenith, pow( clamp( R.y, 0.0, 1.0 ), 0.6 ) );',
+        '  float glint = pow( max( dot( R, uWaterSunDir ), 0.0 ), 1400.0 ) * 5.0',
+        '              + pow( max( dot( R, uWaterSunDir ), 0.0 ), 120.0 ) * 0.08;',
+        '  gl_FragColor.rgb = mix( gl_FragColor.rgb, sky, F ) + uWaterSunColor * glint;',
+        '  gl_FragColor.a = mix( gl_FragColor.a, 1.0, F );',
+        '}',
+      ].join('\n'));
+  };
+  material.customProgramCacheKey = () => `water:${waves}:${prevKey ? prevKey.call(material) : ''}`;
+  return material;
+}
+
+// 波のノーマルマップ。整数の波数を持つ正弦波（向きはばらばら）を重ねて継ぎ目なくタイルさせる。
+// 波長の短い成分ほど小さく（波数^-1.6）して、実際の海の波のスペクトルに似せる。
+// 以前の5本だけの重ね合わせでは、規則正しい縞がそのまま見えた。
+function buildWaterNormalTexture() {
   const size = 256;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d');
   const img = ctx.createImageData(size, size);
   const height = new Float32Array(size * size);
-
-  const waves = [
-    { fx: 1, fz: 2, a: 1.0, p: 0.0 },
-    { fx: 3, fz: -1, a: 0.55, p: 1.1 },
-    { fx: -2, fz: 3, a: 0.4, p: 2.3 },
-    { fx: 5, fz: 4, a: 0.22, p: 0.7 },
-    { fx: -6, fz: 2, a: 0.15, p: 3.1 },
-  ];
+  const rand = worldRng('water-waves');
+  const waves = [];
+  for (let k = 0; k < 48; k++) {
+    const mag = 2 + Math.floor(rand() * 22);
+    const a = rand() * Math.PI * 2;
+    const fx = Math.round(Math.cos(a) * mag), fz = Math.round(Math.sin(a) * mag);
+    if (!fx && !fz) continue;
+    waves.push({ fx, fz, a: Math.pow(Math.hypot(fx, fz), -1.6), p: rand() * Math.PI * 2 });
+  }
   for (let j = 0; j < size; j++) {
     for (let i = 0; i < size; i++) {
       const u = (i / size) * Math.PI * 2, v = (j / size) * Math.PI * 2;
@@ -613,31 +712,36 @@ function buildSeaNormalTexture() {
       height[j * size + i] = h;
     }
   }
-
+  let maxG = 1e-6;
+  const gx = new Float32Array(size * size), gz = new Float32Array(size * size);
   for (let j = 0; j < size; j++) {
     for (let i = 0; i < size; i++) {
       const il = (i - 1 + size) % size, ir = (i + 1) % size;
       const jl = (j - 1 + size) % size, jr = (j + 1) % size;
-      const nx = -(height[j * size + ir] - height[j * size + il]);
-      const nz = -(height[jr * size + i] - height[jl * size + i]);
-      const ny = 2.6;
-      const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
-      const o = (j * size + i) * 4;
-      img.data[o] = ((nx / len) * 0.5 + 0.5) * 255;
-      img.data[o + 1] = ((nz / len) * 0.5 + 0.5) * 255;
-      img.data[o + 2] = ((ny / len) * 0.5 + 0.5) * 255;
-      img.data[o + 3] = 255;
+      gx[j * size + i] = (height[j * size + ir] - height[j * size + il]) * 0.5;
+      gz[j * size + i] = (height[jr * size + i] - height[jl * size + i]) * 0.5;
+      maxG = Math.max(maxG, Math.abs(gx[j * size + i]), Math.abs(gz[j * size + i]));
     }
+  }
+  // いちばん急なところで傾き約35°になるように揃える（シェーダー側で波の強さを掛ける）
+  const k = 0.7 / maxG;
+  for (let q = 0; q < size * size; q++) {
+    const nx = -gx[q] * k, nz = -gz[q] * k, ny = 1;
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    img.data[q * 4] = ((nx / len) * 0.5 + 0.5) * 255;
+    img.data[q * 4 + 1] = ((nz / len) * 0.5 + 0.5) * 255;
+    img.data[q * 4 + 2] = ((ny / len) * 0.5 + 0.5) * 255;
+    img.data[q * 4 + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
   const tex = new THREE.CanvasTexture(canvas);
   tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.anisotropy = 4;
   return tex;
 }
 
-// 海面をカメラへ追従させ、うねりをゆっくり流す（風向・風速に合わせる）。
-// メッシュを動かすとうねりの模様も一緒に付いてきてしまうので、
-// 動かしたぶんをUVのoffsetで打ち消し、模様はワールドに対して止まって見えるようにする。
+// 海面をカメラへ追従させ、波を流す（風向・風速に合わせる）。
+// 波の模様はワールド座標で決まるので、板を動かしても模様は付いてこない。
 function updateSea(dt) {
   if (!EnvState.sea) return;
 
@@ -645,14 +749,25 @@ function updateSea(dt) {
   EnvState.sea.position.x = cam.x;
   EnvState.sea.position.z = cam.z;
 
+  const U = _waterUniforms;
+  U.uWaterTime.value = (U.uWaterTime.value + dt) % 3600;
+  U.uWaterShift.value.set(Math.floor(cam.x / WATER_WAVE_SHIFT_M) * WATER_WAVE_SHIFT_M,
+    Math.floor(cam.z / WATER_WAVE_SHIFT_M) * WATER_WAVE_SHIFT_M);
+  // windDirectionDeg は風が吹いてくる向き。波はその反対へ進む
   const d = THREE.MathUtils.degToRad(EnvState.env.windDirectionDeg);
-  const speed = ((EnvState.env.windSpeedKmh / 3.6) / SEA_WAVE_PATTERN_M) * 0.35;
-  _seaWaveDrift.x += Math.cos(d) * speed * dt;
-  _seaWaveDrift.y += Math.sin(d) * speed * dt;
-
-  EnvState.seaNormalMap.offset.x = cam.x / SEA_WAVE_PATTERN_M + _seaWaveDrift.x;
-  EnvState.seaNormalMap.offset.y = cam.z / SEA_WAVE_PATTERN_M + _seaWaveDrift.y;
+  U.uWaterWind.value.set(-Math.sin(d), Math.cos(d));
+  U.uWaterWindMps.value = EnvState.env.windSpeedKmh / 3.6;
+  if (EnvState.sunLight) {
+    U.uWaterSunDir.value.copy(EnvState.sunLight.position).normalize();
+    U.uWaterSunColor.value.copy(EnvState.sunLight.color).multiplyScalar(EnvState.sunLight.intensity / 1.5);
+  }
+  if (EnvState.scene.fog) {
+    // 水平線の近くは霧の色、真上ほど濃い空の色を映す
+    U.uWaterSkyHorizon.value.copy(EnvState.scene.fog.color);
+    U.uWaterSkyZenith.value.copy(EnvState.scene.fog.color).multiply(_waterZenithTint);
+  }
 }
+const _waterZenithTint = new THREE.Color(0.42, 0.6, 0.92);
 
 // 夜は海面も暗くする（03-sky.js の updateSkyForSunDirection から呼ばれる）
 function updateSeaForDaylight(dayFactor, warmth) {
@@ -661,5 +776,5 @@ function updateSeaForDaylight(dayFactor, warmth) {
   const night = new THREE.Color(0x030913);
   const day = new THREE.Color(0x0b2135).lerp(new THREE.Color(0x123049), warmth * 0.5);
   mat.color.copy(night).lerp(day, dayFactor);
-  mat.specular.setHex(0x8fb4cf).multiplyScalar(0.25 + dayFactor * 0.75);
+  mat.specular.setHex(WATER_SPECULAR).multiplyScalar(0.25 + dayFactor * 0.75);
 }

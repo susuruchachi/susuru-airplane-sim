@@ -66,7 +66,6 @@ const EnvState = {
   terrainGroup: null,
   terrainMaterial: null,
   sea: null,
-  seaNormalMap: null,
 
   // 川と湖の水面（地形と同じくカメラの周りだけ作る）
   waterGroup: null,

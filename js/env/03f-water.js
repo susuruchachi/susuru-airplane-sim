@@ -21,16 +21,30 @@ const RIVER_DEPTH_PULL = 2e-3;
 const RIVER_DEPTH_SLOPE_PX = 2;
 const RIVER_DEPTH_ABS_M = 4;
 
+const WATER_INLAND_WAVES = 0.45; // 川・湖の波の強さ（海を1として）
+
+// 河口の近くでは川床が海面下まで下がる（入り江・三角州）。そこの水は海の水面が
+// 引き受けるが、川幅（半幅100〜250m）は地形のLODの格子（310m〜）より細いので、
+// 地形のメッシュには谷が出ず、陸のまま描かれる——川が海岸の数km手前で途切れて見えた。
+// 両岸がまだ陸（この高さより上）のあいだは、川面を海面の高さで張り続ける。
+// 岸を見る位置は、川幅の外へこれだけ出た所。
+const RIVER_BANK_PROBE_M = 60;
+const RIVER_BANK_LAND_M = 0.3;
+
 function initWater() {
   EnvState.waterGroup = new THREE.Group();
   EnvState.scene.add(EnvState.waterGroup);
   EnvState.builtWater = new Map();
 
-  // 川と湖で共有する水面のマテリアル。海より浅い色で、映り込みも控えめにする。
-  EnvState.waterMaterial = new THREE.MeshPhongMaterial({
-    color: 0x14303f, specular: 0x6f93ad, shininess: 90,
-    transparent: true, opacity: 0.82, side: THREE.DoubleSide,
+  // 川と湖の水面のマテリアル。**海と同じ色・同じ透け方・同じ波のシェーダー**にする。
+  // 以前は海より明るい色（0x14303f・不透明度0.82・映り込み控えめ）にしていたので、
+  // 河口で川面が海へ入るところ（三角州の付け根）に色の境がはっきり出ていた。
+  // 波は海より小さくする（風の吹き渡る距離が短い）。
+  const makeWaterMaterial = () => new THREE.MeshPhongMaterial({
+    color: 0x0b2135, specular: WATER_SPECULAR, shininess: 220,
+    transparent: true, opacity: 0.80, side: THREE.DoubleSide,
   });
+  EnvState.waterMaterial = applyWaterSurface(makeWaterMaterial(), { waves: WATER_INLAND_WAVES });
   // 水面は地形とほとんど同じ高さに乗る薄い面なので、滑走路の路面標識と同じく
   // デカール用の深度バイアスをかける。これが無いと、遠方のLODが粗いところで
   // 地形が水面を突き抜け、川がちぎれて見える。
@@ -41,8 +55,15 @@ function initWater() {
   // 地形のLODが310m以上の格子を直線でつなぐぶんの誤差が水深5mを超え、地形が
   // 傾いた川面を斜めに横切って、水面の縁がのこぎりの歯のように欠けて見えた。
   // 湖は岸の線で水面を切っているので寄せない（寄せると岸の斜面に水がにじむ）。
-  EnvState.riverWaterMaterial = applyDepthPull(EnvState.waterMaterial.clone(),
-    RIVER_DEPTH_PULL, 1, RIVER_DEPTH_SLOPE_PX, RIVER_DEPTH_ABS_M);
+  EnvState.riverWaterMaterial = applyWaterSurface(applyDepthPull(makeWaterMaterial(),
+    RIVER_DEPTH_PULL, 1, RIVER_DEPTH_SLOPE_PX, RIVER_DEPTH_ABS_M), { waves: WATER_INLAND_WAVES });
+  // 川面どうし（本流と分流の付け根、支流の合流）が重なるところを二重に塗らない。
+  // 半透明なので、重なったところだけ帯状に暗くなる。1画素に1回だけ塗る（ステンシル）。
+  const m = EnvState.riverWaterMaterial;
+  m.stencilWrite = true;
+  m.stencilRef = 1;
+  m.stencilFunc = THREE.NotEqualStencilFunc;
+  m.stencilZPass = THREE.ReplaceStencilOp;
 
   refreshWater();
 }
@@ -94,11 +115,32 @@ function riverSurfaceY(p) {
   return bed + RIVER_WATER_DEPTH_M;
 }
 
-// 川の水面を張ってよい点か。海面より下（河口の先）と湖の中は張らない。
-// 河口の先はもう海で、湖の中は湖の水面が引き受ける。張ってしまうと半透明の面が
-// 二重になって、そこだけ帯状に暗くなる。
+// 川の水面を張ってよい点か。湖の中は湖の水面が引き受けるので張らない。
+// 海面より下（河口の近く）は、両岸がまだ陸のあいだ（p.land）だけ張る——その先は海の水面が引き受ける。
+// 海の上に張った川面は深度を手前へ寄せてあるので、同じ高さの海面はその奥に隠れ、二重には塗られない。
 function riverPointWet(p) {
-  return riverSurfaceY(p) > 0 && !worldLakeFootprintAt(p.x, p.z);
+  return (riverSurfaceY(p) > 0 || p.land) && !worldLakeFootprintAt(p.x, p.z);
+}
+
+// 川面を張る高さ。海面より下には張らない（その高さの水は海そのもの）
+function riverRibbonY(p) {
+  return Math.max(riverSurfaceY(p), 0);
+}
+
+// 点列の各点に「両岸がまだ陸か」（land）を付けた写しを返す
+function riverAnnotateBanks(pts) {
+  const n = pts.length;
+  return pts.map((p, i) => {
+    const q = Object.assign({}, p);
+    if (riverSurfaceY(p) > 0) return q; // 海面より上なら、岸を見るまでもなく張る
+    const a = pts[Math.max(i - 1, 0)], b = pts[Math.min(i + 1, n - 1)];
+    const len = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+    const px = -(b.z - a.z) / len, pz = (b.x - a.x) / len;
+    const off = (p.halfWidth || 12) + RIVER_BANK_MARGIN_M + RIVER_BANK_PROBE_M;
+    q.land = worldHeightAt(p.x + px * off, p.z + pz * off) > RIVER_BANK_LAND_M
+      || worldHeightAt(p.x - px * off, p.z - pz * off) > RIVER_BANK_LAND_M;
+    return q;
+  });
 }
 
 // 張る点と張らない点のあいだで、岸（または海面）をまたぐところを探す。
@@ -111,6 +153,7 @@ function riverEdgePoint(wet, dry) {
     z: wet.z + (dry.z - wet.z) * t,
     bedH: riverSurfaceY(wet) + (riverSurfaceY(dry) - riverSurfaceY(wet)) * t - RIVER_WATER_DEPTH_M,
     halfWidth: (wet.halfWidth || 12) + ((dry.halfWidth || 12) - (wet.halfWidth || 12)) * t,
+    land: t < 0.5 ? wet.land : dry.land,
   });
   for (let k = 0; k < 14; k++) {
     const t = (lo + hi) / 2;
@@ -147,7 +190,7 @@ function riverWetRuns(pts) {
 
 // 経路に沿って左右へ幅を振り、帯状のメッシュにする
 function buildRiverInstance(river) {
-  const runs = riverWetRuns(river.points);
+  const runs = riverWetRuns(riverAnnotateBanks(river.points));
   if (!runs.length) return;
 
   // 河口に街がある川は川床を海面下まで下げられない（worldMouthCityGuard）ので、
@@ -161,6 +204,11 @@ function buildRiverInstance(river) {
       x: last.x + (last.x - prev.x), z: last.z + (last.z - prev.z),
       bedH: -RIVER_WATER_DEPTH_M, halfWidth: last.halfWidth,
     });
+  }
+  // 三角州の分流にも川面を張る。分流も地形のLODより細いので、張らないと
+  // 地形のメッシュに埋もれて、海へ届かずに砂地で行き止まるように見えた。
+  if (river.mouthBranches) {
+    for (const br of river.mouthBranches) runs.push(...riverWetRuns(riverAnnotateBanks(br)));
   }
 
   const pts0 = river.points;
@@ -184,7 +232,7 @@ function buildRiverInstance(river) {
       // 水平面内で接線に直交する向き
       const px = -tz, pz = tx;
       const w = (p.halfWidth || 12) + RIVER_BANK_MARGIN_M;
-      const y = riverSurfaceY(p);
+      const y = riverRibbonY(p);
 
       const li = v * 3, ri = v * 3 + 3;
       positions[li] = p.x - ox + px * w; positions[li + 1] = y - oy; positions[li + 2] = p.z - oz + pz * w;
@@ -266,11 +314,12 @@ function buildLakeInstance(lake) {
 // 夜は水面も暗くする（03-sky.js の updateSkyForSunDirection から呼ばれる）
 function updateWaterForDaylight(dayFactor, warmth) {
   if (!EnvState.waterMaterial) return;
-  const night = new THREE.Color(0x050c14);
-  const day = new THREE.Color(0x14303f).lerp(new THREE.Color(0x1d4055), warmth * 0.5);
+  // 海（updateSeaForDaylight）と同じ色にする（河口で色の境が出ないように）
+  const night = new THREE.Color(0x030913);
+  const day = new THREE.Color(0x0b2135).lerp(new THREE.Color(0x123049), warmth * 0.5);
   for (const mat of [EnvState.waterMaterial, EnvState.riverWaterMaterial]) {
     if (!mat) continue;
     mat.color.copy(night).lerp(day, dayFactor);
-    mat.specular.setHex(0x6f93ad).multiplyScalar(0.25 + dayFactor * 0.75);
+    mat.specular.setHex(WATER_SPECULAR).multiplyScalar(0.25 + dayFactor * 0.75);
   }
 }

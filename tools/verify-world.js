@@ -316,6 +316,46 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
       `中州 ${island.toFixed(1)}m / 分流 ${channel.toFixed(1)}m`);
   }
   summary('中州と分流のある三角州', shaped, delta);
+
+  // 三角州の縁が海面をまたぐところは急に落とす。以前は縁の数kmが海面すれすれ（0〜0.5m）で、
+  // 同じ高さの海面と重なって境がちらついた（扇の4〜14%が±0.6m以内だった）。
+  {
+    let worst = 0, worstName = '';
+    for (const d of W.WORLD_DELTAS) {
+      let thin = 0, tot = 0;
+      const R = d.reach;
+      for (let x = -R; x <= R; x += 100) for (let z = -R; z <= R; z += 100) {
+        if (x * x + z * z > R * R) continue;
+        tot++;
+        if (Math.abs(W.worldHeightAt(d.x + x, d.z + z)) < 0.6) thin++;
+      }
+      if (thin / tot > worst) { worst = thin / tot; worstName = d.river; }
+    }
+    check(worst < 0.03, '三角州の縁に海面すれすれの平地が広がっていない（±0.6m以内が扇の3%未満）',
+      `最大 ${(worst * 100).toFixed(1)}%（${worstName}）`);
+  }
+
+  // 河口が海岸まで届く。川の経路は素の地形で決めるが、あとから街・空港のアンカーと街の均しで
+  // 海岸線が沖へ出るので、以前は68の河口のうち41が海岸の手前（最大25km）の陸の中で終わっていた。
+  // 河口の向きへ歩いて、両岸（800m横）がともに海面下になるまでの距離を見る。
+  {
+    let ok = 0, n = 0, worst = 0, worstName = '';
+    for (const r of W.WORLD_RIVERS) {
+      if (!r.mouthKind) continue;
+      n++;
+      const e = r.points[r.points.length - 1], a = r.mouthAngle;
+      const fx = Math.cos(a), fz = Math.sin(a);
+      let gap = Infinity;
+      for (let s = 0; s <= 30000; s += 100) {
+        const x = e.x + fx * s, z = e.z + fz * s;
+        if (W.worldHeightAt(x - fz * 800, z + fx * 800) < 0 && W.worldHeightAt(x + fz * 800, z - fx * 800) < 0) { gap = s; break; }
+      }
+      if (gap <= 500) ok++;
+      if (gap > worst) { worst = gap; worstName = r.nameLatin; }
+    }
+    summary('海岸まで届いている河口（両岸が海になるまで500m以内）', ok, n);
+    if (ok < n) check(false, '河口が海岸まで届く', `最大 ${worst}m（${worstName}）`);
+  }
 }
 
 // --- 山の名前と標高 ---

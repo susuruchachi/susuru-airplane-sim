@@ -1134,6 +1134,9 @@ const DELTA_DRIFT_MAX = 0.30;        // 分流が扇形の向きから曲がっ�
 const DELTA_BRANCHES = 3;
 const DELTA_DEPOSIT_H = 4;           // 堆積でできる中州の高さ（海面から）
 const DELTA_DEPOSIT_FLAT = 0.45;     // 扇のこの割合までは高さを落とさない
+const DELTA_DEPOSIT_EDGE = 0.25;     // 高さの目安がこれを切ったら縁として海へ落とす（worldDeltaTarget）
+const DELTA_DEPOSIT_SINK_M = 8;      // 縁の先はこの深さまで落とす（海面を急にまたがせる）
+const DELTA_EXTRA_STEPS = 10;        // 分流を堆積の外まで伸ばすときに足してよい歩数
 
 // 経路探索で使う「なだらかにした地形」。
 // 山地の尾根ノイズは1〜3km規模の小さな窪地をいくらでも作るので、
@@ -2033,29 +2036,40 @@ function worldDepositDeltas(x, z, h) {
   const ds = _worldDeltaGrid.at(x, z);
   if (!ds) return h;
   for (let i = 0; i < ds.length; i++) {
-    const d = ds[i];
-    const vx = x - d.x, vz = z - d.z;
-    const dist = Math.hypot(vx, vz);
-    if (dist < 1 || dist > d.reach) continue;
-    // 扇の内側か（河口から沖へ向く向きとの角度で見る）
-    const a = Math.acos(worldClamp((vx * d.dx + vz * d.dz) / dist, -1, 1));
-    if (a > d.halfAngle) continue;
-    // 縁は海へなだらかに沈める。外形を波打たせないと、扇が定規で描いた
-    // 「きれいな円弧＋まっすぐな二辺」になって、上空から見たときに一目で作り物と分かる。
-    // 半径方向と角度方向の両方を、別のノイズで揺らす。
-    const wr = 0.80 + 0.32 * worldValueNoise(x * 0.00035 + 40, z * 0.00035 - 17);
-    const wa = 0.72 + 0.46 * worldValueNoise(x * 0.00021 - 63, z * 0.00021 + 88);
-    // 河口のすぐ先から減らしはじめると、分流が短い（すぐ海に出る）三角州で
-    // 中州が水面まで届かない。ターンオル川は分流が2.6kmしかなく、
-    // 中州が海面下0.2mになっていた。内側 DELTA_DEPOSIT_FLAT までは目いっぱい積もらせる。
-    const fr = 1 - worldSmooth01((dist / (d.reach * wr) - DELTA_DEPOSIT_FLAT)
-      / (1 - DELTA_DEPOSIT_FLAT));
-    const edge = d.halfAngle * wa;
-    const fa = 1 - worldSmooth01((a - edge * 0.55) / (edge * 0.45));
-    const target = DELTA_DEPOSIT_H * fr * fa;
+    const target = worldDeltaTarget(ds[i], x, z);
     if (target > h) h = target;
   }
   return h;
+}
+
+// 三角州 d が (x, z) に積もらせる高さ（扇の外なら -Infinity）。
+//
+// **縁は海面を急にまたがせる**。以前は扇の縁へ向かって 4m→0m となだらかに下げていたので、
+// 縁の数kmが海面すれすれ（0〜0.5m）の平地になり、同じ高さの海面と重なって
+// 境がちらついた（地形のLODは310m格子で、対数深度の補間の誤差がそれより大きい）。
+// ふつうの海岸も陸は+1.5mより下がらない（worldBaseHeightAt）のと同じ考えで、
+// 高さの目安 g が DELTA_DEPOSIT_EDGE を切ったら、海面下 DELTA_DEPOSIT_SINK_M まで一気に落とす。
+function worldDeltaTarget(d, x, z) {
+  const vx = x - d.x, vz = z - d.z;
+  const dist = Math.hypot(vx, vz);
+  if (dist < 1 || dist > d.reach) return -Infinity;
+  // 扇の内側か（河口から沖へ向く向きとの角度で見る）
+  const a = Math.acos(worldClamp((vx * d.dx + vz * d.dz) / dist, -1, 1));
+  if (a > d.halfAngle) return -Infinity;
+  // 縁は海へ沈める。外形を波打たせないと、扇が定規で描いた
+  // 「きれいな円弧＋まっすぐな二辺」になって、上空から見たときに一目で作り物と分かる。
+  // 半径方向と角度方向の両方を、別のノイズで揺らす。
+  const wr = 0.80 + 0.32 * worldValueNoise(x * 0.00035 + 40, z * 0.00035 - 17);
+  const wa = 0.72 + 0.46 * worldValueNoise(x * 0.00021 - 63, z * 0.00021 + 88);
+  // 河口のすぐ先から減らしはじめると、分流が短い（すぐ海に出る）三角州で
+  // 中州が水面まで届かない。ターンオル川は分流が2.6kmしかなく、
+  // 中州が海面下0.2mになっていた。内側 DELTA_DEPOSIT_FLAT までは目いっぱい積もらせる。
+  const fr = 1 - worldSmooth01((dist / (d.reach * wr) - DELTA_DEPOSIT_FLAT)
+    / (1 - DELTA_DEPOSIT_FLAT));
+  const edge = d.halfAngle * wa;
+  const fa = 1 - worldSmooth01((a - edge * 0.55) / (edge * 0.45));
+  const g = Math.min(fr * fa / DELTA_DEPOSIT_EDGE, 1);
+  return (DELTA_DEPOSIT_H + DELTA_DEPOSIT_SINK_M) * g - DELTA_DEPOSIT_SINK_M;
 }
 
 // 川の幅と川床を決め、地形を刻むための空間インデックスに入れる。
@@ -2119,6 +2133,63 @@ function worldBuildRiverGrid() {
   // 堆積の広がりは分流を歩いてみないと決まらないので、空間インデックスはここで作る
   _worldDeltaGrid = makeWorldGrid(20000);
   for (const d of WORLD_DELTAS) _worldDeltaGrid.insert(d.x, d.z, d.reach, d);
+}
+
+// 入り江の河口を、出来上がった海岸線まで伸ばす。
+//
+// 川の経路は「素の地形」の上で決めるが、そのあとで街と空港のアンカー（海岸線のノイズで
+// 沈まないよう陸を足す。半径は街で12〜32km）と街の均しが入り、海岸線が沖へ出る。
+// 経路の終わりはもとの汀線のままなので、川が海岸の手前の陸の中で終わっていた——実測で
+// 68の河口のうち41が、両岸が海になるところまで0.8km以上（Skarheimのそばのビョルステン川は22.4km、
+// アヌアヴァ川は25.3km）足りなかった。
+// 河口の向き（mouthAngle＝沖のいちばん深い向き）へ、両岸（川幅の外 MOUTH_EXTEND_PROBE_M）と
+// 中心がどれも海面下になるまで伸ばし、伸ばした区間も刻み込みの空間インデックスに入れる。
+// 三角州は分流が堆積の外まで海へ出ているので伸ばさない。
+// 街の均しが済み、川の刻み込みはまだ入っていない地形（worldHeightAt）で見ること。
+const MOUTH_EXTEND_STEP_M = 300;
+const MOUTH_EXTEND_MAX_M = 40000;
+const MOUTH_EXTEND_PROBE_M = 300;
+const MOUTH_EXTEND_RAMP_M = 1500;
+function worldExtendRiverMouths() {
+  for (const r of WORLD_RIVERS) {
+    if (r.mouthKind !== 'estuary') continue;
+    const pts = r.points;
+    const e = pts[pts.length - 1];
+    const fx = Math.cos(r.mouthAngle), fz = Math.sin(r.mouthAngle);
+    const px = -fz, pz = fx;
+    const probe = e.halfWidth + MOUTH_EXTEND_PROBE_M;
+    const sea = (x, z) => worldHeightAt(x, z) < -1
+      && worldHeightAt(x + px * probe, z + pz * probe) < -1
+      && worldHeightAt(x - px * probe, z - pz * probe) < -1;
+    if (sea(e.x, e.z)) continue;
+    let prev = e, run = 0;
+    const added = [];
+    while (run < MOUTH_EXTEND_MAX_M) {
+      run += MOUTH_EXTEND_STEP_M;
+      const x = e.x + fx * run, z = e.z + fz * run;
+      const p = {
+        x, z, h: Math.min(worldBaseHeightAt(x, z), prev.h),
+        // 川床は、水面が海面になる深さ（-RIVER_WATER_DEPTH_M）まで MOUTH_EXTEND_RAMP_M かけて下ろす。
+        // 街のそばの河口は掘る強さを抑えてあり（worldMouthCityGuard）、グリムフィヨルド川は
+        // 水面が+3.6mのまま終わる。そのまま伸ばすと、沖の海の上に川面が3.6m浮いた。
+        bedH: Math.min(e.bedH, e.bedH + (-RIVER_WATER_DEPTH_M - e.bedH)
+          * worldSmooth01(run / MOUTH_EXTEND_RAMP_M)),
+        halfWidth: e.halfWidth,
+        fromSource: e.fromSource + run,
+      };
+      added.push(p);
+      prev = p;
+      if (sea(x, z)) break;
+    }
+    let a = e;
+    for (const p of added) {
+      pts.push(p);
+      worldInsertRiverSegment(a, p);
+      a = p;
+    }
+    r.lengthM += run;
+    r.mouthExtendedM = run;
+  }
 }
 
 // 河口を掘り下げてよい強さ（0〜1）。街の上を通る河口は掘らない。
@@ -2389,7 +2460,24 @@ function worldBuildDeltaBranches(r) {
 
   // 堆積（中州）の広がりを、実際に歩いた長さに合わせる
   const d = WORLD_DELTAS.find((v) => v.river === r.id);
-  if (d) d.reach = longest * 1.15;
+  if (d) {
+    d.reach = longest * 1.15;
+    // **分流を堆積の外まで伸ばす**。堆積は歩いた長さの1.15倍（縁の揺らぎで最大1.29倍）まで
+    // 広がるので、素の地形が海面下に落ちたところで止めた分流は、その先の堆積に埋まって
+    // 行き止まりになっていた（地図では海に出ているのに、画面では砂地で終わる）。
+    // 堆積が海面下に落ちる所まで、最後の向きのまま伸ばす。
+    for (const br of out) {
+      for (let k = 0; k < DELTA_EXTRA_STEPS; k++) {
+        const e = br[br.length - 1], p = br[br.length - 2];
+        if (worldDeltaTarget(d, e.x, e.z) < -1 && worldBaseHeightAt(e.x, e.z) < -3) break;
+        const L = Math.hypot(e.x - p.x, e.z - p.z) || 1;
+        br.push({
+          x: e.x + (e.x - p.x) / L * DELTA_STEP_M, z: e.z + (e.z - p.z) / L * DELTA_STEP_M,
+          bedH: e.bedH, halfWidth: e.halfWidth,
+        });
+      }
+    }
+  }
   return out;
 }
 
@@ -3312,6 +3400,9 @@ function initWorld() {
     _worldCityGrid.insert(c.x, c.z, c.flatOuterR, c);
   }
   _worldCitiesReady = true;
+
+  // 7.5) 河口を、アンカーと街の均しが入った海岸線まで伸ばす
+  worldExtendRiverMouths();
 
   // 8) 湖と川の刻み込みを有効にする（街の均しのあと、空港の均しの前）
   _worldWaterReady = true;
