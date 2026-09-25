@@ -41,6 +41,7 @@ const AP_THR_KP_REL = 3.6;     // 速度が目標より何割ずれているか�
 // -570fpm/14.2Gまで柔らかくなった）。
 const AP_THR_KP_REL_UP = 15;
 const AP_YAW_KP = 0.05;        // 横滑り1°あたりのラダー（旋回の釣り合い）
+const AP_YAW_RATE_KD = 0.12;  // ヨーダンパー：機首の振れる速さ1°/sあたりの舵（apRudderYawDamped）
 const AP_STEER_KP = 0.05;      // 地上：方位のずれ1°あたりの前輪
 
 const AP_PITCH_MAX = 15;       // 自動操縦が指示するピッチ角の上限(°)
@@ -991,6 +992,28 @@ function apRudderForCoordination(state) {
   return apClamp(-state.betaDeg * AP_YAW_KP, -0.5, 0.5);
 }
 
+// 手で飛ばしているときのヨーダンパー。**ラダーに触っていないあいだだけ**、機首の振れる速さを
+// 止める向きに舵を足す（実機のヨーダンパーと同じく、向きそのものは直さない。曲げたければ
+// ラダーを当てればそのとおりに曲がる）。地上の滑走でも、速さが AP_MANUAL_YAW_DAMP_FROM_MPS を越えたら効かせる。
+// 無いと、横風4m/sでサンダーバード1号が滑走を始めて4秒で機首を風上へ3.5°取られ、そのあと
+// ±1.2°/s・周期2秒で左右に首を振りながら走った（「出発する瞬間に左右にぶれる」）。
+const AP_MANUAL_YAW_DAMP_FROM_MPS = 5;
+function apManualYawDamper(state) {
+  if (state.groundSpeed < AP_MANUAL_YAW_DAMP_FROM_MPS) return 0;
+  const yawRateDeg = state.angularVelocity.y * 180 / Math.PI;
+  return apClamp(yawRateDeg * AP_YAW_RATE_KD, -0.5, 0.5);
+}
+
+// 横滑りを消すのに加えて、**機首の振れる速さで止める**（ヨーダンパー）。離陸の直後と上昇で使う。
+// 横滑りだけで舵を決めていたので、浮いた瞬間の横風で振られた機首がゆっくりしか収まらず、
+// 左右に首を振った——実測でサンダーバード1号（TB1_21）が横風2.5m/sで浮いた直後、ヨー角速度
+// ±1°/s・周期1.6秒で振れ、ロールも±2.3°まで揺れていた。
+// 体軸のヨー角速度は、正のとき機首が左へ回る（方位が減る）向き。
+function apRudderYawDamped(state) {
+  const yawRateDeg = state.angularVelocity.y * 180 / Math.PI;
+  return apClamp(-state.betaDeg * AP_YAW_KP + yawRateDeg * AP_YAW_RATE_KD, -0.5, 0.5);
+}
+
 // --- 機体ごとの速度の目安 -------------------------------------------------------
 
 // 巡航中に許す旋回半径の上限（m）。バンクさせる旋回の半径は v²/(g·tanθ) で
@@ -1796,7 +1819,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
       controls.yaw = apGroundSteer(state, ap, ap.takeoffHeadingDeg, toCross, dt);
       controls.roll = apAileronForBank(state, 0, spd);
     } else {
-      controls.yaw = apRudderForCoordination(state);
+      controls.yaw = apRudderYawDamped(state);
       controls.roll = apAileronForTrack(state, ap.takeoffHeadingDeg
         + apClamp(-toCross * 0.1, -15, 15), 10, spd);
     }
@@ -1850,7 +1873,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     const bankLim = spd.bankMax * apBankAglFactor(state) * apBankClimbFactor(state, terrain.vsNeed, spd)
       * Math.max(turnFactor, 0.02) * apBankSinkFactor(state, ap);
     controls.roll = apAileronForTrack(state, want, bankLim, spd);
-    controls.yaw = apRudderForCoordination(state);
+    // 上昇の段はヨーダンパーも掛ける（離陸の直後の首振りを持ち越さない）
+    controls.yaw = ap.phase === 'climb' ? apRudderYawDamped(state) : apRudderForCoordination(state);
   };
 
   // ---- 上昇 -----------------------------------------------------------------

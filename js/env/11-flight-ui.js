@@ -59,15 +59,29 @@ const FLIGHT_KEYMAP = {
 };
 
 const FLIGHT_TRIM_RATE = 0.35; // トリムが端から端まで動く速さ（毎秒）
+let _flightYawStick = 0;        // 手で当てているラダー（ヨーダンパーのぶんを除く）
 
 function setupFlightControls() {
   if (_flightKeyHandlersBound) return;
   _flightKeyHandlersBound = true;
   setupRigidCameraDrag();
 
+  // 文字を打っている欄（文字・数字の入力欄）だけはキーを奪わない。
+  // **セレクト・チェックボックス・スライダーは、飛行中なら手放して操縦に回す**。
+  // 以前はセレクトも「入力中」扱いにしていたので、飛行中に機体を選び直すと
+  // フォーカスがセレクトに残り、出力を上げるキー（Shift）が全く効かず「出発できない」
+  // ままになった（矢印キーはセレクトの選択を動かして、機体をさらに切り替えてしまう）。
+  const TEXT_INPUTS = { text: 1, number: 1, search: 1, email: 1, password: 1, url: 1, tel: 1 };
   const isTyping = (e) => {
     const t = e.target;
-    return t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA');
+    if (!t) return false;
+    if (t.tagName === 'TEXTAREA' || t.isContentEditable) return true;
+    if (t.tagName === 'INPUT' && TEXT_INPUTS[(t.type || 'text').toLowerCase()]) return true;
+    if (t.tagName === 'SELECT' || t.tagName === 'INPUT') {
+      if (EnvState.flight && EnvState.flight.active) { t.blur(); return false; }
+      return true;
+    }
+    return false;
   };
 
   window.addEventListener('keydown', (e) => {
@@ -208,7 +222,11 @@ function updateFlightInput(dt) {
 
   c.pitch = tp !== null ? tp : axis(c.pitch, FLIGHT_KEYMAP.pitchDown, FLIGHT_KEYMAP.pitchUp);
   c.roll = tr !== null ? tr : axis(c.roll, FLIGHT_KEYMAP.rollLeft, FLIGHT_KEYMAP.rollRight);
-  c.yaw = ty !== null ? ty : axis(c.yaw, FLIGHT_KEYMAP.yawLeft, FLIGHT_KEYMAP.yawRight);
+  // ラダーは「手の舵」と「ヨーダンパー」を分けて持つ。手の舵はばねで中央へ戻り、
+  // 触っていないあいだはヨーダンパー（apManualYawDamper）が機首の振れを止める
+  _flightYawStick = ty !== null ? ty : axis(_flightYawStick, FLIGHT_KEYMAP.yawLeft, FLIGHT_KEYMAP.yawRight);
+  c.yaw = _flightManual.yaw || typeof apManualYawDamper !== 'function' ? _flightYawStick
+    : THREE.MathUtils.clamp(_flightYawStick + apManualYawDamper(f.state), -1, 1);
 
   // 出力レバーは画面側が controls を直接書くので、ここではキーぶんを足すだけでいい
   const dThrottle = (_keyDown(FLIGHT_KEYMAP.throttleUp) ? 1 : 0) - (_keyDown(FLIGHT_KEYMAP.throttleDown) ? 1 : 0);
@@ -762,11 +780,12 @@ function setupFlightPanelUI() {
       sel.appendChild(o);
     }
     sel.value = EnvState.flight.cameraMode;
-    sel.addEventListener('change', () => setFlightCamera(sel.value));
+    sel.addEventListener('change', () => { setFlightCamera(sel.value); sel.blur(); });
   }
 
+  // 選んだらフォーカスを外す（残っていると操縦のキーがセレクトに吸われる。setupFlightControls 参照）
   const acSel = document.getElementById('envFlightAircraft');
-  if (acSel) acSel.addEventListener('change', () => selectFlightAircraft(acSel.value));
+  if (acSel) acSel.addEventListener('change', () => { acSel.blur(); selectFlightAircraft(acSel.value); });
 
   const reset = document.getElementById('envBtnFlightReset');
   if (reset) reset.addEventListener('click', () => resetFlightToRunway());

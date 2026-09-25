@@ -753,9 +753,9 @@ function updateSea(dt) {
   U.uWaterTime.value = (U.uWaterTime.value + dt) % 3600;
   U.uWaterShift.value.set(Math.floor(cam.x / WATER_WAVE_SHIFT_M) * WATER_WAVE_SHIFT_M,
     Math.floor(cam.z / WATER_WAVE_SHIFT_M) * WATER_WAVE_SHIFT_M);
-  // windDirectionDeg は風が吹いてくる向き。波はその反対へ進む
+  // windDirectionDeg は風が**吹いていく**向き（flightWindVector と同じ (cos, sin)）。波もその向きへ進む
   const d = THREE.MathUtils.degToRad(EnvState.env.windDirectionDeg);
-  U.uWaterWind.value.set(-Math.sin(d), Math.cos(d));
+  U.uWaterWind.value.set(Math.cos(d), Math.sin(d));
   U.uWaterWindMps.value = EnvState.env.windSpeedKmh / 3.6;
   if (EnvState.sunLight) {
     U.uWaterSunDir.value.copy(EnvState.sunLight.position).normalize();
