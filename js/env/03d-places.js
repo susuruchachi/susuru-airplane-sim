@@ -138,11 +138,14 @@ function refreshCities() {
   }
   // 近い街から建てる（見ている場所ほど早く出てほしい）
   _cityWork.sort((a, b) => a.d - b.d);
+  // 巨大都市の外側と都市群の帯（区画ごと。js/env/03n-districts.js）
+  if (typeof refreshDistricts === 'function') refreshDistricts();
   // 港も同じ判断で出し入れする
   if (typeof refreshPorts === 'function') refreshPorts();
 }
 
 function updateCities() {
+  if (typeof updateDistricts === 'function') updateDistricts();
   let budget = CITY_BUILD_BUDGET;
   while (budget > 0 && _cityWork.length > 0) {
     const w = _cityWork[0];
@@ -240,8 +243,9 @@ function cityBuildFinish(job) {
   }
   const positions = S.p, normals = S.n, colors = S.c;
 
-  // 街の外側にも街灯をまばらに置いて、郊外のにじみを作る
-  for (let i = 0, n = Math.round(buildingCount * 0.9); i < n; i++) {
+  // 街の外側にも街灯をまばらに置いて、郊外のにじみを作る。
+  // 巨大都市は都心の外が区画の市街地で、灯りはそちら（js/env/03n-districts.js）が出す
+  for (let i = 0, n = city.megacity ? 0 : Math.round(buildingCount * 0.9); i < n; i++) {
     const ang = rand() * Math.PI * 2;
     const dist = radius * (1 + rand() * 0.9);
     const ox = Math.cos(ang) * dist, oz = Math.sin(ang) * dist;
@@ -304,8 +308,10 @@ function addCityStreets(entry) {
 //
 // 地形は刻まない——街路の幅は9〜20mで、いちばん細かいLODでも地形の頂点間隔は312m。
 // 道路（03i-roads.js）と同じくデカールとして重ねる。
-function buildCityStreets(city) {
-  const net = cityStreetNetwork(city);
+// netOverride を渡すと、その街路（{ streets }）を city の位置（x, z, groundY）を原点として敷く
+// （巨大都市の外側・都市群の帯の区画。js/env/03n-districts.js）
+function buildCityStreets(city, netOverride) {
+  const net = netOverride || cityStreetNetwork(city);
   const positions = [], normals = [], indices = [];
   let vi = 0;
   // 橋の構造を作るための、街路ごとの断面の列（橋の無い街路は null）
@@ -429,6 +435,7 @@ function buildCityStreets(city) {
 function updatePlacesForDaylight(dayFactor) {
   const v = 1 - THREE.MathUtils.clamp(dayFactor, 0, 1);
   if (typeof updatePortsForDaylight === 'function') updatePortsForDaylight(dayFactor);
+  if (typeof updateDistrictsForDaylight === 'function') updateDistrictsForDaylight(dayFactor);
   if (!EnvState.builtCities) return;
   for (const entry of EnvState.builtCities.values()) {
     entry.lights.material.opacity = v;

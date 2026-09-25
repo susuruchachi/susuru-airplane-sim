@@ -406,6 +406,18 @@ let _worldDeltaGrid = null;
 // urbanR は市街地として地表色を変える範囲。
 const CITY_BUILT_RADIUS_MIN_M = 700;
 const CITY_BUILT_RADIUS_MAX_M = 3800;
+// **巨大都市**（首府の大きな街、規模 MEGACITY_SIZE 以上）は、市街地が直径20〜40km（半径10〜20km）に広がる。
+// 真ん中（downtownR ＝ ふつうの街と同じ式の半径）は、いままでどおりの街路網・名所・高層ビルの都心で、
+// その外（downtownR〜builtRadiusM）は区画ごとに建てる市街地（js/env/03j-city-layout.js の cityDistrictPlan）。
+// **地形を均すのは都心だけ**（flatInnerR・flatOuterR は downtownR から）。半径20kmを平らにすると、
+// まわりの山も川の谷も消えてしまう。外側の市街地は地形の起伏に沿って建ち、急な斜面と水は避ける。
+const MEGACITY_SIZE = 0.85;
+const MEGACITY_R_MIN_M = 10000;
+const MEGACITY_R_MAX_M = 20000;
+function worldMegacityRadius(size) {
+  const t = Math.min(Math.max((size - MEGACITY_SIZE) / 0.13, 0), 1);
+  return MEGACITY_R_MIN_M + t * (MEGACITY_R_MAX_M - MEGACITY_R_MIN_M);
+}
 
 // 街区の一辺（街路の間隔）。街路網の形そのものは js/env/03j-city-layout.js が作る。
 // 街区を小さくしすぎると、建物1個より街路のほうが太くなって「舗装の海」になる。
@@ -691,16 +703,22 @@ function worldHeightAt(x, z) {
 function worldUrbanFactorAt(x, z) {
   if (!_worldCityGrid) return 0;
   const cities = _worldCityGrid.at(x, z);
-  if (!cities) return 0;
   let best = 0;
+  if (!cities) return _worldMegaGrid ? worldMegaBandAt(x, z) * MEGA_BAND_URBAN : 0;
   for (let i = 0; i < cities.length; i++) {
     const c = cities[i];
     const dx = x - c.x, dz = z - c.z;
     const d2 = dx * dx + dz * dz;
     if (d2 >= c.urbanR * c.urbanR) continue;
-    const f = worldSmooth01(1 - Math.sqrt(d2) / c.urbanR);
+    // 巨大都市は市街地の7割まで真っ白に（すっかり市街地）、そこから外周の外へ薄める。
+    // ふつうの街と同じく中心からなだらかに薄めると、直径30kmの街が中心の数kmしか街に見えず、
+    // 半分より外は木の生えた草地のままだった
+    const f = c.megacity
+      ? 1 - worldSmooth01((Math.sqrt(d2) - c.builtRadiusM * 0.72) / (c.urbanR - c.builtRadiusM * 0.72))
+      : worldSmooth01(1 - Math.sqrt(d2) / c.urbanR);
     if (f > best) best = f;
   }
+  if (_worldMegaGrid) best = Math.max(best, worldMegaBandAt(x, z) * MEGA_BAND_URBAN);
   return best;
 }
 
@@ -877,6 +895,63 @@ const WORLD_CITY_DATA = [
   ['xanadu-vahatau', 'ヴァハタウ', 'Vahatau', 'xanadu', 1063064, 1102244, 0.2017, 0],
 ];
 
+// メガロポリス（都市群）の衛星都市。首府の巨大都市を軸に並ぶ街（形は WORLD_CITY_DATA と同じ）。
+// tools/gen-megalopolis.js で一度だけ作って貼った（初期化のたびには生成しない）。
+const WORLD_MEGALOPOLIS_CITY_DATA = [
+  ['vestaria-ravenston', 'レイヴンズトン', 'Ravenston', 'vestaria', 45156, -10339, 0.6772, 0],
+  ['vestaria-aldden', 'オルドデン', 'Aldden', 'vestaria', -26839, 28943, 0.5076, 0],
+  ['vestaria-kernbury', 'ケルンベリー', 'Kernbury', 'vestaria', 125920, -57658, 0.6197, 0],
+  ['vestaria-alvis', 'アルヴイス', 'Alvis', 'vestaria', 159091, -77221, 0.6078, 0],
+  ['vestaria-halfield', 'ハルフィールド', 'Halfield', 'vestaria', 182570, -91610, 0.5625, 0],
+  ['vestaria-oberbury', 'オーバーベリー', 'Oberbury', 'vestaria', 218263, -109460, 0.4249, 0],
+  ['nordheim-stensten', 'ステンステン', 'Stensten', 'nordheim', -170223, -699414, 0.7579, 0],
+  ['nordheim-bjordal', 'ビョルダール', 'Bjordal', 'nordheim', -138450, -695851, 0.6577, 0],
+  ['nordheim-grimborg', 'グリムボルグ', 'Grimborg', 'nordheim', -99300, -692098, 0.5633, 0],
+  ['nordheim-grimvik', 'グリムヴィーク', 'Grimvik', 'nordheim', -59514, -693565, 0.5214, 0],
+  ['borealis-rikdal', 'リクダール', 'Rikdal', 'borealis', 403030, -910166, 0.6001, 0],
+  ['borealis-karholm', 'カルホルム', 'Karholm', 'borealis', 366334, -867823, 0.446, 0],
+  ['astra-magnanum', 'マグンアヌム', 'Magnanum', 'astra', -742834, -143796, 0.7017, 0],
+  ['astra-augessa', 'アウグエッサ', 'Augessa', 'astra', -754603, -103933, 0.6401, 0],
+  ['astra-magnent', 'マグンエント', 'Magnent', 'astra', -764208, -68192, 0.632, 0],
+  ['astra-voltor', 'ヴォルトオル', 'Voltor', 'astra', -778585, -18077, 0.4411, 0],
+  ['kaldis-yazabad', 'ヤズアバード', 'Yazabad', 'kaldis', 653140, -96904, 0.6681, 0],
+  ['kaldis-baskand', 'バスカンド', 'Baskand', 'kaldis', 661977, -60182, 0.6002, 0],
+  ['kaldis-rusik', 'ルスイク', 'Rusik', 'kaldis', 670562, -33878, 0.4875, 0],
+  ['kaldis-yaziya', 'ヤズイヤ', 'Yaziya', 'kaldis', 684516, -2695, 0.356, 0],
+  ['oriens-hoshiryu', 'ホシリュウ', 'Hoshiryu', 'oriens', 903228, -712899, 0.4582, 0],
+  ['oriens-yukika', 'ユキカ', 'Yukika', 'oriens', 993463, -753389, 0.707, 0],
+  ['oriens-akisei', 'アキセイ', 'Akisei', 'oriens', 1029616, -766177, 0.6413, 0],
+  ['oriens-tairyu', 'タイリュウ', 'Tairyu', 'oriens', 1063596, -782396, 0.4794, 0],
+  ['oriens-mizuryu', 'ミズリュウ', 'Mizuryu', 'oriens', 1093258, -791554, 0.445, 0],
+  ['meridia-cormar', 'コルマール', 'Cormar', 'meridia', -291827, 506108, 0.6712, 0],
+  ['meridia-luminova', 'ルミノヴァ', 'Luminova', 'meridia', -314784, 558192, 0.6395, 0],
+  ['meridia-serella', 'セルエラ', 'Serella', 'meridia', -327320, 586535, 0.58, 0],
+  ['thalassia-verella', 'ヴェルエラ', 'Verella', 'thalassia', -1036496, 691977, 0.6811, 0],
+  ['thalassia-serora', 'セルオラ', 'Serora', 'thalassia', -1022220, 803013, 0.4786, 0],
+  ['serafina-kelapeni', 'ケラペニ', 'Kelapeni', 'serafina', 951406, 856506, 0.5564, 0],
+  ['serafina-kelaroa', 'ケラロア', 'Kelaroa', 'serafina', 1025388, 799344, 0.4267, 0],
+  ['xanadu-sulalis', 'スラリス', 'Sulalis', 'xanadu', 980260, 1065841, 0.7234, 0],
+  ['xanadu-morova', 'モロヴァ', 'Morova', 'xanadu', 1007311, 1079393, 0.6024, 0],
+  ['xanadu-tanimay', 'タニマイ', 'Tanimay', 'xanadu', 1028693, 1093098, 0.5514, 0],
+  ['xanadu-lagutau', 'ラグタウ', 'Lagutau', 'xanadu', 1089749, 1126726, 0.3668, 0],
+];
+
+// メガロポリス（都市群）。[核になる巨大都市のid, [仲間の街のid（軸に沿って端から順）]]
+// 首府の巨大都市を軸に、大都市や街がいくつも並んで、実質ひとつながりの都市になっている帯。
+// 仲間どうしの間は郊外（家・倉庫・灯り）でつながる（worldMegaBandAt）。tools/gen-megalopolis.js で一度だけ作った。
+const WORLD_MEGALOPOLIS_DATA = [
+  ['vestaria-oberfield', ['vestaria-marlfield', 'vestaria-oberbury', 'vestaria-halfield', 'vestaria-alvis', 'vestaria-kernbury', 'vestaria-oberfield', 'vestaria-ravenston', 'vestaria-thornford', 'vestaria-aldden', 'vestaria-greenwick']], // 軸150° 端から端まで334km
+  ['nordheim-riknes', ['nordheim-riknes', 'nordheim-stensten', 'nordheim-bjordal', 'nordheim-grimborg', 'nordheim-grimvik']], // 軸0° 端から端まで162km
+  ['borealis-stendal', ['borealis-stendal', 'borealis-rikdal', 'borealis-fjorholm', 'borealis-karholm']], // 軸128° 端から端まで106km
+  ['astra-dranara', ['astra-dranara', 'astra-magnanum', 'astra-augessa', 'astra-magnent', 'astra-casturn', 'astra-voltor']], // 軸105° 端から端まで171km
+  ['kaldis-tarabad', ['kaldis-tarabad', 'kaldis-yazabad', 'kaldis-baskand', 'kaldis-rusik', 'kaldis-yaziya']], // 軸68° 端から端まで144km
+  ['oriens-yukiryu', ['oriens-hoshimi', 'oriens-mizuryu', 'oriens-tairyu', 'oriens-akisei', 'oriens-yukika', 'oriens-yukiryu', 'oriens-hoshiryu']], // 軸158° 端から端まで245km
+  ['meridia-corino', ['meridia-corino', 'meridia-cormar', 'meridia-porora', 'meridia-luminova', 'meridia-serella', 'meridia-bellamar']], // 軸113° 端から端まで177km
+  ['thalassia-solella', ['thalassia-solella', 'thalassia-verella', 'thalassia-rioverde', 'thalassia-serora']], // 軸82° 端から端まで163km
+  ['serafina-vahava', ['serafina-kelaroa', 'serafina-vahava', 'serafina-kelapeni', 'serafina-lagumay']], // 軸143° 端から端まで112km
+  ['xanadu-morolis', ['xanadu-morolis', 'xanadu-sulalis', 'xanadu-morova', 'xanadu-tanimay', 'xanadu-vahatau', 'xanadu-lagutau']], // 軸30° 端から端まで177km
+];
+
 // 空港の一覧。[コード, 親の街のid, x, z, 滑走路の長さ, 幅, 方位]
 const WORLD_AIRPORT_DATA = [
   ['VEOB', 'vestaria-oberfield', 51664, -26631, 3100, 60, 249],
@@ -961,16 +1036,20 @@ const WORLD_AIRPORT_DATA = [
 
 function worldGenerateCities() {
   WORLD_CITIES.length = 0;
-  for (const d of WORLD_CITY_DATA) {
+  for (const d of WORLD_CITY_DATA.concat(WORLD_MEGALOPOLIS_CITY_DATA)) {
     const [id, name, nameLatin, country, x, z, size, capital] = d;
     const builtR = CITY_BUILT_RADIUS_MIN_M + size * (CITY_BUILT_RADIUS_MAX_M - CITY_BUILT_RADIUS_MIN_M);
+    const mega = size >= MEGACITY_SIZE;
+    const fullR = mega ? worldMegacityRadius(size) : builtR;
     // 街路の向きと街区の大きさは街の名前から引く（配置とは別の乱数列）
     const srand = worldRng('street:' + id);
     WORLD_CITIES.push({
       id, name, nameLatin, country,
       x, z, size, capital: !!capital,
-      builtRadiusM: builtR,
-      urbanR: 1300 + size * 5400,
+      megacity: mega,
+      builtRadiusM: fullR,
+      downtownR: builtR,
+      urbanR: mega ? fullR * 1.08 : 1300 + size * 5400,
       flatInnerR: builtR * 1.15,
       flatOuterR: builtR * 1.15 * 2.4,
       groundY: 0,
@@ -978,6 +1057,90 @@ function worldGenerateCities() {
       blockM: CITY_BLOCK_MIN_M + srand() * (CITY_BLOCK_MAX_M - CITY_BLOCK_MIN_M),
     });
   }
+}
+
+// --- メガロポリス（都市群） ---------------------------------------------------
+//
+// WORLD_MEGALOPOLIS_DATA の仲間を軸に沿った順につないだ折れ線と、そのまわりの帯。
+// 帯の半幅は、仲間の街の近くでは「その街の市街地＋MEGA_BAND_REACH_M」、仲間どうしの真ん中では
+// 細く（MEGA_BAND_MIN_M まで）なる。帯の中は郊外で、市街地らしさ（地表の色・森の無さ）と、
+// 家・倉庫・灯りの密度（js/env/03j-city-layout.js の cityDistrictPlan）をこれで決める。
+// 濃さは芯から半幅の MEGA_BAND_CORE_F までは1のまま、そこから縁へ薄くなる。
+// （以前は半幅3.5km＋街・真ん中2.6km・芯からすぐ薄くなる形で、街と街のあいだは全幅5〜8kmの
+//  細い筋にしか見えなかった。ひと続きの都市に見えるよう太くした）
+const WORLD_MEGALOPOLISES = [];
+const MEGA_BAND_REACH_M = 6000;
+const MEGA_BAND_MIN_M = 4500;
+const MEGA_BAND_PINCH = 0.4;      // 仲間どうしの真ん中で、両端の幅からこの割合だけ細くなる
+const MEGA_BAND_CORE_F = 0.45;
+const MEGA_BAND_URBAN = 0.6;      // 帯の真ん中の市街地らしさ（街の中より控えめ）
+let _worldMegaGrid = null;
+
+function worldGenerateMegalopolises() {
+  WORLD_MEGALOPOLISES.length = 0;
+  for (const [coreId, memberIds] of WORLD_MEGALOPOLIS_DATA) {
+    const core = WORLD_CITIES.find((c) => c.id === coreId);
+    if (!core) continue;
+    const members = memberIds.map((id) => WORLD_CITIES.find((c) => c.id === id)).filter(Boolean);
+    const mega = {
+      id: 'mega-' + core.id, core, members, country: core.country,
+      name: core.name + '都市圏', nameLatin: 'Greater ' + core.nameLatin,
+      segs: [],
+    };
+    for (const c of members) c.megalopolis = mega;
+    for (let i = 0; i + 1 < members.length; i++) {
+      const a = members[i], b = members[i + 1];
+      mega.segs.push({
+        ax: a.x, az: a.z, bx: b.x, bz: b.z,
+        wa: a.builtRadiusM + MEGA_BAND_REACH_M, wb: b.builtRadiusM + MEGA_BAND_REACH_M,
+        len: Math.hypot(b.x - a.x, b.z - a.z), mega,
+      });
+    }
+    // 帯の外形（地図とラベル用）：端から端まで
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const c of members) {
+      const r = c.builtRadiusM + MEGA_BAND_REACH_M;   // 帯の縁まで
+      minX = Math.min(minX, c.x - r); maxX = Math.max(maxX, c.x + r);
+      minZ = Math.min(minZ, c.z - r); maxZ = Math.max(maxZ, c.z + r);
+    }
+    mega.bounds = { minX, maxX, minZ, maxZ };
+    const ends = [members[0], members[members.length - 1]];
+    mega.spanM = Math.hypot(ends[1].x - ends[0].x, ends[1].z - ends[0].z) + ends[0].builtRadiusM + ends[1].builtRadiusM;
+    WORLD_MEGALOPOLISES.push(mega);
+  }
+  _worldMegaGrid = makeWorldGrid(20000);
+  for (const m of WORLD_MEGALOPOLISES) {
+    for (const sg of m.segs) {
+      const r = sg.len / 2 + Math.max(sg.wa, sg.wb);
+      _worldMegaGrid.insert((sg.ax + sg.bx) / 2, (sg.az + sg.bz) / 2, r, sg);
+    }
+  }
+}
+
+// ある地点の、都市群の帯の濃さ（0〜1）。帯の外は0。帯の芯（仲間どうしを結ぶ線）に近いほど1。
+// out を渡すと、いちばん濃い区間（seg）と、区間に沿った割合（s, 0〜1）も入れる。
+function worldMegaBandAt(x, z, out) {
+  if (!_worldMegaGrid) return 0;
+  const arr = _worldMegaGrid.at(x, z);
+  if (!arr) return 0;
+  let best = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const sg = arr[i];
+    const vx = sg.bx - sg.ax, vz = sg.bz - sg.az;
+    const L2 = vx * vx + vz * vz || 1;
+    let s = ((x - sg.ax) * vx + (z - sg.az) * vz) / L2;
+    s = s < 0 ? 0 : (s > 1 ? 1 : s);
+    const d = Math.hypot(x - (sg.ax + vx * s), z - (sg.az + vz * s));
+    // 真ん中ほど細く（街と街のあいだは道沿いの郊外が続くくらい）
+    const w = Math.max(MEGA_BAND_MIN_M, (sg.wa * (1 - s) + sg.wb * s) * (1 - MEGA_BAND_PINCH * Math.sin(Math.PI * s)));
+    if (d >= w) continue;
+    const f = worldSmooth01((1 - d / w) / (1 - MEGA_BAND_CORE_F));
+    if (f > best) {
+      best = f;
+      if (out) { out.seg = sg; out.s = s; out.d = d; out.w = w; }
+    }
+  }
+  return best;
 }
 
 // 空港のコードは「国の2文字 + 都市名の2文字」。衝突したら文字を送る。
@@ -1201,7 +1364,7 @@ function worldGenerateLakes() {
 // 中心 (x, z)・半径 bowlR の椀が、街・空港・他の湖と margin 以内に重なるか
 function worldLakeClashes(x, z, bowlR, margin) {
   for (const c of WORLD_CITIES) {
-    if (Math.hypot(c.x - x, c.z - z) < c.flatOuterR + bowlR + margin) return true;
+    if (Math.hypot(c.x - x, c.z - z) < Math.max(c.flatOuterR, c.builtRadiusM) + bowlR + margin) return true;
   }
   for (const a of WORLD_AIRPORTS) {
     if (Math.hypot(a.x - x, a.z - z) < a.flatOuterR + bowlR + margin) return true;
@@ -3379,7 +3542,7 @@ function worldCheckLandingField(cx, cz, headingDeg, L) {
     if (i % 4 === 0 && worldForestDensityAt(x, z, h, grade) > FIELD_MAX_FOREST) return null;
   }
   for (const c of WORLD_CITIES) {
-    if (Math.hypot(c.x - cx, c.z - cz) < c.flatOuterR + half) return null;
+    if (Math.hypot(c.x - cx, c.z - cz) < Math.max(c.flatOuterR, c.builtRadiusM) + half) return null;
   }
   for (const ap of WORLD_AIRPORTS) {
     if (Math.hypot(ap.x - cx, ap.z - cz) < ap.flatOuterR + half) return null;
@@ -3501,8 +3664,9 @@ function initWorld() {
   _worldRangeGrid = makeWorldGrid(120000);
   for (const r of WORLD_RANGES) _worldRangeGrid.insert(r.cx, r.cz, r._bound, r);
 
-  // 1) 素の地形の上に街を置く
+  // 1) 素の地形の上に街を置く。都市群（仲間の街を結ぶ帯）もここで組む
   worldGenerateCities();
+  worldGenerateMegalopolises();
   // 2) 街から少し離れた平らな場所に空港を置く
   worldGenerateAirports();
 
@@ -3540,7 +3704,7 @@ function initWorld() {
   _worldCityGrid = makeWorldGrid(40000);
   for (const c of WORLD_CITIES) {
     c.groundY = worldHeightAt(c.x, c.z);
-    _worldCityGrid.insert(c.x, c.z, c.flatOuterR, c);
+    _worldCityGrid.insert(c.x, c.z, Math.max(c.flatOuterR, c.urbanR), c);
   }
   _worldCitiesReady = true;
 
@@ -3573,14 +3737,14 @@ if (typeof module !== 'undefined' && module.exports) {
   initWorld();
   module.exports = {
     WORLD_SEED, WORLD_SIZE, WORLD_HALF,
-    WORLD_LANDMASSES, WORLD_RANGES, WORLD_COUNTRIES, WORLD_CITIES, WORLD_AIRPORTS,
+    WORLD_LANDMASSES, WORLD_RANGES, WORLD_COUNTRIES, WORLD_CITIES, WORLD_AIRPORTS, WORLD_MEGALOPOLISES, WORLD_MEGALOPOLIS_CITY_DATA, worldMegaBandAt,
     WORLD_CITY_DATA, WORLD_AIRPORT_DATA,
     WORLD_LAKES, WORLD_RIVERS, WORLD_DELTAS, WORLD_ROADS, WORLD_PEAKS, WORLD_PORTS, worldPortById, worldPortAt,
     worldLakeAt, worldRiverAt, worldWaterSurfaceAt, worldLakeFootprintAt, worldLakeShoreCells, worldLakeField,
     worldRangeUpliftAt, worldInRangeAt, worldNearestCrestDist, worldFindLandingField, worldCheckLandingField, worldFindVtolPad, worldCheckVtolPad,
     CITY_FLATTEN_STRENGTH, RIVER_VALLEY_SLOPE, RIVER_BED_OFFSET_M, RIVER_WATER_DEPTH_M,
     worldClamp, worldSmooth01, worldValueNoise, worldFbm, worldRng,
-    initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt,
+    initWorld, worldHeightAt, worldBaseHeightAt, worldLandValueAt, worldUrbanFactorAt, worldMakePlaceName,
     worldTemperatureAt, worldDrynessAt, worldForestDensity, worldWeatherFieldAt, worldLocalReliefAt,
     worldNearestAirport, worldRegionAt, worldCountryById, worldCityById, worldAirportById,
     worldRangeCrestAt, worldRangeHeightAt,

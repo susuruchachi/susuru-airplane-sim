@@ -77,7 +77,8 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
     if (W.worldHeightAt(c.x, c.z) > 0) onLand++;
     else check(false, `${c.name} が陸の上にある`, `標高 ${W.worldHeightAt(c.x, c.z).toFixed(0)}m`);
 
-    const R = c.builtRadiusM;
+    // 巨大都市は都心（downtownR）だけを均す。外側の市街地は地形なりに建つ（急な斜面は避ける）
+    const R = c.downtownR || c.builtRadiusM;
     let lo = Infinity, hi = -Infinity;
     for (let i = 0; i < 16; i++) {
       for (let j = 0; j < 16; j++) {
@@ -179,9 +180,76 @@ check(genMs < 8000, '世界の生成が現実的な時間で終わる', `${genMs
   check(tallest.h > 300, '巨大都市に300mを超える超高層ビルがある', `${tallest.h.toFixed(0)}m`);
   check(aridGlass === 0, '乾燥の街の高層ビルは石と砂の色（青いガラスにしない）', `${aridGlass}/${aridTowers}`);
   check(noMark === 0, 'どの街にも真ん中に名所がある', `${noMark}都市に無い`);
-  check((marks.tvtower || 0) === (tiers.megalopolis || 0), '巨大都市には展望塔がある', `${marks.tvtower || 0}/${tiers.megalopolis || 0}`);
+  check((marks.tvtower || 0) === (tiers.megacity || 0), '巨大都市には展望塔がある', `${marks.tvtower || 0}/${tiers.megacity || 0}`);
   check(markOnPave === 0, '名所は舗装にかからない', `${markOnPave}か所`);
   check(plazaHit === 0, '名所の敷地に建物が建たない', `${plazaHit}軒`);
+}
+
+// --- メガロポリス（都市群）と巨大都市の区画 ---
+// 首府の巨大都市は直径20〜40km。そこを軸に、大都市や街がいくつも並んで数百kmの帯になる。
+// 巨大都市の外側と帯は区画（1.6km四方）ごとに建てる（03j-city-layout.js の cityDistrictPlan）。
+{
+  const CL = require(path.join(__dirname, '..', 'js', 'env', '03j-city-layout.js'));
+  const megas = W.WORLD_MEGALOPOLISES;
+  const cores = W.WORLD_CITIES.filter((c) => c.megacity);
+  const rOk = cores.every((c) => c.builtRadiusM >= 10000 && c.builtRadiusM <= 20000);
+  check(rOk, '巨大都市の市街地は直径20〜40km', cores.map((c) => `${c.name}${(c.builtRadiusM * 2 / 1000).toFixed(0)}km`).join(' '));
+  check(megas.length === cores.length, '首府の巨大都市ごとに都市群がある', `${megas.length}/${cores.length}`);
+  const spans = megas.map((m) => m.spanM / 1000);
+  check(Math.min(...spans) >= 100, '都市群は端から端まで100km以上（数百km）',
+    megas.map((m) => `${m.name}${(m.spanM / 1000).toFixed(0)}km/${m.members.length}都市`).join(' '));
+  // 仲間どうしの間も帯が途切れない（芯の上を500mおきに見て、どこも帯の中）
+  let gaps = 0, samples = 0;
+  for (const m of megas) {
+    for (const sg of m.segs) {
+      for (let s = 0; s <= 1; s += 500 / sg.len) {
+        samples++;
+        if (W.worldMegaBandAt(sg.ax + (sg.bx - sg.ax) * s, sg.az + (sg.bz - sg.az) * s) < 0.9) gaps++;
+      }
+    }
+  }
+  check(gaps === 0, '都市群の帯は仲間の街どうしの間でも途切れない', `${gaps}/${samples}点が薄い`);
+  // 区画：巨大都市1つと帯のいくらかを実際に並べ、道路・空港・水の上・急な斜面に建てていないこと
+  let tiles = 0, blds = 0, onRoad = 0, onAirport = 0, wet = 0, worst = 0, worstH = 0, bandTiles = 0, bandBlds = 0, nHouse = 0;
+  const T = CL.CITY_TILE_M;
+  const probe = (i, j) => {
+    let t0 = Date.now();
+    const d = CL.cityDistrictPlan(i, j);
+    worst = Math.max(worst, Date.now() - t0);
+    if (!d) return;
+    t0 = Date.now();
+    const houses = CL.cityDistrictHouses(d);
+    worstH = Math.max(worstH, Date.now() - t0);
+    nHouse += houses.length;
+    tiles++;
+    const all = d.buildings.concat(houses);
+    if (d.info.kind === 'band') { bandTiles++; bandBlds += all.length; }
+    for (const b of all) {
+      blds++;
+      const x = d.info.cx + b.x, z = d.info.cz + b.z;
+      if (W.worldRoadEdgeDistance(x, z) < Math.max(b.w, b.d) * 0.5) onRoad++;
+      const na = W.worldNearestAirport(x, z);
+      if (na && na.airport && na.distanceM < na.airport.flatInnerR) onAirport++;
+      const wtr = W.worldWaterSurfaceAt(x, z);
+      if (wtr !== null && wtr > W.worldHeightAt(x, z) - 0.3) wet++;
+    }
+  };
+  const core = cores.find((c) => c.id === 'vestaria-oberfield');
+  for (let i = Math.floor((core.x - core.builtRadiusM) / T); i <= Math.floor((core.x + core.builtRadiusM) / T); i++) {
+    for (let j = Math.floor((core.z - core.builtRadiusM) / T); j <= Math.floor((core.z + core.builtRadiusM) / T); j++) probe(i, j);
+  }
+  // 帯：各都市群の最初の区間の真ん中あたり
+  for (const m of megas) {
+    const sg = m.segs[0];
+    const mx = (sg.ax + sg.bx) / 2, mz = (sg.az + sg.bz) / 2;
+    for (let a = -2; a <= 2; a++) for (let b = -2; b <= 2; b++) probe(Math.floor(mx / T) + a, Math.floor(mz / T) + b);
+  }
+  console.log(`[  --  ] 区画: ${tiles}区画・${blds}軒（うち家${nHouse}軒・帯 ${bandTiles}区画・${bandBlds}軒）・1区画の並べ方 最大${worst}ms・家 最大${worstH}ms`);
+  check(blds > 10000 && bandBlds > 1000, '巨大都市の外側と都市群の帯に建物が建つ', `${blds}軒・帯${bandBlds}軒`);
+  check(onRoad === 0, '区画の建物は道路の上に建たない', `${onRoad}軒`);
+  check(onAirport === 0, '区画の建物は空港の平地に建たない', `${onAirport}軒`);
+  check(wet <= blds * 0.01, '区画の建物はほとんど水の上に建たない（残りは建てる側で水を見て落とす）', `${wet}/${blds}`);
+  check(worst < 40 && worstH < 40, '区画1つの並べ方（家も）が40ms以内', `最大${worst}ms・家${worstH}ms`);
 }
 
 // --- 港：海の近い街の海岸に岸壁があり、街から道がつながっている ---

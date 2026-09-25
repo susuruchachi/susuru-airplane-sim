@@ -36,6 +36,8 @@ const MINIMAP_SPAN_MAX = 1400000;
 const MINIMAP_ROADS_SPAN = 260000;    // 道路
 const MINIMAP_AIRPORT_SPAN = 90000;   // 空港の滑走路・誘導路・エプロン・ターミナルの形
 const MINIMAP_STREETS_SPAN = 30000;   // 街の街路
+const MINIMAP_URBAN = [176, 166, 152];   // 市街地の色（worldUrbanFactorAt の割合で寄せる）
+const MINIMAP_URBAN_MIX = 0.85;
 // ドラッグ・ズームのあと、これだけ動かなければ新しい範囲で地図を焼き直す（ms）
 const MINIMAP_REBAKE_IDLE_MS = 250;
 
@@ -195,7 +197,16 @@ function stepMinimapBake() {
     for (let i = 0; i < MINIMAP_SIZE; i++) {
       const x = view.cx - half + (i + 0.5) * step;
       const h = worldHeightAt(x, z);
-      const c = minimapColorFor(h);
+      let c = minimapColorFor(h);
+      // 市街地（巨大都市の市街地・都市群の帯・街）は灰色に寄せる
+      if (h > 0) {
+        const u = worldUrbanFactorAt(x, z);
+        if (u > 0.05) {
+          // 都市群の帯は地表では街より控えめ（×0.6）だが、地図ではひと続きの市街地として同じ濃さで塗る
+          const k = Math.min(u / 0.6, 1) * MINIMAP_URBAN_MIX;
+          c = [c[0] + (MINIMAP_URBAN[0] - c[0]) * k, c[1] + (MINIMAP_URBAN[1] - c[1]) * k, c[2] + (MINIMAP_URBAN[2] - c[2]) * k];
+        }
+      }
 
       let shade = 1;
       if (h > 0) {
@@ -849,6 +860,49 @@ function buildMinimapLabels(ctx, view, selected, radar) {
   // 3) 首府
   for (const ct of cities) {
     if (ct.c.capital) tryPoint(ct.c.nameLatin, `bold 9px ${MINIMAP_FONT}`, ct.p.px, ct.p.py, ct.r, '#ffffff', 9);
+  }
+
+  // 3b) 都市群（メガロポリス）。首府の巨大都市を軸に数百km並ぶ街の帯に沿って、帯の向きに傾けて置く。
+  //     帯の上には仲間の街の記号が並ぶので、帯の脇（片側9px）にずらす。傾いた文字は外接矩形だと
+  //     大きすぎて何にでも当たるので、文字に沿って小さな四角を並べて重なりを見る
+  if (zoomedIn && view.span > 120000 && typeof WORLD_MEGALOPOLISES !== 'undefined') {
+    const font = `italic bold 8.5px ${MINIMAP_FONT}`;
+    ctx.font = font;
+    for (const m of WORLD_MEGALOPOLISES) {
+      const b = m.bounds;
+      if (!near((b.minX + b.maxX) / 2, (b.minZ + b.maxZ) / 2)) continue;
+      const w = ctx.measureText(m.nameLatin).width;
+      const acc = [0];
+      for (const sg of m.segs) acc.push(acc[acc.length - 1] + sg.len);
+      const total = acc[acc.length - 1];
+      // 首府の名前と重ならないよう、首府から少し離れたところから試す
+      for (const frac of [0.3, 0.7, 0.2, 0.8, 0.5]) {
+        const d = total * frac;
+        let k = 0;
+        while (k < m.segs.length - 1 && acc[k + 1] < d) k++;
+        const sg = m.segs[k], t = (d - acc[k]) / Math.max(sg.len, 1);
+        const c = toPx(sg.ax + (sg.bx - sg.ax) * t, sg.az + (sg.bz - sg.az) * t);
+        const pa = toPx(sg.ax, sg.az), pb = toPx(sg.bx, sg.bz);
+        let ang = Math.atan2(pb.py - pa.py, pb.px - pa.px);
+        if (ang > Math.PI / 2) ang -= Math.PI; else if (ang < -Math.PI / 2) ang += Math.PI;
+        const ux = Math.cos(ang), uy = Math.sin(ang);
+        let done = false;
+        for (const off of [-9, 9]) {
+          const lx = c.px - uy * off, ly = c.py + ux * off;
+          const boxes = [];
+          for (let q = -0.5; q <= 0.5001; q += 0.125) {
+            const bx = lx + ux * w * q, by = ly + uy * w * q;
+            boxes.push({ x0: bx - 5, y0: by - 5, x1: bx + 5, y1: by + 5 });
+          }
+          if (boxes.some((bx) => !inside(bx) || hit(bx))) continue;
+          placed.push(...boxes);
+          labels.push({ text: m.nameLatin, font, x: lx, y: ly, align: 'center', color: '#f0d8b4', angle: ang });
+          done = true;
+          break;
+        }
+        if (done) break;
+      }
+    }
   }
 
   // 4) 山脈（広域・世界）

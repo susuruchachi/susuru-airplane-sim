@@ -434,6 +434,8 @@ function _roadHouseChance(road, s, seed, x, z) {
     if (d < c.builtRadiusM) return 0;                     // 街の建物がある
     if (d < c.builtRadiusM + HOUSE_SUBURB_M) suburb = true;
   }
+  // 都市群の帯の中は区画の家が建つ（js/env/03j-city-layout.js の cityDistrictHouses）
+  if (typeof worldMegaBandAt === 'function' && worldMegaBandAt(x, z) > 0) return 0;
   if (suburb) return HOUSE_VILLAGE_P;
   const v = worldValueNoise(s / HOUSE_VILLAGE_SCALE_M + (seed % 997) * 0.37, (seed % 131) * 1.7);
   return v > HOUSE_VILLAGE_NOISE ? HOUSE_VILLAGE_P : HOUSE_SCATTER_P;

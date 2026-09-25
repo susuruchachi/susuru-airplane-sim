@@ -24,6 +24,17 @@ const clFbm = _CL_WORLD ? _CL_WORLD.worldFbm : worldFbm;
 const clTemperatureAt = _CL_WORLD ? _CL_WORLD.worldTemperatureAt : worldTemperatureAt;
 const clDrynessAt = _CL_WORLD ? _CL_WORLD.worldDrynessAt : worldDrynessAt;
 const clLandValueAt = _CL_WORLD ? _CL_WORLD.worldLandValueAt : worldLandValueAt;
+// 区画（巨大都市の外側の市街地と、都市群の帯）で使う世界側の関数。ブラウザでは同名のグローバル
+const clW = _CL_WORLD || {
+  get WORLD_CITIES() { return WORLD_CITIES; },
+  get WORLD_MEGALOPOLISES() { return WORLD_MEGALOPOLISES; },
+  worldHeightAt: (x, z) => worldHeightAt(x, z),
+  worldMegaBandAt: (x, z, o) => worldMegaBandAt(x, z, o),
+  worldRoadEdgeDistance: (x, z) => worldRoadEdgeDistance(x, z),
+  worldAirportRoadBlock: (x, z, e) => worldAirportRoadBlock(x, z, e),
+  worldNearestAirport: (x, z) => worldNearestAirport(x, z),
+  worldPortAt: (x, z, m) => worldPortAt(x, z, m),
+};
 
 // 街路の半幅（ふつう・大通り・路地）と、建物を街路から離す余白。
 // 余白が0だと、建物の角が舗装にかぶって街路が途切れて見える。
@@ -88,8 +99,10 @@ function cityLayoutOf(city) {
 //
 // 以前はどの街も「大きさの違う同じ街」だった（違うのは街路の型と国ごとの色・高さだけ）。
 // 街ごとに次の3つを決め、建物の形・高さ・屋根と、街の真ん中の名所を変える。
-//   規模 … town（町・村）/ city（市）/ metro（大都市）/ megalopolis（首都級の巨大都市）
-//          町は2〜3階の家が並び、大都市は中心に高層ビル、巨大都市は超高層の摩天楼と展望塔
+//   規模 … town（町・村）/ city（市）/ metro（大都市）/ megacity（首府の巨大都市。直径20〜40km）
+//          町は2〜3階の家が並び、大都市は中心に高層ビル、巨大都市は超高層の摩天楼と展望塔。
+//          巨大都市はそれだけで終わらず、まわりの大都市や街と並んで**メガロポリス（都市群）**になる
+//          （03b-world.js の WORLD_MEGALOPOLISES。区画の建て方はこのファイルの cityDistrictPlan）
 //   山あい … 標高 CITY_HIGHLAND_M 以上の街。低く、屋根は急、建物はまばらで石の色
 //   気候 … 寒冷（急な切妻屋根）/ 温帯（切妻と寄棟）/ 乾燥（平屋根と丸屋根）/ 熱帯（軒の深い寄棟・白と淡い色）
 // 名所は国の性格で決める（尖塔の教会・丸屋根・丸屋根と尖塔（ミナレット）・五重塔・鐘楼）。
@@ -98,7 +111,7 @@ const CITY_TIERS = [
   { id: 'town', maxSize: 0.3 },
   { id: 'city', maxSize: 0.6 },
   { id: 'metro', maxSize: 0.85 },
-  { id: 'megalopolis', maxSize: Infinity },
+  { id: 'megacity', maxSize: Infinity },
 ];
 const CITY_LANDMARK_BY_COUNTRY = {
   vestaria: 'spire', nordheim: 'spire', borealis: 'spire', astra: 'dome',
@@ -149,7 +162,8 @@ function cityCharacterOf(city) {
 // 周期の違う正弦を重ねてうねらせる（0.72〜1.0 R）。
 function cityEdgeFn(city) {
   const rand = clRng('edge:' + city.id);
-  const R = city.builtRadiusM;
+  // 巨大都市では都心の外周（その外は区画。cityDistrictPlan）
+  const R = city.downtownR || city.builtRadiusM;
   const p1 = rand() * 6.283, p2 = rand() * 6.283, p3 = rand() * 6.283;
   return (ang) => R * (0.86 + 0.14 * (0.5 * Math.sin(3 * ang + p1)
     + 0.3 * Math.sin(5 * ang + p2) + 0.2 * Math.sin(9 * ang + p3)));
@@ -289,7 +303,7 @@ function cityStreetNetwork(city) {
   const L = cityLayoutOf(city);
   const rand = clRng('streets:' + city.id);
   const edge = cityEdgeFn(city);
-  const R = city.builtRadiusM;
+  const R = city.downtownR || city.builtRadiusM;
   const b = city.blockM;
   const A = city.streetAngle;
   const reach = R * 1.05;
@@ -432,9 +446,9 @@ function cityBuildingTarget(city) {
 // 町は家ばかり、市は中心が中層で外が家、大都市・巨大都市は中心に高層ビルが立つ。
 const CITY_HOUSE_H = [6, 11];
 const CITY_PLAZA_K = 2.4;
-const CITY_TOWER_FROM_T = { metro: 0.24, megalopolis: 0.36 };   // 中心からこの割合の内側に高層ビル
-const CITY_TOWER_P = { metro: 0.35, megalopolis: 0.6 };         // その範囲の建物が高層ビルになる確率
-const CITY_TOWER_H = { metro: [55, 150], megalopolis: [80, 380] };
+const CITY_TOWER_FROM_T = { metro: 0.24, megacity: 0.36 };   // 中心からこの割合の内側に高層ビル
+const CITY_TOWER_P = { metro: 0.35, megacity: 0.6 };         // その範囲の建物が高層ビルになる確率
+const CITY_TOWER_H = { metro: [55, 150], megacity: [80, 380] };
 
 function cityRoofFor(ch, rand) {
   if (ch.climate === 'arid') return rand() < 0.85 ? 'flat' : 'hip';
@@ -530,7 +544,7 @@ function cityBuildingPlan(city) {
     out.push(bld);
   }
   // 巨大都市のいちばん高いビルには尖塔を載せる（街の顔）
-  if (tallest && ch.tier === 'megalopolis') tallest.spire = tallest.h * 0.18;
+  if (tallest && ch.tier === 'megacity') tallest.spire = tallest.h * 0.18;
   return out;
 }
 
@@ -548,14 +562,14 @@ function cityLandmarks(city) {
   const ch = cityCharacterOf(city);
   const rand = clRng('landmark:' + city.id);
   const want = [ch.landmark];
-  if (ch.tier === 'megalopolis') want.push('tvtower');
+  if (ch.tier === 'megacity') want.push('tvtower');
   const out = [];
   const scale = ch.tier === 'town' ? 0.75 : ch.tier === 'city' ? 1 : 1.2;
   for (const kind of want) {
     const sz = CITY_LANDMARK_SIZE[kind];
     const r = sz.r * (kind === 'tvtower' ? 1 : scale);
     const h = sz.h * (kind === 'tvtower' ? 0.85 + rand() * 0.45 : scale);
-    const start = kind === 'tvtower' ? city.builtRadiusM * 0.3 : 0;
+    const start = kind === 'tvtower' ? (city.downtownR || city.builtRadiusM) * 0.3 : 0;
     const a0 = rand() * Math.PI * 2;
     let placed = null;
     for (let k = 0; k < 400 && !placed; k++) {
@@ -601,11 +615,339 @@ function clFootprintClear(net, x, z, w, d, dirX, dirZ) {
   return true;
 }
 
+// --- 区画：巨大都市の外側の市街地と、都市群の帯 ---------------------------------
+//
+// 直径20〜40kmの巨大都市や、数百kmに及ぶ都市群の帯を、ふつうの街と同じく1つのメッシュで建てると
+// 建物が数万軒になって重すぎる（ふつうの街は全部で8.8万軒、巨大都市1つの都心で1,900軒ほど）。
+// そこで世界の格子（CITY_TILE_M 四方）で区切った「区画」ごとに建物と街路を決め、見ている場所から
+// 近い区画だけ建てる（遠くは背の高い建物だけ。js/env/03d-places.js の区画の出し入れ）。
+//   ・巨大都市の区画 … 都心（downtownR）の外から市街地の外周まで。街と同じ向き・同じ間隔の碁盤の目の街路で、
+//                     都心に近いほど密で中層の建物が多く、外へ行くほど家が増えてまばらになる。
+//                     都心の近くには副都心の高層ビルもまばらに立つ
+//   ・都市群の帯の区画 … 仲間の街どうしの間の郊外。家が主で、倉庫・中層の建物が混じる。
+//                     帯の芯に近い濃いところだけ細い街路を引く
+// どれも区画のキーから決まる乱数で作るので、何度作っても同じ区画になる。
+// 座標は区画の中心からの相対位置。
+const CITY_TILE_M = 1600;
+// 建物の密度（1km²あたりの軒数）。tz は都心の外周（0）から市街地の外周（1）までの割合。
+//   中層の建物 … 都心のすぐ外で CL_BLOCK_DENSE、外へ行くほど減る
+//   家 … 都心のすぐ外は中層に押されて少なく、tz 0.35 あたりから CL_HOUSE_DENSE。外周へ少し減る
+//   倉庫・工場 … 中ほどに多い
+//   副都心の高層ビル … 都心のすぐ外にまばらに
+// 家はとくに多い（近くの区画だけ、別の仕事で並べる。cityDistrictHouses）
+const CL_BLOCK_DENSE = 110;
+const CL_HOUSE_DENSE = 420;
+const CL_WAREHOUSE_DENSE = 12;
+const CL_TOWER_DENSE = 6;
+const CL_BAND_HOUSE = 280;      // 都市群の帯の芯での家の密度
+const CL_BAND_BLOCK = 14;
+const CL_BAND_WAREHOUSE = 9;
+const CL_BAND_STREETS_F = 0.5;  // 帯の濃さがこれ以上のところにだけ街路を引く
+const CL_ROW_STEP_M = 22;       // 街路に沿って家を並べる間隔
+const CL_ROW_FULL = 950;        // 街路の両側に CL_ROW_STEP_M おきに全部建てたときの密度（1km²あたり）
+const CL_MAX_TILT = { house: 2.5, block: 5, tower: 6, warehouse: 3 };
+
+function clSmooth(t) { t = t < 0 ? 0 : t > 1 ? 1 : t; return t * t * (3 - 2 * t); }
+
+function clTileKey(i, j) { return i + ',' + j; }
+
+// 区画 (i, j) が何か（巨大都市の区画か、都市群の帯か、どちらでもないか）
+function cityDistrictInfo(i, j) {
+  const cx = (i + 0.5) * CITY_TILE_M, cz = (j + 0.5) * CITY_TILE_M;
+  const half = CITY_TILE_M * 0.72;   // 区画の中心から角まで
+  for (const c of clW.WORLD_CITIES) {
+    if (!c.megacity) continue;
+    const d = Math.hypot(cx - c.x, cz - c.z);
+    if (d - half > c.builtRadiusM) continue;
+    if (d + half < (c.downtownR || 0) * 0.86) return null;   // 都心の中（ふつうの街として建つ）
+    return { kind: 'core', city: c, cx, cz, key: 'd:' + clTileKey(i, j) };
+  }
+  // 帯の濃さは区画の中心と四隅で見る（中心だけだと、帯の縁にかかる区画を落とす）
+  const o = {};
+  let f = 0;
+  for (const [a, b] of [[0, 0], [-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+    const probe = {};
+    const v = clW.worldMegaBandAt(cx + a * CITY_TILE_M * 0.5, cz + b * CITY_TILE_M * 0.5, probe);
+    if (v > f) { f = v; o.seg = probe.seg; }
+  }
+  if (f < 0.04 || !o.seg) return null;
+  return { kind: 'band', mega: o.seg.mega, seg: o.seg, cx, cz, key: 'd:' + clTileKey(i, j) };
+}
+
+// (x, z) がどこかの街の建物の範囲（都心・ふつうの街）の中か。帯の家はそこには建てない
+function clInsideTownCore(x, z) {
+  for (const c of clW.WORLD_CITIES) {
+    const R = c.megacity ? c.builtRadiusM : c.builtRadiusM * 1.05;
+    const dx = x - c.x, dz = z - c.z;
+    if (dx * dx + dz * dz < R * R) return c;
+  }
+  return null;
+}
+
+// 区画の街路（区画の中心からの相対座標）。碁盤の目を区画の四角で切る
+function clDistrictStreets(info, angle, block, keep) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const hs = CITY_TILE_M / 2;
+  // 碁盤の目の原点は街の中心（巨大都市）か、帯の区間の端。区画をまたいでも線がつながる
+  const ox = info.gx - info.cx, oz = info.gz - info.cz;
+  const lines = [];
+  const corners = [[-hs, -hs], [hs, -hs], [hs, hs], [-hs, hs]].map(([x, z]) => {
+    const rx = x - ox, rz = z - oz;
+    return { u: rx * c + rz * s, v: -rx * s + rz * c };
+  });
+  const uMin = Math.min(...corners.map((p) => p.u)), uMax = Math.max(...corners.map((p) => p.u));
+  const vMin = Math.min(...corners.map((p) => p.v)), vMax = Math.max(...corners.map((p) => p.v));
+  const P = (u, v) => ({ x: ox + u * c - v * s, z: oz + u * s + v * c });
+  for (let k = Math.ceil(vMin / block); k * block <= vMax; k++) {
+    const a = P(uMin, k * block), b = P(uMax, k * block);
+    lines.push({ pts: clLine(a.x, a.z, b.x, b.z, CL_STEP_STRAIGHT), halfW: k % 4 === 0 ? CL_MAJOR_HALF_W : CL_STREET_HALF_W, major: k % 4 === 0 });
+  }
+  for (let k = Math.ceil(uMin / block); k * block <= uMax; k++) {
+    const a = P(k * block, vMin), b = P(k * block, vMax);
+    lines.push({ pts: clLine(a.x, a.z, b.x, b.z, CL_STEP_STRAIGHT), halfW: k % 4 === 0 ? CL_MAJOR_HALF_W : CL_STREET_HALF_W, major: k % 4 === 0 });
+  }
+  const inTile = (x, z) => Math.abs(x) <= hs && Math.abs(z) <= hs;
+  return clClip(lines, (x, z) => inTile(x, z) && keep(x + info.cx, z + info.cz));
+}
+
+// 区画の性格（街路・密度・色）。cityDistrictPlan と cityDistrictHouses が使う
+function clDistrictContext(info) {
+  const ctx = { info };
+  if (info.kind === 'core') {
+    const city = info.city;
+    ctx.city = city;
+    ctx.angle = city.streetAngle;
+    ctx.block = city.blockM;
+    info.gx = city.x; info.gz = city.z;
+    const edge = clFullEdgeFn(city), downEdge = cityEdgeFn(city);
+    ctx.tOf = (x, z) => {
+      const dx = x - city.x, dz = z - city.z, ang = Math.atan2(dz, dx), r = Math.hypot(dx, dz);
+      const r0 = downEdge(ang), r1 = edge(ang);
+      if (r < r0 + 40 || r > r1) return -1;
+      return (r - r0) / Math.max(r1 - r0, 1);
+    };
+    ctx.dens = (x, z) => {
+      const tz = ctx.tOf(x, z);
+      if (tz < 0) return null;
+      return {
+        tz,
+        block: CL_BLOCK_DENSE * Math.pow(1 - tz, 1.6) + 5,
+        house: CL_HOUSE_DENSE * clSmooth(tz / 0.35) * (1 - 0.45 * tz),
+        warehouse: CL_WAREHOUSE_DENSE * 4 * tz * (1 - tz),
+        tower: Math.max(CL_TOWER_DENSE * (1 - tz * 3.2), 0),
+      };
+    };
+    ctx.streetKeep = (x, z) => ctx.tOf(x, z) >= 0;
+  } else {
+    const core = info.mega.core;
+    ctx.city = core;
+    const sg = info.seg;
+    ctx.angle = Math.atan2(sg.bz - sg.az, sg.bx - sg.ax);
+    ctx.block = core.blockM * 1.4;
+    info.gx = sg.ax; info.gz = sg.az;
+    ctx.tOf = () => 1;
+    ctx.dens = (x, z) => {
+      if (clInsideTownCore(x, z)) return null;
+      const f = clW.worldMegaBandAt(x, z);
+      if (f <= 0) return null;
+      return { tz: 1, f, block: CL_BAND_BLOCK * f, house: CL_BAND_HOUSE * f, warehouse: CL_BAND_WAREHOUSE * f, tower: 0 };
+    };
+    ctx.streetKeep = (x, z) => !clInsideTownCore(x, z) && clW.worldMegaBandAt(x, z) >= CL_BAND_STREETS_F;
+  }
+  ctx.ch = cityCharacterOf(ctx.city);
+  ctx.style = cityStyleOf(ctx.city);
+  const ch = ctx.ch;
+  ctx.walls = CITY_BRIGHT_WALLS[ch.climate] ? ctx.style.palette.concat(CITY_BRIGHT_WALLS[ch.climate]) : ctx.style.palette;
+  ctx.roofs = CITY_ROOF_COLORS[ch.climate];
+  ctx.towers = CITY_TOWER_COLORS[ch.climate] || CITY_TOWER_COLORS.other;
+  ctx.pitch = ch.climate === 'cold' || ch.highland ? 0.55 : ch.climate === 'tropical' ? 0.28 : 0.36;
+  // 区画にかかる空港（区画ごとに1回だけ探す。1軒ごとに78空港を見ると重い）
+  const na = clW.worldNearestAirport(info.cx, info.cz);
+  ctx.airport = na && na.airport && na.distanceM < na.airport.flatOuterR + CITY_TILE_M ? na.airport : null;
+  return ctx;
+}
+
+// 建ててよい場所か（道路・空港・港・急な斜面）。建物の中心 (bx, bz)、向き (dirX, dirZ)
+function clSiteOk(ctx, bx, bz, w, d, dirX, dirZ, kind) {
+  const span = Math.max(w, d);
+  if (clW.worldRoadEdgeDistance(bx, bz) < span * 0.6 + 6) return false;
+  if (clW.worldAirportRoadBlock(bx, bz, 250)) return false;
+  if (ctx.airport && Math.hypot(bx - ctx.airport.x, bz - ctx.airport.z) < ctx.airport.flatInnerR + 300) return false;
+  if (clW.worldPortAt(bx, bz, 60)) return false;
+  // 急な斜面には建てない（都心と違って地形を均していない）
+  const px = -dirZ, pz = dirX;
+  let lo = Infinity, hi = -Infinity;
+  const pts = kind === 'house' ? [[0, 0], [0.5, 0.5], [-0.5, -0.5]] : [[0, 0], [0.5, 0.5], [0.5, -0.5], [-0.5, 0.5], [-0.5, -0.5]];
+  for (const [a, b] of pts) {
+    const g = clW.worldHeightAt(bx + dirX * a * w + px * b * d, bz + dirZ * a * w + pz * b * d);
+    if (g < lo) lo = g;
+    if (g > hi) hi = g;
+  }
+  return lo > 0.5 && hi - lo <= CL_MAX_TILT[kind];
+}
+
+// 区画 (i, j) の街路と、中層・倉庫・高層の建物。{ info, streets, index, buildings, groundY, ctx } か null。
+// 家は近くの区画だけ cityDistrictHouses で足す（数が多いので、使うときまで並べない）
+function cityDistrictPlan(i, j) {
+  const info = cityDistrictInfo(i, j);
+  if (!info) return null;
+  const ctx = clDistrictContext(info);
+  const rand = clRng('district:' + info.key);
+  const krand = clRng('dkind:' + info.key);
+  const area = (CITY_TILE_M / 1000) * (CITY_TILE_M / 1000);
+  const hs = CITY_TILE_M / 2;
+  // 区画の中心と四隅のいちばん濃いところで軒数の上限を決める
+  let mx = { block: 0, warehouse: 0, tower: 0, house: 0 };
+  let any = false;
+  for (const [a, b] of [[0, 0], [-0.45, -0.45], [0.45, -0.45], [0.45, 0.45], [-0.45, 0.45]]) {
+    const dv = ctx.dens(info.cx + a * CITY_TILE_M, info.cz + b * CITY_TILE_M);
+    if (!dv) continue;
+    any = true;
+    for (const k in mx) mx[k] = Math.max(mx[k], dv[k]);
+  }
+  if (!any) return null;
+  const streets = clDistrictStreets(info, ctx.angle, ctx.block, ctx.streetKeep);
+  const net = { streets, index: clIndexStreets(streets) };
+  ctx.net = net;
+  const out = [];
+  const groundY = clW.worldHeightAt(info.cx, info.cz);
+  const { ch, style } = ctx;
+  for (const kind of ['tower', 'block', 'warehouse']) {
+    const want = Math.round(mx[kind] * area);
+    for (let n = 0, tries = 0; n < want && tries < want * 3; tries++) {
+      let x = (rand() * 2 - 1) * hs, z = (rand() * 2 - 1) * hs;
+      const dv = ctx.dens(x + info.cx, z + info.cz);
+      if (!dv || rand() * mx[kind] > dv[kind]) continue;
+      n++;
+      if (kind === 'tower' && ch.highland) continue;
+      const tz = dv.tz;
+      let w, d, h;
+      if (kind === 'tower') {
+        w = 26 + krand() * 20; d = 26 + krand() * 20;
+        h = (45 + krand() * krand() * 90) * style.height;
+      } else if (kind === 'block') {
+        w = 14 + krand() * 24; d = 12 + krand() * 20;
+        h = (10 + krand() * (info.kind === 'core' ? 28 * (1 - tz * 0.7) : 10)) * style.height;
+        if (ch.highland) h = Math.min(h, 14);
+      } else {
+        w = 40 + krand() * 45; d = 26 + krand() * 30; h = 8 + krand() * 5;
+      }
+      const nst = cityNearestStreet(net, x, z);
+      let dirX = Math.cos(ctx.angle), dirZ = Math.sin(ctx.angle);
+      if (nst) {
+        dirX = nst.tx; dirZ = nst.tz;
+        const setback = nst.halfW + CL_STREET_CLEAR + d * 0.5 + rand() * 5;
+        if (nst.d < setback + d) {
+          const px = -nst.tz, pz = nst.tx;
+          const side = ((x - nst.fx) * px + (z - nst.fz) * pz) >= 0 ? 1 : -1;
+          x = nst.fx + px * side * setback;
+          z = nst.fz + pz * side * setback;
+        }
+      }
+      if (Math.abs(x) > hs || Math.abs(z) > hs) continue;   // 隣の区画のもの
+      if (!clFootprintClear(net, x, z, w, d, dirX, dirZ)) continue;
+      if (!clSiteOk(ctx, x + info.cx, z + info.cz, w, d, dirX, dirZ, kind)) continue;
+      const roof = kind === 'block' && krand() < 0.2 ? cityRoofFor(ch, krand) : 'flat';
+      const color = ctx.walls[(rand() * ctx.walls.length) | 0];
+      out.push({
+        x, z, w, d, h, ang: Math.atan2(dirZ, dirX), t: tz,
+        color: kind === 'warehouse' ? clMixHex(color, 0x9a9a94, 0.5) : color,
+        skin: kind === 'tower' ? ctx.towers[(krand() * ctx.towers.length) | 0] : 0,
+        kind: kind === 'warehouse' ? 'block' : kind, warehouse: kind === 'warehouse', roof,
+        roofH: roof === 'flat' ? 0 : Math.min(w, d) * ctx.pitch, roofColor: ctx.roofs[(krand() * ctx.roofs.length) | 0], spire: 0,
+      });
+    }
+  }
+  return { info, streets, index: net.index, buildings: out, groundY, city: ctx.city, ctx, houseMax: mx.house };
+}
+
+// 区画の家（cityDistrictPlan の結果に足す。1度並べたら plan.houses に持つ）。
+// 街路のある区画は、街路の両側に CL_ROW_STEP_M おきに並べる（郊外の住宅地の並び）。
+// 街路の無い帯の区画は、密度に合わせて散らす。中層・倉庫の敷地には建てない。
+function cityDistrictHouses(plan) {
+  if (plan.houses) return plan.houses;
+  const { info, ctx } = plan;
+  const net = ctx.net;
+  const rand = clRng('dhouse:' + info.key);
+  const hs = CITY_TILE_M / 2;
+  const out = [];
+  if (!(plan.houseMax > 0.5)) { plan.houses = out; return out; }
+  // 中層・倉庫の敷地（40m升目）
+  const taken = new Set();
+  const cellOf = (x, z) => Math.floor(x / 40) * 65536 + Math.floor(z / 40);
+  for (const b of plan.buildings) {
+    const r = Math.max(b.w, b.d) * 0.6 + 6;
+    for (let x = b.x - r; x <= b.x + r; x += 20) for (let z = b.z - r; z <= b.z + r; z += 20) taken.add(cellOf(x, z));
+  }
+  const { ch } = ctx;
+  const tryHouse = (x, z, dirX, dirZ) => {
+    if (Math.abs(x) > hs || Math.abs(z) > hs) return;
+    if (taken.has(cellOf(x, z))) return;
+    const w = 9 + rand() * 8, d = 8 + rand() * 6;
+    if (!clFootprintClear(net, x, z, w, d, dirX, dirZ)) return;
+    if (!clSiteOk(ctx, x + info.cx, z + info.cz, w, d, dirX, dirZ, 'house')) return;
+    const h = CITY_HOUSE_H[0] + rand() * (CITY_HOUSE_H[1] - CITY_HOUSE_H[0]) * (ch.highland ? 0.7 : 1);
+    const roof = cityRoofFor(ch, rand);
+    const color = ctx.walls[(rand() * ctx.walls.length) | 0];
+    out.push({
+      x, z, w, d, h, ang: Math.atan2(dirZ, dirX), t: 1,
+      color: clMixHex(color, CITY_HOUSE_WALL_LIGHT, CITY_HOUSE_WALL_MIX), skin: 0, kind: 'house', roof,
+      roofH: roof === 'flat' ? 0 : Math.min(w, d) * ctx.pitch, roofColor: ctx.roofs[(rand() * ctx.roofs.length) | 0], spire: 0,
+    });
+    taken.add(cellOf(x, z));
+  };
+  if (net.streets.length) {
+    for (const st of net.streets) {
+      for (let k = 1; k < st.pts.length; k++) {
+        const a = st.pts[k - 1], b = st.pts[k];
+        const L = Math.hypot(b.x - a.x, b.z - a.z);
+        if (L < 1) continue;
+        const tx = (b.x - a.x) / L, tz = (b.z - a.z) / L;
+        for (let s = rand() * CL_ROW_STEP_M; s < L; s += CL_ROW_STEP_M) {
+          const x0 = a.x + tx * s, z0 = a.z + tz * s;
+          const dv = ctx.dens(x0 + info.cx, z0 + info.cz);
+          if (!dv) continue;
+          const p = dv.house / CL_ROW_FULL;
+          for (const side of [1, -1]) {
+            if (rand() > p) continue;
+            const off = st.halfW + CL_STREET_CLEAR + 6 + rand() * 4;
+            tryHouse(x0 - tz * side * off, z0 + tx * side * off, tx, tz);
+          }
+        }
+      }
+    }
+  } else {
+    const area = (CITY_TILE_M / 1000) * (CITY_TILE_M / 1000);
+    const want = Math.round(plan.houseMax * area);
+    const dirX = Math.cos(ctx.angle), dirZ = Math.sin(ctx.angle);
+    for (let n = 0; n < want * 1.5; n++) {
+      const x = (rand() * 2 - 1) * hs, z = (rand() * 2 - 1) * hs;
+      const dv = ctx.dens(x + info.cx, z + info.cz);
+      if (!dv || rand() * plan.houseMax > dv.house) continue;
+      tryHouse(x, z, dirX, dirZ);
+    }
+  }
+  plan.houses = out;
+  return out;
+}
+
+// 巨大都市の市街地の外周（都心の cityEdgeFn と同じくうねらせる）
+function clFullEdgeFn(city) {
+  if (city._fullEdge) return city._fullEdge;
+  const rand = clRng('fulledge:' + city.id);
+  const R = city.builtRadiusM;
+  const p1 = rand() * 6.283, p2 = rand() * 6.283, p3 = rand() * 6.283;
+  city._fullEdge = (ang) => R * (0.82 + 0.18 * (0.5 * Math.sin(2 * ang + p1)
+    + 0.3 * Math.sin(5 * ang + p2) + 0.2 * Math.sin(7 * ang + p3)));
+  return city._fullEdge;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     CITY_COUNTRY_STYLE, cityLayoutOf, cityStyleOf, cityStreetNetwork, cityNearestStreet,
     cityStreetClearance, cityBuildingPlan, cityBuildingTarget, cityEdgeFn,
     cityCharacterOf, cityLandmarks, CITY_HIGHLAND_M,
+    CITY_TILE_M, cityDistrictInfo, cityDistrictPlan, cityDistrictHouses, clFullEdgeFn,
     CL_STREET_CLEAR, CL_STREET_HALF_W, CL_MAJOR_HALF_W, CL_LANE_HALF_W,
   };
 }
