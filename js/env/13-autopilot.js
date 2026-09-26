@@ -623,6 +623,9 @@ const AP_FLAP_RAMP_M = 5000;
 // 4まで上げると今度は行き過ぎて19.4Gに戻る。
 const AP_PITCH_VS_KD = 2;
 const AP_FLARE_PITCH_MAX = 10;  // 引き起こしで許す機首上げの上限(°)
+const AP_FLARE_IDLE_AGL_M = 3;   // 引き起こしで出力を絞りはじめる対地高度(m)
+const AP_APPR_ACC_K = 1;        // 最終進入：加速度1Gあたり差し引く出力
+const AP_APPR_ACC_TAU = 0.5;    // 最終進入：加速度をならす時定数(秒)
 // 着陸滑走で跳ねて浮いたときに狙う機首上げ(°)。0にすると前輪から突っ込む
 const AP_ROLLOUT_PITCH_DEG = 5;
 const AP_TAIL_BRAKE_MARGIN_DEG = 3;  // 尾輪式：駐機姿勢からこれより下がったらブレーキを緩めはじめる(°)
@@ -1545,6 +1548,8 @@ function createAutopilotState() {
     rotating: false,        // 離陸滑走で機首上げを始めたか
     descentSpeedCapMps: 0,  // 降下中の速度の上限（降下に入った時点の速さ）
     apprThr: undefined,     // 最終進入の出力の積分（絞るぶんとは別に持つ）
+    apprPrevV: undefined,   // 最終進入：前のコマの対気速度（加速度を出す）
+    apprAcc: 0,             // 最終進入：ならした加速度(m/s²)
     apprFlapMax: undefined, // 最終進入で下ろしていいフラップの上限（トリムの余裕で決まる）
     // 垂直エンジンの輪の減衰に使う、上下の加速度（apVtolThrottleForVs）
     vtolLastVs: undefined, vtolAccel: 0,
@@ -1936,7 +1941,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     if (phase !== 'vtol_hover') ap.vtolHoverCapMps = undefined;
     if (phase !== 'vtol_hover' && phase !== 'vtol_approach') ap.vtolAccI = 0;
     ap.gndPrevHdg = undefined; // 地上の操向の積分・すべり角は段ごとに取り直す
-    if (phase !== 'approach') { ap.apprThr = undefined; ap.apprFlapMax = undefined; }
+    if (phase !== 'approach') { ap.apprThr = undefined; ap.apprFlapMax = undefined; ap.apprPrevV = undefined; ap.apprAcc = 0; }
     // やり直すときは、FAFへまっすぐ戻るか入口を経由するかを決め直す
     if (phase === 'goaround') { ap.navMode = undefined; ap.gaThr = undefined; }
     ap.phase = phase;
@@ -2886,8 +2891,17 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 今度は降りられなくなる。
     const floorV = spd.stall * (1 - AP_FLAP_STALL_GAIN * controls.flap) * AP_APPROACH_MIN_STALL;
     const tooSlow = apClamp((floorV - state.airspeed) / Math.max(spd.stall * 0.1, 1), 0, 1);
-    controls.throttle = overFloor ? ap.apprThr
-      : ap.apprThr * Math.max(1 - high, tooSlow);
+    // **加速度で逆向きに当てて、速度の輪を落ち着かせる**。積分だけの速度の輪は、推力が速度に効くまでの遅れと
+    // 合わさって揺れる——実測で Concorde が最終進入のあいだずっと、出力0⇔0.9・速度172⇔190kt・
+    // 昇降率-720⇔-1190fpm を約10秒周期で往復し、沈下の山で引き起こしに入ると荒く接地した
+    // （路線によって -281〜-762fpm）。加速度（ならしたもの）1Gあたり出力1を差し引くと揺れが消え、
+    // 5路線で -329〜-573fpm に揃う。
+    const acc = ap.apprPrevV === undefined ? 0 : (state.airspeed - ap.apprPrevV) / Math.max(dt, 1e-3);
+    ap.apprPrevV = state.airspeed;
+    ap.apprAcc += (acc - ap.apprAcc) * Math.min(dt / AP_APPR_ACC_TAU, 1);
+    const thrDamped = apClamp(ap.apprThr - AP_APPR_ACC_K * ap.apprAcc / 9.80665, 0, 1);
+    controls.throttle = overFloor ? thrDamped
+      : thrDamped * Math.max(1 - high, tooSlow);
     // スポイラーも「高い・速い」ときの手。ただし**地形の床を追って登っている
     // あいだは使わない**（出力を切るのと同じ理由で、越えるための揚力を自分で削る）。
     // 引き起こしが近づいたら畳む——接地の直前に揚力を削ると、そのまま落ちる。
@@ -3013,7 +3027,19 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.yaw = state.altitudeAglM < AP_DECRAB_AGL_M
       ? apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP * 2, -1, 1)
       : apRudderForCoordination(state);
-    controls.throttle = Math.max(controls.throttle - dt * 0.8, 0);
+    // **出力は接地の直前（AP_FLARE_IDLE_AGL_M）まで進入のまま保ち、そこから絞る**。引き起こしの入口で
+    // 絞っていたので、迎角を取ると抗力の大きい機体は引き起こしのあいだに速度を失い、機首を上げたぶんの
+    // 揚力が速度の低下で消えた——実測で Concorde（縦横比1.7のデルタ翼）は対地14mから173→159ktまで
+    // 落ち、ピッチを2°上げても沈下は-1000→-855fpmしか減らず -539fpm で接地した（保つと -281fpm）。
+    // 実機の Concorde も出力を戻すのは接地の直前。
+    // **保つのは、指示より速く沈んでいる（沈下を止めきれていない）ときだけ**。沈下が止まって浮いているのに
+    // 保つと、そのまま流れる——練習機が丘陵の970mの平地で、帯の中心から867m先まで流れた。
+    // （速度で分けると、Concorde も引き起こしの入口では進入速度をわずかに上回るので最初に絞ってしまい、
+    // -715〜-828fpm に戻った。）ap.vsCmd は前のコマの指示
+    const sinkingTooFast = ap.vsCmd !== undefined && state.verticalSpeed < ap.vsCmd;
+    if (state.altitudeAglM < AP_FLARE_IDLE_AGL_M || !sinkingTooFast) {
+      controls.throttle = Math.max(controls.throttle - dt * 0.8, 0);
+    }
 
     // 沈下率は残りの高さに比例させる。一定の沈下率にすると、速い機体ほど
     // 何kmも浮いたまま滑走路を使い切ってしまう（大型機が2.7km先で接地した）。

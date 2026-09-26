@@ -20,6 +20,18 @@
 // 側の対応する直しと対で、傾けたぶんは実際に飛行でも効く。
 
 const PB_TARGET_MARGIN_MAC = 0.10; // 目標の静安定（翼弦の10%。ふつうの範囲5〜20%の真ん中）
+// **着陸の速さで釣り合わないなら、釣り合うところまで静安定を減らす**。静安定が大きいほど、迎角を取って
+// 飛ぶとき（遅いとき）に機首上げの舵が要る。水平尾翼を持たずエレボンで機首を上げる機体では、10%だと
+// 着陸の速さを舵で支えきれないことがある——送ってもらった Concorde（エレボン最大20°）は10%で、
+// 進入速度（失速の1.3倍）でもトリムと昇降舵を一杯に使って釣り合わず、自動着陸が -1,445fpm で接地した。
+// 飛行モデル（09-aircraft.js・10-flight.js。Builder でも読み込む）の solveLevelTrim で、失速の1.3倍
+// （進入）と1.2倍（接地の手前）を**トリムだけで**釣り合わせられるか確かめる。トリムで釣り合えば、
+// 昇降舵（エレボン）はまるごと引き起こしに残る。下限は飛行側で「静安定なし」と見なす線（AC_MIN_STATIC_MARGIN_PCT）。
+// 「トリム6割まで」と厳しくすると、三式戦闘機（10%で進入にトリム0.75〜0.87。昇降舵が別にあって-220fpmで降りる）
+// まで下げてしまった。
+const PB_LANDING_SPEEDS = [1.3, 1.2];  // 失速速度の何倍で確かめるか
+// 下げてよい静安定の下限（飛行側で「静安定なし」と見なす線 AC_MIN_STATIC_MARGIN_PCT と同じ）
+const PB_MIN_MARGIN_MAC = (typeof AC_MIN_STATIC_MARGIN_PCT === 'number' ? AC_MIN_STATIC_MARGIN_PCT : 3) / 100;
 const PB_ENGINE_TILT_MAX_DEG = 20; // エンジンを傾ける角度の上限（これ以上は見た目にも不自然）
 const PB_MOMENT_OK = () => Math.max(State.model.weightKg, 1) * 0.5; // solveLevelTrimのmomentOk判定と同じ基準
 
@@ -154,6 +166,104 @@ function pbBalanceReport() {
   };
 }
 
+// いまの Builder の状態を、飛行モデルに渡す設定の形にする（02-storage.js の buildCurrentRecord と同じ中身。
+// 3Dモデル本体は要らない）
+function pbCurrentConfig() {
+  const root = State.model.root;
+  return {
+    parts: State.parts.map(p => ({
+      id: p.id, type: p.type, name: p.name,
+      position: { x: 0, y: 0, z: 0, ...p.position }, rotation: { x: 0, y: 0, z: 0, ...p.rotation },
+      scale: { x: 1, y: 1, z: 1, ...p.scale },
+      props: JSON.parse(JSON.stringify(p.props || {})),
+    })),
+    cg: { ...State.cg.position },
+    modelTransform: root ? {
+      rotation: { x: root.rotation.x, y: root.rotation.y, z: root.rotation.z },
+      scale: { x: root.scale.x, y: root.scale.y, z: root.scale.z },
+    } : null,
+    modelWeightKg: State.model.weightKg,
+    modelMaxSpeedValue: State.model.maxSpeedValue,
+    modelMaxSpeedUnit: State.model.maxSpeedUnit,
+  };
+}
+
+// 着陸の速さ（PB_LANDING_SPEEDS）で、トリムだけで水平に釣り合うか。
+// 翼が足りない（その速さでは失速の手前まで迎角を取っても浮かない）のは重心では直せないので、見逃す。
+// 飛行モデルが読み込まれていなければ null（確かめられない）
+function pbLandingTrimCheck() {
+  if (typeof buildAircraftModel !== 'function' || typeof solveLevelTrim !== 'function') return null;
+  let model;
+  try { model = buildAircraftModel(pbCurrentConfig()); } catch (e) { return null; }
+  const stall = analyzeAircraftPerformance(model).stallMps;
+  if (!(stall > 0)) return null;
+  let worst = 0, ok = true;
+  for (const k of PB_LANDING_SPEEDS) {
+    const tr = solveLevelTrim(model, stall * k, 0);
+    if (tr.ok) {
+      worst = Math.max(worst, Math.abs(tr.trim));
+    } else if (tr.reason !== 'wing') {
+      ok = false; worst = Math.max(worst, 1);
+    }
+  }
+  return { ok, worstTrim: worst };
+}
+
+// 重心を、中立点から翼弦の margin ぶん前へ置く
+function pbPlaceCg(neutral, noseDir, margin) {
+  const target = neutral.point.clone().addScaledVector(noseDir, margin * neutral.mac);
+  State.cg.position.x = target.x;
+  State.cg.position.y = target.y;
+  State.cg.position.z = target.z;
+}
+
+// 重心を、中立点から翼弦の10%ぶん前へ。着陸の速さで舵が釣り合わなければ、
+// 釣り合う範囲でいちばん大きい静安定まで下げる（挟み撃ち。静安定が小さいほど要る機首上げの舵は減る）。
+// 返すのは { margin, landing }。landing.reduced は10%から下げたとき
+function pbChooseMargin(neutral, noseDir) {
+  let margin = PB_TARGET_MARGIN_MAC;
+  pbPlaceCg(neutral, noseDir, margin);
+  let landing = pbLandingTrimCheck();
+  if (landing && !landing.ok) {
+    // 下げて良くなるのは「機首上げの舵が足りない」ときだけ。機首下げが足りない機体は、下げるとかえって悪くなる
+    pbPlaceCg(neutral, noseDir, PB_MIN_MARGIN_MAC);
+    const atMin = pbLandingTrimCheck();
+    if (atMin && atMin.ok) {
+      let lo = PB_MIN_MARGIN_MAC, hi = PB_TARGET_MARGIN_MAC;   // lo は釣り合う、hi は釣り合わない
+      for (let i = 0; i < 10; i++) {
+        const mid = (lo + hi) / 2;
+        pbPlaceCg(neutral, noseDir, mid);
+        if (pbLandingTrimCheck().ok) lo = mid; else hi = mid;
+      }
+      margin = lo;
+    } else if (atMin && atMin.worstTrim < landing.worstTrim - 0.05) {
+      margin = PB_MIN_MARGIN_MAC;   // 下限でも足りない：舵面を大きくしてもらうしかない（トーストで知らせる）
+    }
+    pbPlaceCg(neutral, noseDir, margin);
+    if (margin !== PB_TARGET_MARGIN_MAC) landing = Object.assign(pbLandingTrimCheck() || {}, { reduced: true });
+  }
+  return { margin, landing };
+}
+
+// いまの重心で残るエンジンの推力モーメントを、角度を振って打ち消す。足した角度(°)を返す
+function pbTiltEngines(noseDir) {
+  const engines = pbForwardEngines();
+  if (!engines.length) return 0;
+  // エンジンの向き判定は「見た目の前」（modelTransform込み）基準で行う
+  const fixQ = pbFixQuaternion(pbNoseDirection(true) || noseDir);
+  const residual = pbEngineMoment(engines, State.cg.position, fixQ, 0);
+  if (Math.abs(residual) < PB_MOMENT_OK()) return 0;
+  const tiltDeg = pbBisect(
+    (d) => pbEngineMoment(engines, State.cg.position, fixQ, d),
+    -PB_ENGINE_TILT_MAX_DEG, PB_ENGINE_TILT_MAX_DEG);
+  for (const e of engines) {
+    e.rotation = e.rotation || { x: 0, y: 0, z: 0 };
+    e.rotation.x = (e.rotation.x || 0) + tiltDeg;
+    if (e.gizmo) applyPartToGizmo(e);
+  }
+  return tiltDeg;
+}
+
 // 「空力バランスを整える」— 重心とエンジンの角度を、実際にモーメントを測りながら決める。
 function balancePitchTrim() {
   const noseDir = pbNoseDirection();
@@ -163,31 +273,20 @@ function balancePitchTrim() {
 
   const before = pbBalanceReport();
 
-  // 1) 重心を、中立点から翼弦の10%ぶん前へ
-  const target = neutral.point.clone().addScaledVector(noseDir, PB_TARGET_MARGIN_MAC * neutral.mac);
-  State.cg.position.x = target.x;
-  State.cg.position.y = target.y;
-  State.cg.position.z = target.z;
-  applyCgToGizmo();
-
-  // 2) それでも残るエンジンの推力モーメントを、角度を振って打ち消す
-  const engines = pbForwardEngines();
-  let tiltDeg = 0;
-  if (engines.length) {
-    // エンジンの向き判定は「見た目の前」（modelTransform込み）基準で行う
-    const fixQ = pbFixQuaternion(pbNoseDirection(true) || noseDir);
-    const residual = pbEngineMoment(engines, State.cg.position, fixQ, 0);
-    if (Math.abs(residual) >= PB_MOMENT_OK()) {
-      tiltDeg = pbBisect(
-        (d) => pbEngineMoment(engines, State.cg.position, fixQ, d),
-        -PB_ENGINE_TILT_MAX_DEG, PB_ENGINE_TILT_MAX_DEG);
-      for (const e of engines) {
-        e.rotation = e.rotation || { x: 0, y: 0, z: 0 };
-        e.rotation.x = (e.rotation.x || 0) + tiltDeg;
-        if (e.gizmo) applyPartToGizmo(e);
-      }
-    }
+  // 1) 重心を決める → 2) 残るエンジンの推力モーメントを角度で打ち消す。
+  // エンジンを傾けると推力の向きが変わって着陸の速さでの釣り合いも変わるので、傾けたあとで確かめ直し、
+  // 釣り合わなければ重心から選び直す（Concorde は重心を選んだあとにエンジンを2.5°傾けると、
+  // 失速の1.2倍で釣り合わなくなっていた）。数回で落ち着く
+  let chosen = pbChooseMargin(neutral, noseDir);
+  let tiltDeg = pbTiltEngines(noseDir);
+  for (let k = 0; k < 3; k++) {
+    const again = pbLandingTrimCheck();
+    if (!again || again.ok) break;
+    chosen = pbChooseMargin(neutral, noseDir);
+    tiltDeg += pbTiltEngines(noseDir);
   }
+  const landing = chosen.landing;
+  applyCgToGizmo();
 
   if (State.cg.selected) updateInspectorNumbersOnly(null, true);
   renderPartList();
@@ -202,7 +301,12 @@ function balancePitchTrim() {
   const stillOff = !after.momentOk
     ? '（推力のずれが大きく、エンジンを振り切っても打ち消しきれません。エンジンをもっと重心に近づけてください）'
     : '';
-  showToast(`${marginTxt}${tiltTxt}${stillOff}`);
+  const landingTxt = landing && landing.reduced
+    ? (landing.ok
+      ? `（10%では着陸の速さを舵で支えきれないので、支えられる${after.staticMarginPct.toFixed(0)}%にしました）`
+      : `（着陸の速さを舵で支えきれません。${after.staticMarginPct.toFixed(0)}%まで下げても足りないので、昇降舵・エレボンを大きくしてください）`)
+    : '';
+  showToast(`${marginTxt}${landingTxt}${tiltTxt}${stillOff}`);
   return true;
 }
 
@@ -232,6 +336,7 @@ function pbBalancePanelHtml() {
     <div class="hint" style="margin-top:6px;">
       重心を、主翼（＋水平尾翼）の中立点から翼弦10%ぶん前へ動かし、
       残ったエンジン推力のずれは角度を振って打ち消します。
+      10%では着陸の速さを舵で支えきれない機体は、支えられるところまで静安定を下げます（下限3%）。
       エレベーターが効かない機体（デルタ翼のエレボンなど）はこれで直ります。
     </div>
   `;

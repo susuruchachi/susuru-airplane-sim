@@ -1314,6 +1314,42 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
   // 主翼が無ければ、決めようがないので断る
   pctx.State = { parts: [pEngine('e1', 0)], cg: { position: { x: 0, y: 0, z: 0 }, gizmo: { position: new THREE.Vector3() } }, model: { weightKg: 1000 } };
   check(pctx.balancePitchTrim() === false, '主翼が無ければ断る');
+
+  // 飛行モデルも読み込んだ Builder（index.html と同じ）では、着陸の速さで釣り合うかを確かめて静安定を決める。
+  // エレボンだけのデルタ翼は10%だと失速の1.2倍を舵で支えきれない（エンジンを傾けたあとで）ので、
+  // 支えられるところまで下げる。水平尾翼のある練習機は10%のまま
+  const lctx = vm.createContext({
+    THREE, console, Math, Number, Array, Object, JSON,
+    State: null, showToast: (m, e) => toasts.push({ msg: m, error: !!e }),
+    applyPartToGizmo: () => {}, renderPartList: () => {}, renderInspector: () => {},
+    updateInspectorNumbersOnly: () => {}, applyCgToGizmo: () => {},
+  });
+  for (const f of ['env/09e-part-proxy.js', 'env/09-aircraft.js', 'env/10-flight.js', '05b-cg-system.js', '05e-pitch-balance.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'js', f), 'utf8'), lctx, { filename: f });
+  }
+  const landState = (parts, cg, weightKg) => ({
+    parts, cg: { position: { ...cg }, gizmo: { position: new THREE.Vector3() } },
+    model: { root: new THREE.Object3D(), weightKg, maxSpeedValue: 500, maxSpeedUnit: 'kt' },
+  });
+  const trimAt = (cfg, k) => {
+    const m = buildAircraftModel(cfg);
+    const p = analyzeAircraftPerformance(m);
+    return { tr: solveLevelTrim(m, p.stallMps * k, 0), sm: p.staticMarginPct };
+  };
+  lctx.State = landState(buildState().parts, { x: 0, y: 0, z: 0 }, 30000);
+  toasts.length = 0;
+  lctx.balancePitchTrim();
+  const deltaLand = lctx.pbCurrentConfig();
+  const dl13 = trimAt(deltaLand, 1.3), dl12 = trimAt(deltaLand, 1.2);
+  note('着陸の速さで釣り合う静安定（エレボンのデルタ翼）', `${toasts.map((t) => t.msg).join(' ')} ／ 失速の1.3倍 トリム${dl13.tr.ok ? dl13.tr.trim.toFixed(2) : '×'}・1.2倍 ${dl12.tr.ok ? dl12.tr.trim.toFixed(2) : '×'}`);
+  check(dl12.sm >= 3 && dl12.sm < 9.5 && dl13.tr.ok && dl12.tr.ok,
+    '空力バランス：10%では着陸の速さを舵で支えきれない機体は、支えられるところまで静安定を下げる', `${dl12.sm.toFixed(1)}%`);
+  const tcfg = defaultAircraftConfig();
+  lctx.State = landState(tcfg.parts, tcfg.cg, tcfg.modelWeightKg);
+  toasts.length = 0;
+  lctx.balancePitchTrim();
+  const tLand = trimAt(lctx.pbCurrentConfig(), 1.2);
+  check(Math.abs(tLand.sm - 10) < 1 && tLand.tr.ok, '空力バランス：着陸の速さで釣り合う機体（練習機）は10%のまま', `${tLand.sm.toFixed(1)}%`);
 }
 
 // --- Builderの「エンジン出力の自動設定」------------------------------------------
