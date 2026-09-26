@@ -266,6 +266,7 @@ function renderCgInspector(el) {
   const mainWings = State.parts.filter(p => p.type === 'wing' && p.props.role === 'main');
   const hasLeftRight = mainWings.some(w => w.props.side === 'left') && mainWings.some(w => w.props.side === 'right');
   const hasRotor = typeof cgRotorEngines === 'function' && cgRotorEngines().length > 0;
+  const hasFwdEngine = typeof cgForwardEngines === 'function' && cgForwardEngines().length > 0;
 
   el.innerHTML = `
     <div class="section-title">プロパティ — 重心（原点）</div>
@@ -283,6 +284,13 @@ function renderCgInspector(el) {
       主翼から決定
     </button>
     ${!hasLeftRight ? '<div class="hint" style="color:var(--warn);margin-top:8px;">左翼・右翼それぞれ1つ以上必要です</div>' : ''}
+    ${hasFwdEngine ? `
+    <div class="divider"></div>
+    <div class="subgroup-title">主翼と推力線から決定</div>
+    <div class="hint" style="margin-bottom:8px;">前後・左右は主翼の空力中心、上下は前へ押すエンジンの推力線の上に重心を合わせます。重心が推力線より上か下にあると、出力を変えるたびに機首が上下します。エンジンを傾けて付けていれば、その傾きも入ります（垂直離陸用とヘリのローターは数えません）。</div>
+    <button class="btn-danger-outline" id="btnCgFromWingsThrust" style="color:var(--accent);border-color:var(--accent-dim);">
+      主翼と推力線から決定
+    </button>` : ''}
     ${hasRotor ? `
     <div class="divider"></div>
     <div class="subgroup-title">ローターから決定（ヘリ）</div>
@@ -296,6 +304,8 @@ function renderCgInspector(el) {
   bindXyzFields('cg', State.cg.position, () => applyCgToGizmo());
 
   document.getElementById('btnCgFromWings').addEventListener('click', () => setCgFromWings());
+  const btnThrust = document.getElementById('btnCgFromWingsThrust');
+  if (btnThrust) btnThrust.addEventListener('click', () => setCgFromWingsAndThrust());
   const btnRotor = document.getElementById('btnCgFromRotors');
   if (btnRotor) btnRotor.addEventListener('click', () => setCgFromRotors());
   const btnPb = document.getElementById('btnPitchBalance');

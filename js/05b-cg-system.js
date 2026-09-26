@@ -228,6 +228,63 @@ function setCgFromWings() {
   return true;
 }
 
+// 「主翼と推力線から決定」— 前後・左右は主翼（setCgFromWings と同じ）、上下は**前へ押すエンジンの推力線の上**。
+//
+// 重心が推力線より上か下にあると、出力を変えるたびに機首が上下する（下にエンジンがあれば、出すほど機首上げ）。
+// 推力線の高さは、エンジンの推力で重心まわりにピッチの力が出ない高さ：
+//   Σ推力·[(エンジンの位置 − 重心) × 推力の向き]の左右成分 = 0
+// を重心の高さについて解く。エンジンを傾けて付けていれば、その傾きも入る（推力線が重心の前後位置で
+// どの高さを通るか）。計算は飛行の側と同じ約束で行う——位置には機体まるごとの向き・大きさ
+// （cgModelMatrix）を掛け、推力の向きは画面で見えている向き（spinAxis とパーツの回転）のまま使う
+// （09-aircraft.js のエンジンの項）。垂直離陸用（上向き）とヘリのローターは数えない。
+function cgForwardEngines() {
+  return State.parts.filter(p => p.type === 'engine' && p.props
+    && (p.props.spinAxis || 'z') !== 'y' && p.props.engineKind !== 'rotor'
+    && (p.props.thrustKgf || 0) > 0);
+}
+
+function setCgFromWingsAndThrust() {
+  const engines = cgForwardEngines();
+  if (!engines.length) {
+    showToast('前へ押すエンジンがありません（推力線が決まりません）', true);
+    return false;
+  }
+  // まず前後・左右を主翼から（上下もいったん主翼の面の高さになる）
+  if (!setCgFromWings()) return false;
+  const M = cgModelMatrix();
+  const c = new THREE.Vector3(State.cg.position.x, State.cg.position.y, State.cg.position.z).applyMatrix4(M);
+  let num = 0, den = 0;
+  for (const e of engines) {
+    const spin = e.props.spinAxis || 'z';
+    const d = spin === 'x' ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, -1);
+    const r = e.rotation || {};
+    d.applyEuler(new THREE.Euler(THREE.MathUtils.degToRad(r.x || 0), THREE.MathUtils.degToRad(r.y || 0),
+      THREE.MathUtils.degToRad(r.z || 0)));
+    const p = new THREE.Vector3(e.position.x, e.position.y, e.position.z).applyMatrix4(M);
+    const t = e.props.thrustKgf;
+    // (p − c) × d の左右（X）成分 = (py − cy)·dz − (pz − cz)·dy を 0 にする cy
+    num += t * (p.y * d.z - (p.z - c.z) * d.y);
+    den += t * d.z;
+  }
+  if (Math.abs(den) < 1e-9) {
+    showToast('エンジンが前後を向いていないので、推力線の高さが決まりません', true);
+    return false;
+  }
+  c.y = num / den;
+  // 機体座標から、重心を保存している素の座標（パーツと同じ）へ戻す
+  const local = c.applyMatrix4(new THREE.Matrix4().copy(M).invert());
+  const wingY = State.cg.position.y;
+  State.cg.position.x = local.x;
+  State.cg.position.y = local.y;
+  State.cg.position.z = local.z;
+  applyCgToGizmo();
+  if (State.cg.selected) updateInspectorNumbersOnly(null, true);
+  renderInspector();
+  showToast('前後・左右を主翼の空力中心、上下を推力線の上に合わせました'
+    + ` X ${local.x.toFixed(2)} / Y ${local.y.toFixed(2)}（主翼の面 ${wingY.toFixed(2)}） / Z ${local.z.toFixed(2)}`);
+  return true;
+}
+
 // ヘリコプターのローター（エンジン種別 rotor・回転軸Y）。推力の重み付きで並べる
 function cgRotorEngines() {
   return State.parts.filter(p => p.type === 'engine' && p.props
