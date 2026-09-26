@@ -25,7 +25,20 @@
 // --- 段ごとのゲイン -----------------------------------------------------------
 
 const AP_PITCH_KP = 0.06;      // ピッチ角のずれ1°あたりのエレベーター
-const AP_PITCH_KD = 0.9;       // ピッチ角速度(rad/s)への戻し
+// ピッチ角速度(rad/s)への戻し。0.9では縦の慣性が大きい機体で揺れが残った——
+// 指示ピッチを5°上げる段差で、Concordeが5.3°行き過ぎて舵が6回反転し、
+// Boeing 747も1.9°行き過ぎた。3にすると2.1°・0.8°（練習機は変わらず）。
+// ただし**失速の4倍を大きく超える速さでは0.9へ戻す**（apPitchKd）。舵の効きが動圧で桁違いに
+// 大きくなるので、3のままでは舵が毎コマ逆へ振り切れた（プルプル試験機で1,079回/18秒）。
+const AP_PITCH_KD = 3;
+const AP_PITCH_KD_FAST = 0.9;
+function apPitchKd(state, spd) {
+  if (!spd || !spd.stall) return AP_PITCH_KD;
+  const r = (spd.stall * AP_GAIN_REF_STALLS) / Math.max(state.airspeed, 1);
+  return AP_PITCH_KD_FAST + (AP_PITCH_KD - AP_PITCH_KD_FAST) * Math.min(r * r, 1);
+}
+const AP_PITCH_RATE_FF = 0.5;  // 指示ピッチの動く速さを、減衰から差し引く割合（apElevatorForPitch）
+const AP_PITCH_RATE_FF_TAU = 0.3; // その速さをならす時定数(秒)
 const AP_TRIM_RATE = 0.22;     // 残った舵をトリムへ逃がす速さ（＝積分項。毎秒）
 const AP_TRIM_QUIET_RADPS = 0.06; // これより速く回っている間はトリムを動かさない
 const AP_ROLL_KP = 0.055;      // バンク角のずれ1°あたりのエルロン
@@ -61,7 +74,11 @@ const AP_CEILING_SEC = 20;     // 何秒続いたら、か
 // 「わざと少し傾ける」制御と、垂直エンジンの出力そのものの制御だけ。
 const AP_VTOL_CLIMB_MPS = 3;     // 垂直離陸で目指す上昇率(m/s)。姿勢制御の効く範囲でゆっくり
 const AP_VTOL_SINK_KP = 0.15;    // 垂直着陸：残り高度1mあたりの目標沈下率(m/s)
-const AP_VTOL_SINK_MAX = 3;      // 垂直着陸：目標沈下率の上限(m/s)
+// 垂直着陸：目標沈下率の上限(m/s)。3では対地200mから降りきるのに93〜153秒かかっていた
+// （実測、サンダーバード4機）。8にして66〜69秒、接地は-52〜-55fpmのまま（沈下率は
+// 残りの高さに比例して絞るので、効くのは高いところだけ）。
+const AP_VTOL_SINK_MAX = 8;
+const AP_VTOL_SINK_SLOW = 3;     // 前へ進む速度が残っているあいだの上限(m/s)
 const AP_VTOL_VS_KP = 0.20;      // 昇降率のずれ1m/sあたり、毎秒どれだけ垂直エンジン出力を動かすか
 // 上下の加速度に対する減衰。**これが無いと必ず振動する**——垂直エンジンの出力は
 // 加速度を決めるもので、そこから昇降率まではもう一段の積分がある。その二重積分を
@@ -770,17 +787,32 @@ function apPitchRateLimit(state) {
 }
 function apElevatorForPitch(state, controls, wantPitchDeg, dt, spd, ap) {
   let want = wantPitchDeg;
+  // 指示そのものが動いている速さ(rad/s)。減衰は実際の回転だけでなく「指示の回転とのずれ」にも
+  // 掛ける——実際の回転だけに掛けると、自分で指示した姿勢変化まで押しとどめてしまう。
+  // AP_PITCH_KD を上げたとき、引き起こしで機首が指示から3°遅れたまま接地し、
+  // サンダーバード新型の接地が-300fpmから-550fpmへ荒くなった。全部を見込むと
+  // （AP_PITCH_RATE_FF=1）、こんどは練習機の接地が-369fpmから-568fpmへ荒れた。
+  let cmdRate = 0;
   if (ap && dt > 0) {
     const prev = ap.pitchCmdDeg === undefined ? state.pitchDeg : ap.pitchCmdDeg;
     const step = apPitchRateLimit(state) * dt;
     want = apClamp(want, prev - step, prev + step);
     // 機体が付いてこられないときに指示だけ先へ行ってしまわないように
     want = apClamp(want, state.pitchDeg - AP_PITCH_LEAD_DEG, state.pitchDeg + AP_PITCH_LEAD_DEG);
+    // 指示の速さはならしてから使う。刻みごとの差分をそのまま使うと、指示が折れ曲がるたびに
+    // 舵が跳ねる（実測で練習機の引き起こしの最後に舵が-0.7⇔+1.0と振れ、接地-369→-466fpm）。
+    const raw = ((want - prev) / dt) * Math.PI / 180;
+    ap.pitchCmdRate = (ap.pitchCmdRate || 0)
+      + (raw - (ap.pitchCmdRate || 0)) * apClamp(dt / AP_PITCH_RATE_FF_TAU, 0, 1);
+    cmdRate = ap.pitchCmdRate;
     ap.pitchCmdDeg = want;
   }
   const g = apSurfaceGain(state, spd);
-  const cmd = apClamp(((want - state.pitchDeg) * AP_PITCH_KP
-    - state.angularVelocity.x * AP_PITCH_KD) * g, -1, 1);
+  // pd：比例と減衰だけのぶん。トリムと積分（ap.pitchI）はこれで動かす——出した舵（積分込み）で
+  // 動かすと、積分が自分自身を積み増して、ずれが無くなっても増え続ける。
+  const pd = apClamp(((want - state.pitchDeg) * AP_PITCH_KP
+    + (cmdRate * AP_PITCH_RATE_FF - state.angularVelocity.x) * apPitchKd(state, spd)) * g, -1, 1);
+  const cmd = apClamp(pd + (ap && ap.pitchI ? ap.pitchI : 0), -1, 1);
   // 舵が振り切っている間は溜め込まない（大きく姿勢を変えている最中の巻き上がり防止）。
   // **地上でも溜め込まない**——脚が姿勢を押さえているあいだは舵を当てても機体は
   // 動かないので、「ずれが消えないから積む」を続けてトリムが端まで巻き上がる。
@@ -802,14 +834,27 @@ function apElevatorForPitch(state, controls, wantPitchDeg, dt, spd, ap) {
   // 振り切りから外れてトリムが取れていたので、たまたま助かっていた）。
   const errDeg = want - state.pitchDeg;
   const diverging = errDeg * state.angularVelocity.x < 0 && Math.abs(errDeg) > 3;
-  if (dt && (Math.abs(cmd) < 0.9 || diverging) && !state.onGround) {
+  if (dt && (Math.abs(pd) < 0.9 || diverging) && !state.onGround) {
     const now = controls.trim || 0;
-    const delta = cmd * AP_TRIM_RATE * dt;
+    const delta = pd * AP_TRIM_RATE * dt;
     const backToNeutral = delta * now < 0;
     if (backToNeutral || Math.abs(state.angularVelocity.x) < AP_TRIM_QUIET_RADPS) {
       controls.trim = apClamp(now + delta, -1, 1);
+      // **トリムが端に着いたら、あふれたぶんは舵の積分に積む**。トリムだけが積分なので、
+      // 端に張り付くと残りは比例項だけになり、ずれが残ったまま止まる——実測でTB1が
+      // 進入でトリム+1.00・舵+0.5のまま指示12°に対して機首4°までしか上がらず、
+      // 毎秒18mで沈んで滑走路の5km手前に着いた（操縦補助のelevIと同じ考え方）。
+      if (ap && Math.abs(now + delta) > 1 && !backToNeutral) {
+        ap.pitchI = apClamp((ap.pitchI || 0) + delta, -1, 1);
+      }
     }
   }
+  // 積分は、トリムが端から離れたら（舵が反対を向いたら）トリムへ返していく
+  if (ap && ap.pitchI && dt && pd * ap.pitchI < 0) {
+    const back = Math.sign(ap.pitchI) * Math.min(Math.abs(ap.pitchI), AP_TRIM_RATE * dt);
+    ap.pitchI -= back;
+  }
+  if (ap && state.onGround) ap.pitchI = 0;
   return cmd;
 }
 
@@ -1117,8 +1162,11 @@ function apReverseCommand(model, state, controls, remainingM) {
 }
 
 // 旋回の釣り合い。横滑りを打ち消す向きへラダーを当てる。
+// 符号（実測）：ラダー+0.5を1秒当てると横滑りは−2.7°（三式戦闘機）。**横滑りと同じ向きに当てると消える**。
+// 以前は −β を当てていて、横滑りを増やす向きだった（ゲインが小さく±0.5で頭打ちなので、尾翼の風見安定が
+// 勝って目立たなかったが、全自動の旋回で練習機は横滑り8〜9°のまま回っていた）。
 function apRudderForCoordination(state) {
-  return apClamp(-state.betaDeg * AP_YAW_KP, -0.5, 0.5);
+  return apClamp(state.betaDeg * AP_YAW_KP, -0.5, 0.5);
 }
 
 // 手で飛ばしているときのヨーダンパー。**ラダーに触っていないあいだだけ**、機首の振れる速さを
@@ -1140,7 +1188,7 @@ function apManualYawDamper(state) {
 // 体軸のヨー角速度は、正のとき機首が左へ回る（方位が減る）向き。
 function apRudderYawDamped(state) {
   const yawRateDeg = state.angularVelocity.y * 180 / Math.PI;
-  return apClamp(-state.betaDeg * AP_YAW_KP + yawRateDeg * AP_YAW_RATE_KD, -0.5, 0.5);
+  return apClamp(state.betaDeg * AP_YAW_KP + yawRateDeg * AP_YAW_RATE_KD, -0.5, 0.5);
 }
 
 // --- 機体ごとの速度の目安 -------------------------------------------------------
@@ -1221,7 +1269,13 @@ function apBankMaxFor(vMps, stallMps, radiusMax) {
 // 直線に入ったかどうかの判定（行って来いしないよう、入る／出るの境目をずらす）
 const AP_STRAIGHT_IN_DEG = 6;    // 目的地の方角とのずれがこれ以下になったら「直線」
 const AP_STRAIGHT_OUT_DEG = 14;  // これを超えたら「まだ曲がる」に戻す
-function apSpeedSchedule(model, distToGoM, currentVMps, controls, straight, altitudeM) {
+// 高さ altitudeM での失速の**真対気速度**。失速は動圧（½ρv²）で決まるので、空気が薄いほど
+// 同じ翼でも速く飛ばないと支えきれない（高度12,000mでは海面の約2倍）。
+function apStallTasAt(stallSeaMps, altitudeM) {
+  if (!Number.isFinite(altitudeM) || typeof airDensityAt !== 'function') return stallSeaMps;
+  return stallSeaMps * Math.sqrt(1.225 / Math.max(airDensityAt(altitudeM), 1e-3));
+}
+function apSpeedSchedule(model, distToGoM, currentVMps, controls, straight, altitudeM, currentAltM) {
   const W = model.massKg * 9.80665;
   const S = Math.max(model.wingArea, 0.01);
   const stall = Math.sqrt((2 * W) / (1.225 * S * 1.5));
@@ -1240,15 +1294,29 @@ function apSpeedSchedule(model, distToGoM, currentVMps, controls, straight, alti
   // 以前は「許せる半径 radiusMax（40kmか、目的地までの1/6）に収まるぶん」だけ倒していたので、
   // 翼にはもっと余裕があるのに、どの機体も40km前後の大きな輪でしか曲がらなかった
   // （Concordeがマッハ2で42°、半径40km。倒せる上限は85°で半径3.5km）。
-  const bankPlan = apBankLimit(vWant, stall);
+  // **失速速度は、その高さの空気の薄さで直してから比べる**（apStallTasAt）。海面の失速速度の
+  // ままだと、空気の薄い高空では出せる揚力を多く見積もり、支えきれないほど深く倒していた
+  // （実測、巡航12,000mで目的地が真後ろ：旋回中の最低昇降率がTB1で-152m/s。直して-10m/s）。
+  // 巡航速度を決めるほう（bankPlan）は巡航高度 altitudeM、いま倒していい上限（bankMax）は
+  // いまの高さ currentAltM で見る（渡されなければ altitudeM）。
+  const stallPlan = apStallTasAt(stall, altitudeM);
+  const stallNow = apStallTasAt(stall, Number.isFinite(currentAltM) ? currentAltM : altitudeM);
+  const bankPlan = apBankLimit(vWant, stallPlan);
   const turnableV = Math.sqrt(radiusMax * 9.80665
     * Math.tan(bankPlan * Math.PI / 180));
   // 実際に舵を切るときの上限は、いまの速度で保てるぶん。上昇中など巡航より
   // 遅いときに巡航ぶんの深いバンクを許すと、その揚力が出せず失速するだけになる。
   const bankMax = currentVMps === undefined ? bankPlan
-    : apBankLimit(currentVMps, stall);
+    : apBankLimit(currentVMps, stallNow);
   // 目的地までに進入速度まで落としきれる速さ（cruise の説明を参照）
   const approach = stall * 1.3;
+  // **上昇・引き起こし・進入の速さも、いまの高さの失速を見て決める**（真対気速度で飛んでいるので）。
+  // 海面の失速のままだと、高く上るほど目標の速さが実際の失速に近づき、やがて下回る——
+  // 実測でConcordeが高度12,000mを目指して上昇中、目標184ktのまま機首15°で上り続け、
+  // 高度7,500m・169kt（その高さの失速は約190kt）で失速して落ちた。
+  // 空港の標高では1,200mで6%ほど上がるだけで、海面ではこれまでと変わらない。
+  const kAlt = stallNow / stall;
+  const bestClimb = (typeof aircraftBestClimb === 'function') ? aircraftBestClimb(model, controls) : null;
   let slowableV = Infinity;
   if (distToGoM > 0 && typeof aircraftDragLengthM === 'function') {
     // 高さを渡されたら、その高さでの抗力長さで見積もる（apDecelLengthM）。海面の値のままだと、
@@ -1257,13 +1325,16 @@ function apSpeedSchedule(model, distToGoM, currentVMps, controls, straight, alti
     if (L > 0) slowableV = apSlowableSpeed(approach, distToGoM, L);
   }
   return {
-    stall,
-    rotate: stall * 1.15,               // 機首を上げる速度
+    stall: stallNow,    // いまの高さでの失速の真対気速度
+    stallSea: stall,    // 海面での失速速度
+    rotate: stallNow * 1.15,            // 機首を上げる速度
     // **この機体が実際に出せる上昇率(m/s)**。無い（古い呼び出し）なら undefined で、
     // apVsLimits はこれまでどおり幾何の7°だけで決める。
-    climbRate: (typeof aircraftBestClimb === 'function')
-      ? aircraftBestClimb(model, controls).rateMps : undefined,
-    climb: apClamp(stall * 1.35, stall * 1.2, vMax * 0.6),
+    climbRate: bestClimb ? bestClimb.rateMps : undefined,
+    // 上昇は海面の失速の1.35倍のまま、**その高さの失速の1.2倍は割らない**。全部をその高さの
+    // 失速で決める（1.35倍）と、練習機が高いところで上りが鈍り、越えられない山をよけきれず
+    // 山腹の上を対地96mで通った（直す前283m）。
+    climb: apClamp(Math.max(stall * 1.35, stallNow * 1.2), stallNow * 1.2, vMax * 0.6),
     // 巡航はできるだけ速く——ただし旋回できる速さを超えない範囲で。
     // ぴったり最高速度を目標にすると、推力と抵抗がほぼ釣り合ったところを
     // 延々スロットルで追いかけることになるだけなので、97%で十分
@@ -1283,9 +1354,9 @@ function apSpeedSchedule(model, distToGoM, currentVMps, controls, straight, alti
     // まっすぐ飛ぶだけになったら外す（減速のぶん slowableV は残す——
     // これを外すと目的地までに進入速度まで落としきれなくなる）。
     cruise: apClamp(Math.min(vMax * 0.97, straight ? Infinity : turnableV, slowableV),
-      stall * 1.4, vMax),
+      stallPlan * 1.4, vMax),
     straight: !!straight,
-    approach,
+    approach: approach * kAlt,
     vMax,
     bankMax,  // 巡航中（nav()）が実際に使うバンク角の上限。進入・引き起こしはこれより浅い固定値のまま
     bankPlan, // 巡航速度を決めるのに使ったバンク角の上限（＝出したい速さで要るぶん）
@@ -1590,6 +1661,7 @@ function apManageEngineGroups(model, state, controls, ap, spd, dt, env) {
 // 回りきるだけの距離が残る。FAFに着いたとき機首が滑走路の向きから45°以上ずれていたら、
 // 最終進入に入らずやり直す（入口からやり直す）。
 const AP_ENTRY_CONE_DEG = 30;     // FAFへまっすぐ向かってよい、中心線からの角度
+const AP_ENTRY_LEAVE_CONE_DEG = 45; // まっすぐ向かっている途中で、これより外れたら入口へ切り替える
 const AP_ENTRY_CAPTURE_RADII = 1.5; // 中心線に乗りにいってよい横ずれ（旋回半径の倍数）
 const AP_ENTRY_RADII = 2.5;       // 中心線に乗っていたい、FAFから外への距離（旋回半径の倍数）
 // 入口を置く、FAFから外への距離（旋回半径の倍数）。外向きに飛んできて入口で折り返すと、
@@ -1649,6 +1721,12 @@ function apApproachNavTarget(plan, state, ap, spd, straightOnly, model) {
   const dGate = Math.hypot(state.position.x - gx, state.position.z - gz);
   if (ap.navPlan !== plan) { ap.navPlan = plan; ap.navMode = undefined; }
   if (ap.navMode === undefined) ap.navMode = inCone(AP_ENTRY_CONE_DEG) ? 'faf' : 'gate';
+  // **まっすぐ向かってよい範囲から出たら、入口へ切り替える**。決めるのは最初の一度だけだったので、
+  // 離陸した向きが目的地と逆だと、決めた時点では中心線の延長上にいても、そこから大きく
+  // 回って戻ってくるあいだに横へ外れ、FAFへ横から着いてやり直していた（実測でTB2が
+  // 標高1200mの空港から逆向きに出て、FAFに滑走路の向きから54°ずれて着いた）。
+  // 入る角度（30°）より広い角度で見て、境目で行ったり来たりしないようにする。
+  else if (ap.navMode === 'faf' && dFaf > sMin && angDeg > AP_ENTRY_LEAVE_CONE_DEG) ap.navMode = 'gate';
   else if (ap.navMode === 'gate') {
     // 入口の近くまで来て、**滑走路へ向かう向き（内向き）に飛んでいる**なら、中心線に乗りにいく。
     // 外向きのまま入口を過ぎたら、入口へ戻ろうとして自然に折り返す（そのあとで内向きになる）。
@@ -2177,8 +2255,13 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
         + (raw - (ap.climbAccel || 0)) * apClamp(dt / AP_CLIMB_ACCEL_TAU, 0, 1);
     }
     ap.climbLastV = state.airspeed;
-    const want = apClamp(state.pitchDeg + (state.airspeed - spd.climb) * AP_CLIMB_SPEED_KP
-      + (ap.climbAccel || 0) * AP_CLIMB_SPEED_KD, 0, pitchMax);
+    // **空気が薄いほど、速度のずれで姿勢を動かす量を絞る**。薄い空気では姿勢を変えても経路
+    // （＝速度）が付いてくるのが遅れるので、海面と同じ強さで動かすと行って来いが育つ——
+    // 実測でConcordeが高度7,000m付近で、姿勢±12°・舵を端から端まで振る揺れに入り、
+    // 失速して裏返った。密度の比で割り引けば、海面近くはこれまでと変わらない。
+    const sigma = typeof airDensityAt === 'function' ? apClamp(airDensityAt(state.altitudeM) / 1.225, 0.1, 1) : 1;
+    const want = apClamp(state.pitchDeg + ((state.airspeed - spd.climb) * AP_CLIMB_SPEED_KP
+      + (ap.climbAccel || 0) * AP_CLIMB_SPEED_KD) * sigma, 0, pitchMax);
     controls.pitch = apElevatorForPitch(state, controls, want, dt, spd, ap);
     ap.vsCmd = state.verticalSpeed;
     // 山があれば、目標高度に届いても上りつづける。
@@ -2279,8 +2362,11 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 推力の上限は上昇の段と同じ（apAirThrottleCap）
     controls.throttle = Math.min(Math.max(apThrottleForSpeed(state, controls, cruiseV, dt), sinkUrgency),
       apAirThrottleCap(model, state, controls));
-    // 入口に向けて落としきれないぶんはスポイラーで（降下と同じ）
-    if (cruiseV < spd.cruise && !terrainPushing) {
+    // 目標より速いぶんはスポイラーで落とす（降下と同じ）。入口へ向かうときだけにしていたので、
+    // 推力の桁外れな機体が上昇で目標の何倍にも加速したまま巡航に入ると、抗力だけでは
+    // 落ちきらず、速いまま降下へ持ち込んでいた。ただし巡航が短い路線では効く間がない
+    // （TB1で60km先の空港へは巡航が2秒しかなく、降下開始1051kt・進入開始663ktのまま）。
+    if (!terrainPushing) {
       controls.spoiler = apSpoilerCommand(model, controls, state, cruiseV, 0);
     }
     ap.vsCmd = overTerrainVs(apVsForAltitude(state, overTerrain(ap.targetAltitudeM), apClimbCap(state, spd), undefined, spd));
@@ -2586,7 +2672,12 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     ap.vtolLowSec = state.altitudeAglM < AP_VTOL_STUCK_AGL_M && slowEnough < 0.5
       ? (ap.vtolLowSec || 0) + dt : 0;
     if (ap.vtolLowSec > AP_VTOL_STUCK_SEC) slowEnough = Math.max(slowEnough, 0.5);
-    const targetVs = -apClamp(state.altitudeAglM * AP_VTOL_SINK_KP, 0.3, AP_VTOL_SINK_MAX)
+    // 速く降りる（AP_VTOL_SINK_MAX）のは、前へ進む速度がほぼ止まってから。流されているうちに
+    // 速く降りると、止めきる前に低いところへ着いてしまう（実測、進入157ktで入った機体が
+    // 対地速度7ktのまま接地した）。止まるまでは以前どおりの AP_VTOL_SINK_SLOW まで。
+    const sinkMax = AP_VTOL_SINK_SLOW + (AP_VTOL_SINK_MAX - AP_VTOL_SINK_SLOW)
+      * apClamp((slowEnough - 0.8) / 0.2, 0, 1);
+    const targetVs = -apClamp(state.altitudeAglM * AP_VTOL_SINK_KP, 0.3, sinkMax)
       * slowEnough;
     controls.vtolThrottle = apVtolThrottleForVs(controls, state.verticalSpeed, targetVs, dt, ap);
 
@@ -3551,7 +3642,8 @@ function stepAutopilot(model, state, controls, ap, dt, env) {
   // マッハ9からの減速中、目標速度が上下して出力0⇔100%（推力にして重さの6.7倍）を4秒ごとに
   // 繰り返し、±30Gで振れた。目標高度で測れば、巡航中は動かない。
   const spd = apSpeedSchedule(model, distToGoM, state.airspeed, controls, ap.straightRun,
-    ap.full && Number.isFinite(ap.targetAltitudeM) ? Math.max(ap.targetAltitudeM, 0) : state.altitudeM);
+    ap.full && Number.isFinite(ap.targetAltitudeM) ? Math.max(ap.targetAltitudeM, 0) : state.altitudeM,
+    state.altitudeM);
   if (ap.full) apStepFull(model, state, controls, ap, spd, dt, env);
   else if (ap.hover) apStepHover(model, state, controls, ap, spd, dt, env);
   else if (ap.altHold) apStepAltHold(model, state, controls, ap, spd, dt);
