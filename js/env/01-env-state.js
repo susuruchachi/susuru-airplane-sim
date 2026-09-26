@@ -141,6 +141,9 @@ const EnvState = {
     hours: 9,          // 現在時刻（0〜24の小数）
     cycleMinutes: 15,  // 24時間ぶんを何分で一周させるか（デフォルト15分。README記載の仕様）
     paused: false,
+    // 月齢（日、0〜29.53）。時刻と一緒に進む（24時間で1）。月の位置・満ち欠け・夜の明るさが決まる
+    // （05-daynight.js の computeMoonDirection / moonPhaseInfo）
+    moonAgeDays: 10,
   },
 
   // 環境パラメータ（UIから調整）

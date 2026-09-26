@@ -128,7 +128,7 @@
   #envBtnFly.primary{background:var(--accent-dim);border-color:#2f6fb5;color:#eaf4ff;font-weight:600;}
   #envBtnFly.primary:hover{background:#2f6fb5;}
   #envBtnToggleTime.active{background:var(--accent-dim);border-color:var(--accent-dim);}
-  #envTimeReadout, #envSunElevationReadout{font-family:var(--mono);color:var(--accent);}
+  #envTimeReadout, #envSunElevationReadout, #envMoonAgeReadout{font-family:var(--mono);color:var(--accent);}
 
   @media (max-width: 760px){
     #app{grid-template-columns:1fr;grid-template-rows:48px 1fr 40vh;}
@@ -484,6 +484,11 @@ body.touch-controls #hudHelp { display:none; }
       <div class="env-row" style="margin-top:8px;">
         <label>太陽の仰角</label><span id="envSunElevationReadout" class="val">--°</span>
       </div>
+      <div class="env-row" style="margin-top:10px;">
+        <label>月齢</label><span id="envMoonAgeReadout" class="val">--</span>
+      </div>
+      <input type="range" id="envMoonAgeSlider" min="0" max="29.5" step="0.1">
+      <div class="env-note" id="envMoonNote" style="margin-top:4px;">--</div>
     </div>
 
     <div class="section-title">天候</div>

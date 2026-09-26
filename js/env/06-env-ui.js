@@ -1,6 +1,7 @@
 // 06-env-ui.js — 右パネルの操作UI（世界・時刻・雲・風・空港・高度）
 
 let _envScrubbingTime = false;
+let _envScrubbingMoon = false;
 
 // --- メニューの開け閉め -------------------------------------------------------
 //
@@ -94,6 +95,17 @@ function setupEnvUI() {
     btnToggle.classList.toggle('active', EnvState.time.paused);
   });
 
+  // 月齢はふだん時刻と一緒に進む。スライダーで好きな月齢へ動かせる
+  const moonSlider = document.getElementById('envMoonAgeSlider');
+  if (moonSlider) {
+    moonSlider.addEventListener('pointerdown', () => { _envScrubbingMoon = true; });
+    window.addEventListener('pointerup', () => { _envScrubbingMoon = false; });
+    moonSlider.addEventListener('input', () => {
+      EnvState.time.moonAgeDays = wrapMoonAge(parseFloat(moonSlider.value));
+      updateEnvMoonReadout();
+    });
+  }
+
   cycleInput.addEventListener('change', () => {
     const v = parseFloat(cycleInput.value);
     EnvState.time.cycleMinutes = Number.isFinite(v) && v > 0 ? v : 15;
@@ -134,6 +146,7 @@ function setupEnvUI() {
     EnvState.time.hours = 9;
     EnvState.time.cycleMinutes = 15;
     EnvState.time.paused = false;
+    EnvState.time.moonAgeDays = 10;
     EnvState.env.windDirectionDeg = 90;
     EnvState.env.previewAltitudeM = 0;
     EnvState.env.windFromWeather = true;
@@ -165,6 +178,7 @@ function syncEnvUIToState() {
   set('envTimeSlider', EnvState.time.hours);
   text('envTimeReadout', formatHoursAsClock(EnvState.time.hours));
   set('envCycleMinutes', EnvState.time.cycleMinutes);
+  updateEnvMoonReadout();
   const btnToggle = document.getElementById('envBtnToggleTime');
   btnToggle.textContent = EnvState.time.paused ? '▶ 再生' : '❚❚ 一時停止';
   btnToggle.classList.toggle('active', EnvState.time.paused);
@@ -602,5 +616,22 @@ function updateEnvTimeReadout(elevationDeg) {
   if (timeSlider && !_envScrubbingTime) timeSlider.value = EnvState.time.hours;
   if (elevationReadout && typeof elevationDeg === 'number') {
     elevationReadout.textContent = elevationDeg.toFixed(1) + '°';
+  }
+  updateEnvMoonReadout();
+}
+
+// 月齢の表示（月齢・呼び名・光って見える割合・いまの夜の明るさ）とスライダー位置
+function updateEnvMoonReadout() {
+  if (typeof moonPhaseInfo !== 'function') return;
+  const info = moonPhaseInfo(EnvState.time.moonAgeDays || 0);
+  const readout = document.getElementById('envMoonAgeReadout');
+  const slider = document.getElementById('envMoonAgeSlider');
+  const note = document.getElementById('envMoonNote');
+  if (readout) readout.textContent = `${info.age.toFixed(1)}（${info.name}）`;
+  if (slider && !_envScrubbingMoon) slider.value = info.age.toFixed(1);
+  if (note) {
+    const sky = typeof moonSkyLight === 'function' ? moonSkyLight() : 0;
+    note.textContent = `光って見える面 ${Math.round(info.illuminated * 100)}%・満月に比べた明るさ ${Math.round(info.brightness * 100)}%`
+      + `・いまの月明かり ${Math.round(sky * 100)}%（月が沈んでいれば0）`;
   }
 }

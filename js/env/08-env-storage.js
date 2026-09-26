@@ -31,6 +31,7 @@ function collectEnvSnapshot() {
       hours: EnvState.time.hours,
       cycleMinutes: EnvState.time.cycleMinutes,
       paused: EnvState.time.paused,
+      moonAgeDays: EnvState.time.moonAgeDays,
     },
     env: {
       cloudCoverage: EnvState.env.cloudCoverage,
@@ -85,6 +86,7 @@ function applyEnvSnapshot(data) {
     if (typeof data.time.hours === 'number') EnvState.time.hours = data.time.hours;
     if (typeof data.time.cycleMinutes === 'number') EnvState.time.cycleMinutes = data.time.cycleMinutes;
     if (typeof data.time.paused === 'boolean') EnvState.time.paused = data.time.paused;
+    if (typeof data.time.moonAgeDays === 'number') EnvState.time.moonAgeDays = wrapMoonAge(data.time.moonAgeDays);
   }
   if (data.env) {
     for (const k of ['cloudCoverage', 'windSpeedKmh', 'windDirectionDeg', 'previewAltitudeM']) {
