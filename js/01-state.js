@@ -84,10 +84,12 @@ const WING_CORNER_KEYS = ['rootLeading', 'rootTrailing', 'tipLeading', 'tipTrail
 const WING_CORNER_LABELS_HORIZONTAL = {
   rootLeading: '付け根・前縁', rootTrailing: '付け根・後縁',
   tipLeading: '翼端・前縁', tipTrailing: '翼端・後縁',
+  kinkLeading: '折れ目・前縁', kinkTrailing: '折れ目・後縁',
 };
 const WING_CORNER_LABELS_VTAIL = {
   rootLeading: '下端・前縁', rootTrailing: '下端・後縁',
   tipLeading: '上端・前縁', tipTrailing: '上端・後縁',
+  kinkLeading: '折れ目・前縁', kinkTrailing: '折れ目・後縁',
 };
 function wingCornerLabel(role, key) {
   return (role === 'vtail' ? WING_CORNER_LABELS_VTAIL : WING_CORNER_LABELS_HORIZONTAL)[key];

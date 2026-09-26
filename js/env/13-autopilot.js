@@ -1029,6 +1029,25 @@ function apPitchForVs(state, vsCmd, loDeg, hiDeg) {
     hiDeg === undefined ? AP_PITCH_MAX : hiDeg);
 }
 
+// 地面効果で弱まった吹き下ろしを打ち消す昇降舵（引き起こしで先に当てる）。
+// 地面に近づくと主翼の吹き下ろしが弱まり、主翼の後ろの水平尾翼の迎角が増えて機首を押し下げる
+// （10-flight.js の state.groundDownwashRad。実機と同じ性質）。対地高度が翼幅の1/20なら吹き下ろしは4割まで
+// 減るので、この力は接地の直前の2秒ほどで一気に育つ。ピッチの輪（比例0.06/°とトリムの積分）では
+// 追いつかず、Boeing 747 が対地4mからピッチ1.8°→0.7°へ機首を落とし、-441fpmで接地した（吹き下ろしの
+// 地面効果を入れる前は -241fpm）。尾翼の迎角は「迎角＋舵の効き×舵」なので、増えたぶんを舵の効きで
+// 割れば、打ち消す舵そのものが出る（主翼の後ろの水平尾翼を面積で重み付け）
+function apGroundEffectElevator(model, state) {
+  const d = state.groundDownwashRad || 0;
+  if (!(d > 0) || !model.surfaces) return 0;
+  let num = 0, den = 0;
+  for (const s of model.surfaces) {
+    if (!s.inWake || !s.pitch) continue;
+    num += s.area * d;
+    den += s.area * s.pitch;
+  }
+  return Math.abs(den) > 1e-9 ? apClamp(-num / den, -1, 1) : 0;
+}
+
 // 目標の方位 → 目標のバンク角(°)
 function apBankForHeading(state, wantHeadingDeg, bankMax) {
   const err = apWrap180(wantHeadingDeg - state.headingDeg);
@@ -3011,10 +3030,15 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 下限も上がるので、**機首上げが自分で自分を押し上げて止まらない**——実測で
     // Boeing 747 が引き起こしで30°まで起き上がり、滑走路の上で233mまで舞い上がって
     // 78kt（失速129kt）で失速し、-8210fpmで落ちて9.9Gを記録していた。
-    const floor = Math.min(state.pitchDeg - 1, AP_FLARE_PITCH_MAX);
+    // **浮き上がっている（昇っている）ときは下限を外す**。下限は「沈みながら機首を下げて前輪から
+    // 落ちる」のを防ぐためのもので、昇っているあいだも効かせると、指示はいつも「いまの姿勢-1°」に
+    // 張り付き、1°ぶんの小さな舵でしか機首を下げられない——実測でTB1（静安定10%・420kt）が
+    // 引き起こしでピッチ7.2°のまま+1300fpmで対地68mまで浮き、そこから-2310fpm・23Gで落ちた。
+    const floor = state.velocity.y > 0 ? -Infinity : Math.min(state.pitchDeg - 1, AP_FLARE_PITCH_MAX);
     const want = apClamp(apPitchForVs(state, ap.vsCmd, -3, AP_FLARE_PITCH_MAX),
       floor, AP_FLARE_PITCH_MAX);
-    controls.pitch = apElevatorForPitch(state, controls, want, dt, spd, ap);
+    controls.pitch = apClamp(apElevatorForPitch(state, controls, want, dt, spd, ap)
+      + apGroundEffectElevator(model, state), -1, 1);
 
     if (state.onGround) say('rollout', '滑走路上で減速');
     return;

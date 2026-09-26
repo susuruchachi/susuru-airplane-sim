@@ -585,7 +585,7 @@ function renderTypeSpecificFields(part) {
     if (vtolBtn) vtolBtn.addEventListener('click', () => balanceVtolThrust());
 
   } else if (part.type === 'wing') {
-    const center = wingCornersCenter(part.props.corners);
+    const center = wingLiftCenter(part.props.corners);
     container.innerHTML = `
       <div class="subgroup-title">主翼／尾翼の設定</div>
       <div class="field">
@@ -609,22 +609,22 @@ function renderTypeSpecificFields(part) {
       <div class="hint">可動翼面（エルロン等）を追加するときの「所属する主翼」として選択できます。垂直尾翼は通常1つで中央配置のため左右位置は表示されません。</div>
 
       <div class="divider"></div>
-      <div class="subgroup-title">4頂点でモデルの羽根形状に合わせる</div>
-      <div class="hint" style="margin-bottom:10px;">ビューポート上の黄色い点をドラッグするか、下のボタンで頂点を選んで数値入力できます。4頂点の中心（赤い点）が自動計算され、${part.props.role === 'main' ? '揚力の発生する中心位置' : '基準位置'}として扱われます。</div>
+      <div class="subgroup-title">頂点でモデルの羽根形状に合わせる</div>
+      <div class="hint" style="margin-bottom:10px;">ビューポート上の黄色い点をドラッグするか、下のボタンで頂点を選んで数値入力できます。赤い点は揚力のかかる点（平均空力翼弦の前縁から1/4）で、4頂点から自動計算されます。後退角や先細りのある翼では、翼幅の真ん中より付け根寄り・前寄りに来ます。</div>
       <div id="cornerButtonsRow" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;"></div>
       <div id="cornerFieldsArea"></div>
 
       <div class="field" style="margin-top:4px;">
-        <label>${part.props.role === 'main' ? '揚力中心（自動計算・参考値）' : '4頂点の中心（自動計算・参考値）'}</label>
+        <label>揚力のかかる点（平均空力翼弦の前縁から1/4・自動計算）</label>
         <div class="hint" style="font-family:var(--mono);margin-top:0;">X ${center.x.toFixed(3)}　Y ${center.y.toFixed(3)}　Z ${center.z.toFixed(3)}</div>
       </div>
 
       <div class="divider"></div>
       <div class="subgroup-title">可動翼面</div>
       <button class="btn-danger-outline" id="btnAddControlSurfaceToWing" style="color:var(--accent);border-color:var(--accent-dim);">
-        ＋ この翼に可動翼面を追加（後縁1/4に自動配置）
+        ＋ この翼に可動翼面を追加（後ろ側を切り取る）
       </button>
-      <div class="hint">${part.props.role === 'vtail' ? 'ラダー' : part.props.role === 'htail' ? 'エレベーター' : 'エルロン'}として追加され、この翼の後縁側1/4の位置に自動配置されます。種類・位置は追加後に右パネルで変更できます。</div>
+      <div class="hint">${part.props.role === 'vtail' ? 'ラダー' : part.props.role === 'htail' ? 'エレベーター' : 'エルロン'}として追加され、この翼の後ろ側を切り取った板になります。種類・大きさ（翼幅の範囲と翼弦の割合）は追加後に右パネルで変更できます。</div>
 
       ${canMirrorPart(part) ? `
         <div class="divider"></div>
@@ -655,7 +655,7 @@ function renderTypeSpecificFields(part) {
       if (cs) {
         renderInspector(); // kind/position等をaddPart後に書き換えているため、画面に反映するため再描画
         renderPartList();  // 名前もaddPart後に書き換えているため、左パネルの一覧も更新する
-        showToast(`「${cs.name}」を「${part.name}」の後縁1/4に追加しました`);
+        showToast(`「${cs.name}」を「${part.name}」に追加しました`);
       }
     });
 
@@ -1075,20 +1075,29 @@ function renderWingCornerButtons(part) {
   const fieldsArea = document.getElementById('cornerFieldsArea');
   if (!buttonsRow || !fieldsArea) return;
 
-  buttonsRow.innerHTML = WING_CORNER_KEYS.map(key => {
+  const hasKink = csWingHasKink(part.props.corners);
+  buttonsRow.innerHTML = csWingCornerKeys(part.props.corners).map(key => {
     const isSelected = State.selectedCornerKey === key;
     return `<button class="btn-danger-outline" data-corner="${key}" style="
       color:${isSelected ? '#04121e' : 'var(--accent)'};
       background:${isSelected ? 'var(--accent)' : 'transparent'};
       border-color:var(--accent-dim);font-size:11.5px;padding:7px 6px;
     ">${wingCornerLabel(part.props.role, key)}</button>`;
-  }).join('');
+  }).join('') + `<button class="btn-danger-outline" id="btnWingKink" style="grid-column:1 / -1;color:var(--accent);border-color:var(--accent-dim);font-size:11.5px;padding:7px 6px;">
+      ${hasKink ? '折れ目を消す（4頂点に戻す）' : '後縁（前縁）の折れ目を足す'}</button>
+    <div class="hint" style="grid-column:1 / -1;margin:0;">${hasKink
+      ? '折れ目の2点で、付け根→折れ目・折れ目→翼端の2枚をつないだ形になります。面積・揚力のかかる点・舵面の切り取りもこの形で測ります。'
+      : 'Boeing 747 のように後縁が途中で折れる翼は、折れ目を足してから「折れ目・後縁」の点を動かします（足した直後は形は変わりません）。'}</div>`;
 
-  buttonsRow.querySelectorAll('button').forEach(btn => {
+  buttonsRow.querySelectorAll('button[data-corner]').forEach(btn => {
     btn.addEventListener('click', () => {
       selectWingCorner(part, btn.dataset.corner);
       renderInspector();
     });
+  });
+  document.getElementById('btnWingKink').addEventListener('click', () => {
+    if (hasKink) removeWingKink(part); else addWingKink(part);
+    renderInspector();
   });
 
   if (State.selectedCornerKey && part.props.corners[State.selectedCornerKey]) {

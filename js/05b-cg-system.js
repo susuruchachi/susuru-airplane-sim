@@ -163,25 +163,35 @@ function wingsAeroCenterByRole(role) {
     const m = cgPartMatrix(w);
     const c = (w.props && w.props.corners) || {};
     const P = {};
-    for (const k of WING_CORNER_KEYS) {
+    for (const k of csWingCornerKeys(c)) {   // 折れ目のある翼は6頂点
       const v = c[k] || { x: 0, y: 0, z: 0 };
       P[k] = new THREE.Vector3(v.x || 0, v.y || 0, v.z || 0).applyMatrix4(m);
     }
-    const mid = (a, b) => new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
-    const leading = mid(P.rootLeading, P.tipLeading);
-    const trailing = mid(P.rootTrailing, P.tipTrailing);
-    const a = cgQuadArea(P.rootLeading, P.tipLeading, P.tipTrailing, P.rootTrailing);
+    const a = csRegionArea(P, 0, 1, 0, 1);
     if (!(a > 1e-9)) continue;
-    // 前縁→後縁の1/4の点
-    const quarter = leading.clone().lerp(trailing, 0.25);
-    acc.addScaledVector(quarter, a);
-    const chord = new THREE.Vector3().subVectors(trailing, leading).length();
+    // 平均空力翼弦の前縁から1/4（js/env/09e-part-proxy.js の csWingMacInfo。飛行の側と同じ点）。
+    // 以前は「翼幅の真ん中の前縁から1/4」で、後退角と先細りのある翼では後ろへずれていた
+    // （Boeing 747 で 2.76m。重心が後ろ脚より後ろに来ていた）。
+    const mi = csWingMacInfo(P);
+    acc.addScaledVector(new THREE.Vector3(mi.ac.x, mi.ac.y, mi.ac.z), a);
+    const chord = mi.mac;
     chordSum += chord * a;
     chordMax = Math.max(chordMax, chord);
     area += a;
   }
   if (area <= 1e-9) return null;
-  return { point: acc.multiplyScalar(1 / area), area, chord: chordSum / area, chordMax };
+  // 翼幅（左右をつないだ全体）とアスペクト比。吹き下ろし（csDownwashSlope）に使う
+  let halfSpan = 0;
+  for (const w of wings) {
+    const m = cgPartMatrix(w);
+    for (const k of csWingCornerKeys(w.props.corners || {})) {
+      const v = (w.props.corners || {})[k] || { x: 0, y: 0, z: 0 };
+      halfSpan = Math.max(halfSpan, Math.abs(new THREE.Vector3(v.x || 0, v.y || 0, v.z || 0).applyMatrix4(m).x));
+    }
+  }
+  const span = role === 'vtail' ? halfSpan : 2 * halfSpan;
+  return { point: acc.multiplyScalar(1 / area), area, chord: chordSum / area, chordMax,
+    aspect: Math.max(span * span / area, 0.6) };
 }
 
 // 主翼の空力中心。「主翼から決定」ボタンが使う（従来どおりの名前で残してある）。

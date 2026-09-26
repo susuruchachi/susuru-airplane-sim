@@ -33,6 +33,13 @@
 const PA_N_HARD = 1 / Math.cos(85 * Math.PI / 180);   // 荷重倍数の上限（85°バンク相当）
 const PA_Q_KP = 5;            // ピッチ率のずれ 1rad/s あたりの昇降舵
 const PA_Q_KI = 2.5;          // ピッチ率のずれ 1rad/s が1秒続くと動かすトリム
+// 1コマで取り返すピッチ率のずれの割合の上限。昇降舵は次のコマにはもう角速度を変えているので、
+// 比例のゲイン×（舵1あたり1コマで変わるピッチ率）が2を超えると、1コマごとに行き過ぎて向きが
+// 反転し、振れが育つ。速さでゲインを割り引く apSurfaceGain は「失速の4倍」を基準にした目安で、
+// 実測でマッハ2級の練習機（失速の5倍・高度3000m）は舵1で1コマ0.67rad/s変わり、ゲイン5×0.64で
+// 2.2。レバーを離しただけで昇降舵が±1を1コマごとに往復し、荷重倍数が-2.4Gに張り付いた。
+// 舵の効き（動圧×舵の面積×腕÷慣性）を機体から出して、ここで頭を押さえる
+const PA_Q_STEP_GAIN = 0.8;
 const PA_THETA_K = 1.5;       // 姿勢（ピッチ角）のずれ 1rad あたりの欲しい角速度(rad/s)
 const PA_GAMMA_K = 0.8;       // 経路角のずれ 1rad あたりの欲しい経路の曲がる速さ(rad/s)
 const PA_ALT_KP = 0.1;        // 高度のずれ 1m あたりの昇降率(m/s)（AP_VS_KP と同じ）
@@ -139,8 +146,10 @@ function paGammaRad(state) {
 // 速いときの舵の効き過ぎは自動操縦と同じ倍率（apSurfaceGain）で割り引く。
 // トリムが端まで行ったら、残りは昇降舵に積む（pa.elevI）。TB1 はマッハ2で補助翼100%に入れると
 // トリムが+1で止まり、昇降舵は比例のぶん（0.4）しか使われず、要る8.2Gに6.8Gで止まって430m沈んだ
-function paElevatorForRate(state, controls, qCmd, dt, spd, pa) {
-  const gs = typeof apSurfaceGain === 'function' ? apSurfaceGain(state, spd) : 1;
+function paElevatorForRate(model, state, controls, qCmd, dt, spd, pa) {
+  let gs = typeof apSurfaceGain === 'function' ? apSurfaceGain(state, spd) : 1;
+  const perStep = paPitchRatePerElevator(model, state) * dt;
+  if (perStep > 0 && PA_Q_KP * gs * perStep > PA_Q_STEP_GAIN) gs = PA_Q_STEP_GAIN / (PA_Q_KP * perStep);
   const err = qCmd - state.angularVelocity.x;
   const p = err * PA_Q_KP * gs;
   const d = err * PA_Q_KI * gs * dt;
@@ -164,6 +173,24 @@ function paElevatorForRate(state, controls, qCmd, dt, spd, pa) {
   pa.elevI = paClamp(ei, -1, 1);
   pa.saturated = Math.abs(controls.trim) > 0.99 && Math.abs(p + pa.elevI) >= 0.98;
   return paClamp(p + pa.elevI, -1, 1);
+}
+
+// 昇降舵1あたりのピッチ角加速度(rad/s²)。舵で増える揚力（揚力の傾き2π×舵の効き）×腕÷慣性。
+// 腕は 09-aircraft.js の elevatorPower と同じ（重心からの前後距離＋蝶番ぶん）。
+// 実測（1コマ当てて比べた角速度の変わり方）とのずれは練習機・マッハ2級で3〜11%（見積もりが大きめ・速いほど大きい）
+function paPitchRatePerElevator(model, state) {
+  if (model._paElevK === undefined) {
+    let k = 0;
+    for (const s of model.surfaces || []) {
+      if (!s.pitch || !s.center) continue;
+      const arm = Math.abs(s.center.z) + (s.hingeArm !== undefined ? s.hingeArm : AERO_DEFAULTS.hingeArmChord) * (s.chord || 0);
+      k += s.area * 2 * Math.PI * Math.abs(s.pitch) * arm;
+    }
+    const ix = model.inertia && model.inertia.x > 0 ? model.inertia.x : 0;
+    model._paElevK = ix > 0 ? k / ix : 0;
+  }
+  const rho = typeof airDensityAt === 'function' ? airDensityAt(Math.max(state.altitudeM || 0, 0)) : 1.225;
+  return model._paElevK * 0.5 * rho * state.airspeed * state.airspeed;
 }
 
 // 迎角1radあたりの荷重倍数（揚力の傾き2π・主翼の面積・動圧から）
@@ -350,7 +377,7 @@ function pilotAssistStep(model, state, controls, pa, stick, active, mode, hold, 
     n = paClamp(n, 2 - nMax, nMax);
     const qCmd = paAlphaProtect(model, state, paClamp(paRateForLoad(model, state, pa, n, gamma, phi), -qLim, qLim));
     pa.nCmd = n; pa.qCmd = qCmd; pa.bankCmd = bankCmd;
-    controls.pitch = paElevatorForRate(state, controls, qCmd, dt, spd, pa);
+    controls.pitch = paElevatorForRate(model, state, controls, qCmd, dt, spd, pa);
     // 横滑りを消すラダー（旋回の釣り合い）
     const beta = state.betaDeg || 0;
     // 符号（実測）：ラダー+0.5を1秒当てると横滑りは-2.7°（三式戦闘機）。横滑りと同じ向きに当てると消える
@@ -374,7 +401,7 @@ function pilotAssistStep(model, state, controls, pa, stick, active, mode, hold, 
       const r = -state.angularVelocity.y;
       qCmd = (errRad * PA_THETA_K + r * Math.sin(phi)) / cosPhi;
     }
-    controls.pitch = paElevatorForRate(state, controls, paClamp(qCmd, -qLim, qLim), dt, spd, pa);
+    controls.pitch = paElevatorForRate(model, state, controls, paClamp(qCmd, -qLim, qLim), dt, spd, pa);
   }
   if (active.roll) {
     pa.rollHold = null;

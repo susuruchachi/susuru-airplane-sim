@@ -206,7 +206,13 @@ function defaultWingCorners(role) {
   };
 }
 
-// 4頂点の中心（重心）を計算する。主翼ではこれを揚力中心として扱う
+// 揚力のかかる点（平均空力翼弦の前縁から1/4。js/env/09e-part-proxy.js の csWingMacInfo）。
+// 頂点の編集で出る赤い印はこの点。飛行の側も同じ点に揚力をかける。
+function wingLiftCenter(corners) {
+  return csWingMacInfo(corners).ac;
+}
+
+// 4頂点の中心（形の真ん中）
 function wingCornersCenter(corners) {
   const keys = WING_CORNER_KEYS;
   const sum = { x: 0, y: 0, z: 0 };
@@ -538,7 +544,7 @@ function mirrorPart(id) {
 
   // 翼の4頂点もX座標を反転する（パーツ全体のミラーと整合させ、左右対称の形にするため）
   if (src.type === 'wing' && mirroredProps.corners) {
-    for (const key of WING_CORNER_KEYS) {
+    for (const key of csWingCornerKeys(mirroredProps.corners)) {
       mirroredProps.corners[key].x = -mirroredProps.corners[key].x;
     }
   }

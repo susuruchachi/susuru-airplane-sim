@@ -137,6 +137,7 @@ function createFlightState() {
     alphaDeg: 0, betaDeg: 0,
     loadFactor: 1,      // G
     stallRatio: 0,      // 主翼のうち失速している面積の割合 0〜1
+    groundDownwashRad: 0, // 地面効果で吹き下ろしが弱まったぶん、水平尾翼の迎角が増える角度(rad)
     thrustN: 0,
     vtolThrustN: 0,
     afterburner: 0,   // アフターバーナーの効き（0〜1）。炎の見た目に使う
@@ -375,6 +376,17 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
 
   const stallRad = THREE.MathUtils.degToRad(AERO_DEFAULTS.stallDeg);
   let stalledArea = 0, mainArea = 0;
+  // 主翼の揚力係数（面積で重み付け）。主翼が先に並んでいるので、水平尾翼の番にはそろっている。
+  // 主翼より後ろの水平尾翼は、ここから出す吹き下ろしの角度ぶん迎角が減る（09-aircraft.js の downwashK）
+  let mainClA = 0, mainClArea = 0;
+  // **地面の近くでは吹き下ろしが弱まる**（地面効果）。地面が下向きの流れを受け止めるので、
+  // 翼幅に比べて低いほど吹き下ろしは小さくなる（McCormick の誘導抵抗の比 φ = (16h/b)²/(1+(16h/b)²) と同じ形。
+  // 翼幅の1/10の高さで0.72、1/20で0.39）。離陸滑走や引き起こしで尾翼の効きが空中より大きくなる、実機と同じ性質。
+  let downwashGround = 1;
+  if (model.downwashK && Number.isFinite(state.altitudeAglM)) {
+    const r = 16 * Math.max(state.altitudeAglM, 0.05) / Math.max(model.wingSpan || 1, 1);
+    downwashGround = (r * r) / (1 + r * r);
+  }
 
   for (const s of model.surfaces) {
     // その翼の位置での気流。回転しているぶん（ω×r）が乗る＝これが減衰の正体。
@@ -396,6 +408,7 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
     const w = local.dot(s.up);
     let alpha = Math.atan2(-w, Math.abs(u) < 1e-6 ? 1e-6 : u);
     if (u < 0) alpha = -alpha; // 後ろ向きに飛んでいるときも符号が破綻しないように
+    if (s.inWake && model.downwashK && mainClArea > 0) alpha -= model.downwashK * downwashGround * (mainClA / mainClArea);
 
     // 舵角を足す
     const flapPart = s.flap * controls.flap;
@@ -435,6 +448,7 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
       + Math.abs(flapPart) + Math.abs(spoilerPart) + Math.abs(hinged + trimmed);
 
     const cl = liftCoefficient(alphaEff, stallLimit);
+    if (s.role === 'main') { mainClA += cl * s.area; mainClArea += s.area; }
     const cdi = (cl * cl) / (Math.PI * s.aspect * AERO_DEFAULTS.oswald);
     const cd = AERO_DEFAULTS.cd0Wing + cdi + stallDragExtra(alphaEff, stallLimit)
       + Math.abs(deflect) * 0.35 // 舵を切れば抗力も増える
@@ -597,6 +611,10 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
   // 止まっているときは迎角に意味が無い（わずかな風で±180°まで振れる）。
   // そのまま出すと駐機中の機体に「失速」の警告が点きっぱなしになる。
   state.stallRatio = (mainArea > 0 && airspeed > 8) ? stalledArea / mainArea : 0;
+  // 地面効果で弱まった吹き下ろしのぶん、主翼の後ろの水平尾翼の迎角が空中より大きい角度(rad)。
+  // 尾翼が機首を押し下げる向きに効く。自動操縦の引き起こしがこのぶんの舵を先に当てる（13-autopilot.js）
+  state.groundDownwashRad = (model.downwashK && mainClArea > 0)
+    ? model.downwashK * (1 - downwashGround) * (mainClA / mainClArea) : 0;
   return rho;
 }
 

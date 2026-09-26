@@ -136,20 +136,16 @@ function epWingAeroStats() {
       const m = cgPartMatrix(w);
       const c = (w.props && w.props.corners) || {};
       const P = {};
-      for (const k of WING_CORNER_KEYS) {
+      for (const k of csWingCornerKeys(c)) {   // 折れ目のある翼は6頂点
         const v = c[k] || { x: 0, y: 0, z: 0 };
         P[k] = new THREE.Vector3(v.x || 0, v.y || 0, v.z || 0).applyMatrix4(m);
       }
-      const a = cgQuadArea(P.rootLeading, P.tipLeading, P.tipTrailing, P.rootTrailing);
+      const a = csRegionArea(P, 0, 1, 0, 1);
       if (!(a > 1e-9)) continue;
-      const root = new THREE.Vector3().addVectors(P.rootLeading, P.rootTrailing).multiplyScalar(0.5);
-      const tip = new THREE.Vector3().addVectors(P.tipLeading, P.tipTrailing).multiplyScalar(0.5);
-      const center = new THREE.Vector3();
-      for (const k of WING_CORNER_KEYS) center.add(P[k]);
-      center.multiplyScalar(0.25);
-      const span = root.distanceTo(tip);
+      // 翼端が横へどこまで出ているか（飛行の側 09-aircraft.js の reachX と同じ。後退角のある翼で
+      // 「付け根→翼端の長さ」を使うと、斜めのぶん翼幅を長く見積もってしまう）
       area += a;
-      maxReach = Math.max(maxReach, Math.abs(center.x) + span * 0.5);
+      for (const k in P) maxReach = Math.max(maxReach, Math.abs(P[k].x));
     }
     if (area <= 1e-9) return null;
     const span = Math.max(maxReach * 2, 1);

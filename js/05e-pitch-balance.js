@@ -67,9 +67,14 @@ function pbNeutralPoint() {
   if (!main) return null;
   const tail = wingsAeroCenterByRole('htail');
   if (!tail) return { point: main.point.clone(), mac: main.chordMax || main.chord };
-  const totalArea = main.area + tail.area;
+  // 主翼の後ろの水平尾翼は、吹き下ろしで迎角の変化が (1 − dε/dα) 倍になるぶん軽く数える
+  // （飛行の側 09-aircraft.js と同じ。csDownwashSlope）
+  const noseDir = pbNoseDirection();
+  const behind = noseDir ? tail.point.clone().sub(main.point).dot(noseDir) < 0 : true;
+  const tailW = tail.area * (behind ? 1 - csDownwashSlope(main.aspect) : 1);
+  const totalArea = main.area + tailW;
   const point = main.point.clone().multiplyScalar(main.area / totalArea)
-    .add(tail.point.clone().multiplyScalar(tail.area / totalArea));
+    .add(tail.point.clone().multiplyScalar(tailW / totalArea));
   return { point, mac: main.chordMax || main.chord };
 }
 

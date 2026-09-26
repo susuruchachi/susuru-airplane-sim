@@ -21,11 +21,12 @@ const PART_PROXY_SURFACE_SMOOTH_S = 0.08;
 
 // ---- 翼の板 ------------------------------------------------------------------
 
-// 翼の4頂点（rootLeading, rootTrailing, tipLeading, tipTrailing）から、厚みを持つ板状のジオメトリを生成する。
+// 翼の頂点（rootLeading, rootTrailing, tipLeading, tipTrailing。折れ目があれば kinkLeading, kinkTrailing も）から、
+// 厚みを持つ板状のジオメトリを生成する。
 // モデルの実際の羽根形状に頂点を合わせたとき、翼のプレースホルダー自体の見た目もそれに追従させるためのもの。
 // 水平翼(main/htail)は厚みをY方向に、垂直尾翼(vtail)は厚みをX方向に加える（板が広がる平面が違うため）
+// 折れ目のある翼は、付け根→折れ目→翼端の2枚の四角形をつないだ板になる（csWingStations）。
 function partShapeWingGeometry(corners, role) {
-  const rl = corners.rootLeading, rt = corners.rootTrailing, tl = corners.tipLeading, tt = corners.tipTrailing;
   const thickness = 0.025; // 板の厚み（半分ずつオフセット）
   const half = thickness / 2;
   const thicknessAxis = role === 'vtail' ? 'x' : 'y';
@@ -38,21 +39,23 @@ function partShapeWingGeometry(corners, role) {
     z: p.z,
   });
 
-  const rlU = offset(rl, 1), rtU = offset(rt, 1), tlU = offset(tl, 1), ttU = offset(tt, 1);
-  const rlD = offset(rl, -1), rtD = offset(rt, -1), tlD = offset(tl, -1), ttD = offset(tt, -1);
-
-  // 表面（+方向側。rootLeading, tipLeading, tipTrailing, rootTrailingの順で四角形を三角形2枚に分割）
-  addTri(rlU, tlU, ttU); addTri(rlU, ttU, rtU);
-  // 裏面（-方向側。法線が逆になるよう頂点順を反転）
-  addTri(rlD, ttD, tlD); addTri(rlD, rtD, ttD);
-  // 前縁の側面（rootLeading-tipLeadingの帯）
-  addTri(rlU, rlD, tlD); addTri(rlU, tlD, tlU);
-  // 後縁の側面（rootTrailing-tipTrailingの帯）
-  addTri(rtU, ttD, rtD); addTri(rtU, ttU, ttD);
-  // 翼端の側面（tipLeading-tipTrailingの帯）
-  addTri(tlU, ttD, tlD); addTri(tlU, ttU, ttD);
-  // 付け根の側面（rootLeading-rootTrailingの帯）
-  addTri(rlU, rtD, rlD); addTri(rlU, rtU, rtD);
+  // 翼幅方向に並んだ「前縁・後縁」の組（付け根・折れ目・翼端）
+  const st = csWingStations(corners);
+  for (let i = 0; i + 1 < st.length; i++) {
+    const [aL, aT] = st[i], [bL, bT] = st[i + 1];
+    const aLU = offset(aL, 1), aTU = offset(aT, 1), bLU = offset(bL, 1), bTU = offset(bT, 1);
+    const aLD = offset(aL, -1), aTD = offset(aT, -1), bLD = offset(bL, -1), bTD = offset(bT, -1);
+    // 表面（+方向側）と裏面（-方向側。法線が逆になるよう頂点順を反転）
+    addTri(aLU, bLU, bTU); addTri(aLU, bTU, aTU);
+    addTri(aLD, bTD, bLD); addTri(aLD, aTD, bTD);
+    // 前縁・後縁の側面
+    addTri(aLU, aLD, bLD); addTri(aLU, bLD, bLU);
+    addTri(aTU, bTD, aTD); addTri(aTU, bTU, bTD);
+  }
+  // 付け根と翼端の側面
+  const [rl, rt] = st[0], [tl, tt] = st[st.length - 1];
+  addTri(offset(rl, 1), offset(rt, -1), offset(rl, -1)); addTri(offset(rl, 1), offset(rt, 1), offset(rt, -1));
+  addTri(offset(tl, 1), offset(tt, -1), offset(tl, -1)); addTri(offset(tl, 1), offset(tt, 1), offset(tt, -1));
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -280,11 +283,48 @@ const CS_LEGACY_SHAPE = {
 };
 const CS_CHORD_MIN = 0.05, CS_CHORD_MAX = 0.6;
 
-// 翼の4頂点の中の点（spanS: 0=付け根〜1=翼端、chordT: 0=前縁〜1=後縁）。05c-wing-corners.js の wingPointAt と同じ
+// ---- 翼の形（4頂点、または折れ目つきの6頂点） --------------------------------
+//
+// 翼は4頂点（付け根と翼端の前縁・後縁）の四角形。Boeing 747 のように**後縁（や前縁）が途中で折れる翼**は、
+// 折れ目の前縁・後縁（kinkLeading / kinkTrailing）を足した6頂点にでき、付け根→折れ目と折れ目→翼端の
+// 2枚の四角形をつないだ形として扱う。翼幅方向の位置（0=付け根〜1=翼端）は2枚を通して測り、
+// 折れ目の位置は付け根・折れ目・翼端それぞれの翼弦の中点の間の長さの比で決める。
+const CS_WING_KINK_KEYS = ['kinkLeading', 'kinkTrailing'];
+function csWingHasKink(corners) {
+  return !!(corners && corners.kinkLeading && corners.kinkTrailing);
+}
+// その翼の頂点の名前（折れ目があれば6つ）
+function csWingCornerKeys(corners) {
+  const base = ['rootLeading', 'rootTrailing', 'tipLeading', 'tipTrailing'];
+  return csWingHasKink(corners) ? base.concat(CS_WING_KINK_KEYS) : base;
+}
+// 翼幅方向に並んだ前縁・後縁の組
+function csWingStations(corners) {
+  const st = [[corners.rootLeading, corners.rootTrailing]];
+  if (csWingHasKink(corners)) st.push([corners.kinkLeading, corners.kinkTrailing]);
+  st.push([corners.tipLeading, corners.tipTrailing]);
+  return st;
+}
+// 折れ目の翼幅方向の位置（0〜1）。折れ目が無ければ null
+function csWingKinkS(corners) {
+  if (!csWingHasKink(corners)) return null;
+  const m = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 });
+  const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+  const r = m(corners.rootLeading, corners.rootTrailing), k = m(corners.kinkLeading, corners.kinkTrailing);
+  const t = m(corners.tipLeading, corners.tipTrailing);
+  const d1 = d(r, k), d2 = d(k, t);
+  if (!(d1 + d2 > 1e-9)) return null;
+  return Math.min(Math.max(d1 / (d1 + d2), 0.01), 0.99);
+}
+
+// 翼の中の点（spanS: 0=付け根〜1=翼端、chordT: 0=前縁〜1=後縁）。05c-wing-corners.js の wingPointAt と同じ
 function csWingPoint(corners, spanS, chordT) {
   const l = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t });
-  return l(l(corners.rootLeading, corners.rootTrailing, chordT),
-    l(corners.tipLeading, corners.tipTrailing, chordT), spanS);
+  const quad = (rL, rT, tL, tT, s) => l(l(rL, rT, chordT), l(tL, tT, chordT), s);
+  const sk = csWingKinkS(corners);
+  if (sk === null) return quad(corners.rootLeading, corners.rootTrailing, corners.tipLeading, corners.tipTrailing, spanS);
+  if (spanS <= sk) return quad(corners.rootLeading, corners.rootTrailing, corners.kinkLeading, corners.kinkTrailing, spanS / sk);
+  return quad(corners.kinkLeading, corners.kinkTrailing, corners.tipLeading, corners.tipTrailing, (spanS - sk) / (1 - sk));
 }
 // 4点の四角形の面積（対角線の外積の半分。少しねじれた四角形でも使える）
 function csQuadArea(a, b, c, d) {
@@ -293,10 +333,49 @@ function csQuadArea(a, b, c, d) {
   const cx = d1.y * d2.z - d1.z * d2.y, cy = d1.z * d2.x - d1.x * d2.z, cz = d1.x * d2.y - d1.y * d2.x;
   return 0.5 * Math.hypot(cx, cy, cz);
 }
-// 翼の、翼幅 s0〜s1・翼弦 t0〜t1 の範囲の面積
+// 翼の、翼幅 s0〜s1・翼弦 t0〜t1 の範囲の面積（折れ目をまたぐときは2枚に分けて足す）
 function csRegionArea(corners, s0, s1, t0, t1) {
+  const sk = csWingKinkS(corners);
+  if (sk !== null && s0 < sk && s1 > sk) return csRegionArea(corners, s0, sk, t0, t1) + csRegionArea(corners, sk, s1, t0, t1);
   return csQuadArea(csWingPoint(corners, s0, t0), csWingPoint(corners, s1, t0),
     csWingPoint(corners, s1, t1), csWingPoint(corners, s0, t1));
+}
+
+// ---- 翼の揚力のかかる点（平均空力翼弦の前縁から1/4） ----------------------------
+//
+// 揚力のかかる点（空力中心）は**平均空力翼弦（MAC）の前縁から1/4**。翼幅方向の各位置の
+// 「前縁から1/4の点」を、その位置の面積（≒翼弦）で重みをつけて平均したものがこれになる。
+// 以前は「翼幅の真ん中の、前縁から1/4」を使っていたので、後退角と先細りのある翼では
+// 大きく後ろへずれていた——翼端の細い部分に引っぱられるぶんを数えていなかったため。
+// 実測で Boeing 747（付け根の翼弦12.4m・翼端2.5m・後退約37°）は 2.76m 後ろ（平均空力翼弦の32%）で、
+// 重心を主翼に合わせると後ろ脚より後ろに来ていた。
+// corners は4頂点（x,y,z を持つ物。THREE.Vector3 でもよい）。返すのは同じ座標系の点。
+//   ac   … 空力中心（平均空力翼弦の前縁から1/4）
+//   mac  … 平均空力翼弦の長さ（∫c²/∫c）
+//   area … 翼の面積
+const CS_MAC_STRIPS = 48;
+function csWingMacInfo(corners) {
+  let area = 0, cx = 0, cy = 0, cz = 0, c2 = 0;
+  for (let i = 0; i < CS_MAC_STRIPS; i++) {
+    const s0 = i / CS_MAC_STRIPS, s1 = (i + 1) / CS_MAC_STRIPS, sm = (s0 + s1) / 2;
+    const dA = csRegionArea(corners, s0, s1, 0, 1);
+    const le = csWingPoint(corners, sm, 0), te = csWingPoint(corners, sm, 1);
+    const chord = Math.hypot(te.x - le.x, te.y - le.y, te.z - le.z);
+    const q = csWingPoint(corners, sm, 0.25);
+    area += dA; cx += q.x * dA; cy += q.y * dA; cz += q.z * dA; c2 += chord * dA;
+  }
+  if (!(area > 1e-12)) {
+    const q = csWingPoint(corners, 0.5, 0.25);
+    return { ac: q, mac: 0, area: 0 };
+  }
+  return { ac: { x: cx / area, y: cy / area, z: cz / area }, mac: c2 / area, area };
+}
+
+// 主翼が後ろへ吹き下ろす流れで、後ろの水平尾翼の迎角の変化が減る割合 dε/dα。
+// 楕円翼の吹き下ろし ε = 2·CL/(π·AR)。この飛行モデルの翼の揚力傾斜は 2π なので dε/dα = 4/AR。
+// 細長い翼（アスペクト比が大きい）ほど小さい。0.9 を上限にする（尾翼が効かなくなりきらないように）。
+function csDownwashSlope(mainAspect) {
+  return Math.min(4 / Math.max(mainAspect, 1), 0.9);
 }
 
 // 旧データ：翼幅の中心 spanS のまわりに、翼の面積の areaFrac を覆う幅を探す（端に当たったら内へずらす）
@@ -342,10 +421,14 @@ function csPanel(corners, shape) {
   const trailRoot = csWingPoint(corners, shape.spanFrom, 1), trailTip = csWingPoint(corners, shape.spanTo, 1);
   const wingArea = csRegionArea(corners, 0, 1, 0, 1);
   const stripArea = csRegionArea(corners, shape.spanFrom, shape.spanTo, 0, 1);
-  const panelArea = csQuadArea(hingeRoot, hingeTip, trailTip, trailRoot);
+  const panelArea = csRegionArea(corners, shape.spanFrom, shape.spanTo, t0, 1);
   const w = Math.max(wingArea, 1e-9);
+  // 舵面が翼の折れ目をまたぐときは、板も折れ目で折る
+  const sk = csWingKinkS(corners);
+  const kink = (sk !== null && shape.spanFrom < sk && shape.spanTo > sk)
+    ? { hinge: csWingPoint(corners, sk, t0), trail: csWingPoint(corners, sk, 1) } : null;
   return {
-    hingeRoot, hingeTip, trailRoot, trailTip,
+    hingeRoot, hingeTip, trailRoot, trailTip, kink,
     hingeMid: { x: (hingeRoot.x + hingeTip.x) / 2, y: (hingeRoot.y + hingeTip.y) / 2, z: (hingeRoot.z + hingeTip.z) / 2 },
     wingArea, stripArea, panelArea,
     stripFrac: stripArea / w,   // 舵面が覆う翼幅の範囲の、翼ぜんぶに対する面積比（翼弦は全部）
@@ -372,10 +455,12 @@ function csFlapArm(chordFrac) {
 function partShapeControlSurfaceGeometry(panel, role) {
   const o = panel.hingeMid;
   const rel = (p) => ({ x: p.x - o.x, y: p.y - o.y, z: p.z - o.z });
-  return partShapeWingGeometry({
+  const c = {
     rootLeading: rel(panel.hingeRoot), tipLeading: rel(panel.hingeTip),
     rootTrailing: rel(panel.trailRoot), tipTrailing: rel(panel.trailTip),
-  }, role);
+  };
+  if (panel.kink) { c.kinkLeading = rel(panel.kink.hinge); c.kinkTrailing = rel(panel.kink.trail); }
+  return partShapeWingGeometry(c, role);
 }
 
 // 翼のパーツの変換（位置・回転(°)・拡縮）で、翼のローカル座標の点を機体（部品の入れ物）の座標へ

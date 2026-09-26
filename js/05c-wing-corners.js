@@ -15,7 +15,7 @@ function attachWingCornerHandles(part) {
   group.userData.isWingCornerHandleGroup = true;
 
   const handleMeshes = {};
-  for (const key of WING_CORNER_KEYS) {
+  for (const key of csWingCornerKeys(part.props.corners)) {   // 折れ目のある翼は6頂点
     const mesh = new THREE.Mesh(
       new THREE.SphereGeometry(0.045, 12, 12),
       new THREE.MeshStandardMaterial({
@@ -32,8 +32,8 @@ function attachWingCornerHandles(part) {
     handleMeshes[key] = mesh;
   }
 
-  // 輪郭線（rootLeading→tipLeading→tipTrailing→rootTrailing→rootLeadingの順で閉じる）
-  const lineOrder = ['rootLeading', 'tipLeading', 'tipTrailing', 'rootTrailing', 'rootLeading'];
+  // 輪郭線（付け根前縁→（折れ目前縁）→翼端前縁→翼端後縁→（折れ目後縁）→付け根後縁→付け根前縁の順で閉じる）
+  const lineOrder = wingOutlineOrder(part.props.corners);
   const linePositions = lineOrder.flatMap(key => {
     const c = part.props.corners[key];
     return [c.x, c.y, c.z];
@@ -45,7 +45,7 @@ function attachWingCornerHandles(part) {
   group.add(line);
 
   // 中心マーカー（揚力中心）
-  const center = wingCornersCenter(part.props.corners);
+  const center = wingLiftCenter(part.props.corners);
   const centerMesh = new THREE.Mesh(
     new THREE.SphereGeometry(0.035, 10, 10),
     new THREE.MeshBasicMaterial({ color: WING_CENTER_MARKER_COLOR })
@@ -69,6 +69,33 @@ function attachWingCornerHandles(part) {
   part.cornerHandleMeshes = handleMeshes;
 }
 
+// 輪郭線を引く頂点の順（折れ目があれば前縁・後縁の途中に入る）
+function wingOutlineOrder(corners) {
+  return csWingHasKink(corners)
+    ? ['rootLeading', 'kinkLeading', 'tipLeading', 'tipTrailing', 'kinkTrailing', 'rootTrailing', 'rootLeading']
+    : ['rootLeading', 'tipLeading', 'tipTrailing', 'rootTrailing', 'rootLeading'];
+}
+
+// 翼に折れ目（前縁・後縁の途中の2点）を足す。足した直後は形を変えない（前縁・後縁の直線上、翼幅の40%）ので、
+// そこから後縁の点をドラッグして折る（Boeing 747 の後縁のように）。
+const WING_KINK_DEFAULT_S = 0.4;
+function addWingKink(part) {
+  if (!part || part.type !== 'wing' || csWingHasKink(part.props.corners)) return;
+  const c = part.props.corners;
+  c.kinkLeading = csWingPoint(c, WING_KINK_DEFAULT_S, 0);
+  c.kinkTrailing = csWingPoint(c, WING_KINK_DEFAULT_S, 1);
+  attachWingCornerHandles(part);
+  onWingCornerChanged(part);
+}
+function removeWingKink(part) {
+  if (!part || part.type !== 'wing' || !csWingHasKink(part.props.corners)) return;
+  delete part.props.corners.kinkLeading;
+  delete part.props.corners.kinkTrailing;
+  if (State.selectedCornerKey && State.selectedCornerKey.startsWith('kink')) deselectWingCorner();
+  attachWingCornerHandles(part);
+  onWingCornerChanged(part);
+}
+
 function detachWingCornerHandles(part) {
   if (!part || !part.cornerHandleGroup) return;
   if (part.cornerHandleGroup.parent) part.cornerHandleGroup.parent.remove(part.cornerHandleGroup);
@@ -81,7 +108,10 @@ function detachWingCornerHandles(part) {
 // （数値入力での変更、ミラー、役割変更などcorners自体が書き換わった後に呼ぶ）
 function refreshWingCornerHandles(part) {
   if (!part || !part.cornerHandleGroup) return;
-  for (const key of WING_CORNER_KEYS) {
+  // 折れ目を足した・消したときは、ハンドルの数が変わるので作り直す
+  const keys = csWingCornerKeys(part.props.corners);
+  if (keys.length !== Object.keys(part.cornerHandleMeshes || {}).length) { attachWingCornerHandles(part); return; }
+  for (const key of keys) {
     const c = part.props.corners[key];
     const mesh = part.cornerHandleMeshes[key];
     if (mesh) mesh.position.set(c.x, c.y, c.z);
@@ -89,7 +119,7 @@ function refreshWingCornerHandles(part) {
   const group = part.cornerHandleGroup;
   const line = group.children.find(c => c.userData.isWingCornerOutline);
   if (line) {
-    const lineOrder = ['rootLeading', 'tipLeading', 'tipTrailing', 'rootTrailing', 'rootLeading'];
+    const lineOrder = wingOutlineOrder(part.props.corners);
     const linePositions = lineOrder.flatMap(key => {
       const c = part.props.corners[key];
       return [c.x, c.y, c.z];
@@ -97,7 +127,7 @@ function refreshWingCornerHandles(part) {
     line.geometry.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
     line.geometry.attributes.position.needsUpdate = true;
   }
-  const center = wingCornersCenter(part.props.corners);
+  const center = wingLiftCenter(part.props.corners);
   const centerMesh = group.children.find(c => c.userData.isWingCenterMarker);
   if (centerMesh) centerMesh.position.set(center.x, center.y, center.z);
   const cross = group.children.find(c => c.userData.isWingCenterCross);
@@ -219,15 +249,7 @@ function syncWingCornerFromGizmo(part) {
 // 翼の4頂点から、任意の内部位置をバイリニア補間で求める。
 // spanS: 0=付け根(root) 〜 1=翼端(tip)、chordT: 0=前縁(leading) 〜 1=後縁(trailing)
 function wingPointAt(corners, spanS, chordT) {
-  const lerp3 = (a, b, t) => ({
-    x: a.x + (b.x - a.x) * t,
-    y: a.y + (b.y - a.y) * t,
-    z: a.z + (b.z - a.z) * t,
-  });
-  // まず付け根側・翼端側それぞれで前縁→後縁を補間し、その2点を span方向にさらに補間する
-  const rootPoint = lerp3(corners.rootLeading, corners.rootTrailing, chordT);
-  const tipPoint = lerp3(corners.tipLeading, corners.tipTrailing, chordT);
-  return lerp3(rootPoint, tipPoint, spanS);
+  return csWingPoint(corners, spanS, chordT);   // 折れ目のある翼にも対応（js/env/09e-part-proxy.js）
 }
 
 // 翼の役割(role)・左右位置(side)から、可動翼面の種類の初期値をそれらしく推測する
@@ -238,7 +260,7 @@ function suggestControlSurfaceKindForWing(wingPart) {
 }
 
 // 「この翼に可動翼面を追加」ボタンから呼ばれる一気通貫の処理：
-// 可動翼面パーツを新規作成し、種類を翼の役割から推測し、後縁1/4の位置に自動配置し、所属も設定する
+// 可動翼面パーツを新規作成し、種類を翼の役割から推測し、翼の後ろ側を切り取った形で置き、所属も設定する
 function addControlSurfaceToWing(wingPart) {
   if (!wingPart || wingPart.type !== 'wing') return null;
 
@@ -246,7 +268,7 @@ function addControlSurfaceToWing(wingPart) {
   const kindDef = CONTROL_SURFACE_KINDS.find(k => k.value === kind);
   const spanS = kindDef ? kindDef.suggestedSpanS : 0.78;
 
-  // 位置はいったんデフォルトのスポーン位置で作成し、直後に後縁1/4へ配置し直す
+  // 位置はいったんデフォルトのスポーン位置で作成し、直後に翼から切り取った位置へ置き直す
   const csPart = addPart('control_surface');
   if (!csPart) return null; // モデル未読込などでaddPartがnullを返した場合
 

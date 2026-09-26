@@ -871,7 +871,7 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
       renderPartList: () => {}, renderInspector: () => {}, renderModelSettingsPanel: () => {},
       applyCgToGizmo: () => {}, applyPartToGizmo: () => {}, updateInspectorNumbersOnly: () => {},
     });
-    for (const f of ['05b-cg-system.js', '05d-vtol-balance.js', '05e-pitch-balance.js', '05f-engine-power.js']) {
+    for (const f of ['env/09e-part-proxy.js', '05b-cg-system.js', '05d-vtol-balance.js', '05e-pitch-balance.js', '05f-engine-power.js']) {
       const src = fs.readFileSync(path.join(__dirname, '..', 'js', f), 'utf8');
       vm.runInContext(src, ectx, { filename: f });
     }
@@ -1246,7 +1246,7 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
     applyPartToGizmo: () => {}, renderPartList: () => {}, renderInspector: () => {},
     updateInspectorNumbersOnly: () => {},
   });
-  for (const f of ['05b-cg-system.js', '05e-pitch-balance.js']) {
+  for (const f of ['env/09e-part-proxy.js', '05b-cg-system.js', '05e-pitch-balance.js']) {
     const src = fs.readFileSync(path.join(__dirname, '..', 'js', f), 'utf8');
     vm.runInContext(src, pctx, { filename: f });
   }
@@ -1331,7 +1331,7 @@ function peakLabel(v) { return `最大 ${v.toFixed(0)}°`; }
     State: null, showToast: (m, e) => toasts.push({ msg: m, error: !!e }),
     renderPartList: () => {}, renderInspector: () => {}, renderModelSettingsPanel: () => {},
   });
-  for (const f of ['05b-cg-system.js', '05d-vtol-balance.js', '05e-pitch-balance.js', '05f-engine-power.js']) {
+  for (const f of ['env/09e-part-proxy.js', '05b-cg-system.js', '05d-vtol-balance.js', '05e-pitch-balance.js', '05f-engine-power.js']) {
     const src = fs.readFileSync(path.join(__dirname, '..', 'js', f), 'utf8');
     vm.runInContext(src, ectx, { filename: f });
   }
@@ -2601,10 +2601,13 @@ function autopilotFlight(opts) {
       tipLeading: { x: sign * 9, y: 0, z: 3 }, tipTrailing: { x: sign * 9, y: 0, z: 4 },
     } },
   });
-  const delta = buildAircraftModel({
+  // 重心は主翼の空力中心（平均空力翼弦の前縁から1/4）の真上に置く
+  const deltaCfg = {
     name: 'デルタ機', modelWeightKg: 100000, modelMaxSpeedValue: 1300, modelMaxSpeedUnit: 'kt',
     cg: { x: 0, y: 0, z: 0 }, parts: [wing('r', 1), wing('l', -1)],
-  });
+  };
+  deltaCfg.cg.z = buildAircraftModel(deltaCfg).surfaces.find((s) => s.role === 'main').center.z;
+  const delta = buildAircraftModel(deltaCfg);
   const w = delta.surfaces.find((s) => s.role === 'main');
   note('デルタ機（尾翼なし）', `主翼の空力中心 z=${w.center.z.toFixed(2)}m`
     + ` 後退角ぶんの迎角の倍率 ×${w.alphaGain.toFixed(2)}`);
@@ -4470,6 +4473,65 @@ function autopilotFlight(opts) {
   check(h1.distanceTo(h0) < 1e-6 && t1.y - t0.y > 0.01, '仮モデル：切り取った舵面は前の辺（蝶番）のまわりに回る', `${h1.distanceTo(h0).toExponential(1)} / ${(t1.y - t0.y).toFixed(3)}`);
 }
 
+// --- 揚力のかかる点・吹き下ろし・折れ目のある翼 -------------------------------------------
+// 揚力は平均空力翼弦の前縁から1/4にかける（台形翼なら式で出せる）。折れ目を前縁・後縁の直線上に
+// 置いただけなら何も変わらない。主翼の後ろの水平尾翼は、吹き下ろしのぶん静安定への効きが減る。
+{
+  console.log('\n(翼) 揚力のかかる点・吹き下ろし・折れ目');
+  // 後退角と先細りのある台形翼（付け根の翼弦12m・翼端3m・半幅30m、前縁の後退24m）
+  const trap = { rootLeading: { x: 0, y: 0, z: -6 }, rootTrailing: { x: 0, y: 0, z: 6 }, tipLeading: { x: 30, y: 0, z: 18 }, tipTrailing: { x: 30, y: 0, z: 21 } };
+  const mi = ctx.csWingMacInfo(trap);
+  const lam = 3 / 12;
+  const macWant = (2 / 3) * 12 * (1 + lam + lam * lam) / (1 + lam);
+  const yWant = 30 * (1 + 2 * lam) / (3 * (1 + lam));
+  const zWant = -6 + (yWant / 30) * 24 + 0.25 * macWant;
+  note('台形翼の揚力のかかる点', `平均空力翼弦 ${mi.mac.toFixed(3)}m（式 ${macWant.toFixed(3)}） 位置 x${mi.ac.x.toFixed(3)} z${mi.ac.z.toFixed(3)}（式 x${yWant.toFixed(3)} z${zWant.toFixed(3)}）`);
+  check(Math.abs(mi.mac - macWant) < 0.01 && Math.abs(mi.ac.x - yWant) < 0.05 && Math.abs(mi.ac.z - zWant) < 0.05,
+    '揚力のかかる点は平均空力翼弦の前縁から1/4（台形翼の式と合う）', `${mi.ac.x.toFixed(2)}/${mi.ac.z.toFixed(2)}`);
+  // 折れ目を直線上に置いただけなら、面積も揚力のかかる点も変わらない（飛行の側でも）
+  const withKink = (cfg) => {
+    for (const p of cfg.parts) if (p.type === 'wing' && p.props.role === 'main') {
+      const c = p.props.corners; c.kinkLeading = ctx.csWingPoint(c, 0.4, 0); c.kinkTrailing = ctx.csWingPoint(c, 0.4, 1);
+    }
+    return cfg;
+  };
+  const m0 = buildAircraftModel(defaultAircraftConfig()), m1 = buildAircraftModel(withKink(defaultAircraftConfig()));
+  const mains = (m) => m.surfaces.filter((x) => x.role === 'main');
+  // 面積は細切りの積分なので、刻みの置き方のぶん（翼面積の百万分の一ほど）はずれる
+  const dArea = Math.max(...mains(m0).map((x, i) => Math.abs(x.area - mains(m1)[i].area) / x.area));
+  const dC = Math.max(...mains(m0).map((x, i) => x.center.distanceTo(mains(m1)[i].center)));
+  check(dArea < 1e-5 && dC < 1e-4, '折れ目を前縁・後縁の直線上に置いただけなら、面積も揚力のかかる点も変わらない', `${dArea.toExponential(1)} / ${dC.toExponential(1)}`);
+  // 747型：付け根の後縁を張り出させると面積が増え、揚力のかかる点は付け根寄りへ
+  const y = JSON.parse(JSON.stringify(trap));
+  y.kinkLeading = ctx.csWingPoint(trap, 0.4, 0); y.kinkTrailing = { x: 12, y: 0, z: ctx.csWingPoint(trap, 0.4, 1).z }; y.rootTrailing = { x: 0, y: 0, z: 14 };
+  const my = ctx.csWingMacInfo(y);
+  note('747型の折れ目（付け根の後縁を8m張り出し）', `面積 ${mi.area.toFixed(0)}→${my.area.toFixed(0)}m² 揚力のかかる点 x${mi.ac.x.toFixed(2)}→${my.ac.x.toFixed(2)}m`);
+  check(my.area > mi.area + 40 && my.ac.x < mi.ac.x, '後縁の折れ目で張り出したぶん、面積が増えて揚力のかかる点が付け根寄りになる', `${my.area.toFixed(0)}m²`);
+  const pk = ctx.csPanel(y, { spanFrom: 0.1, spanTo: 0.7, chordFrac: 0.3 });
+  check(!!pk.kink && Math.abs(pk.panelArea - ctx.csRegionArea(y, 0.1, 0.7, 0.7, 1)) < 1e-9, '折れ目をまたぐ舵面も、折れた形のまま面積を測る', pk.panelArea.toFixed(1) + 'm²');
+  // 吹き下ろし：練習機の水平尾翼は主翼の後ろなので、静安定への効きが (1 − dε/dα) 倍になる
+  const tr = buildAircraftModel(defaultAircraftConfig());
+  const dw = tr.downwashK * 2 * Math.PI;
+  const ht = tr.surfaces.filter((x) => x.role === 'htail');
+  note('練習機の吹き下ろし', `dε/dα ${dw.toFixed(2)}（主翼のアスペクト比 ${mains(tr)[0].aspect.toFixed(1)}）・主翼の後ろの水平尾翼 ${ht.filter((x) => x.inWake).length}/${ht.length}枚`);
+  check(dw > 0.3 && dw < 0.7 && ht.every((x) => x.inWake), '主翼の後ろの水平尾翼には吹き下ろしが効く（dε/dα = 4/アスペクト比）', dw.toFixed(2));
+  // 地面効果：地面の近くでは吹き下ろしが弱まり、尾翼の迎角が増える（機首下げ）。引き起こしはそのぶん機首上げの舵を先に当てる
+  const geAt = (agl) => {
+    const st = createFlightState(), c = createFlightControls();
+    const v = apSpeedSchedule(tr).stall * 1.3, trm = solveLevelTrim(tr, v, 0);
+    st.position.set(0, agl, 0); st.velocity.set(0, 0, -v);
+    st.quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), trm.alphaDeg * Math.PI / 180);
+    c.trim = trm.trim; c.throttle = trm.throttle; c.gearDown = false;
+    refreshFlightReadouts(tr, st, flatGround);
+    advanceFlight(tr, st, c, noWind, flatGround, 1 / 60);
+    return { d: st.groundDownwashRad, el: ctx.apGroundEffectElevator(tr, st) };
+  };
+  const ge2 = geAt(2), ge500 = geAt(500);
+  note('練習機の吹き下ろしの地面効果（失速の1.3倍）', `対地2m：尾翼の迎角+${(ge2.d * 180 / Math.PI).toFixed(2)}°・先に当てる昇降舵${ge2.el.toFixed(2)} ／ 対地500m：+${(ge500.d * 180 / Math.PI).toFixed(3)}°`);
+  check(ge2.d > 0 && ge2.el > 0 && ge500.d < ge2.d * 0.01,
+    '地面の近くでは吹き下ろしが弱まって尾翼の迎角が増え、引き起こしは機首上げの舵を先に当てる', `${(ge2.d * 180 / Math.PI).toFixed(2)}° / ${ge2.el.toFixed(2)}`);
+}
+
 // --- 自動操縦：標高の高い空港から離陸しても、目的地へ旋回する -----------------------------
 // 旋回を待つ高さを対地高度で測っていたので、標高1,200mの空港から目標1,500mへ飛ぶと
 // 待つ高さ（450m）に一生届かず、離陸の向きのまま飛び続けた。
@@ -4600,7 +4662,9 @@ function autopilotFlight(opts) {
     // 直接：引いて離す → ピッチ角を保つ
     {
       const { st, step } = setupLevel(cfg, vMult, 3000);
-      for (let i = 0; i < 90; i++) step({ pitch: 0.25, roll: 0 }, { pitch: true, roll: false }, 'direct');
+      // 0.5秒だけ引く。主翼の吹き下ろしを入れてから縦の安定が実機並みに小さくなり、
+      // 同じ引きでも付くピッチが大きい（1.5秒引くと練習機は21°まで上がり、その角度では上昇を続けられない）。
+      for (let i = 0; i < 30; i++) step({ pitch: 0.25, roll: 0 }, { pitch: true, roll: false }, 'direct');
       const th0 = st.pitchDeg; let maxE = 0;
       for (let i = 0; i < 1200; i++) { step(S0, A0, 'direct'); maxE = Math.max(maxE, Math.abs(st.pitchDeg - th0)); }
       note(`${label}：昇降舵を引いて離す`, `離したピッチ${th0.toFixed(1)}° 20秒の最大ずれ${maxE.toFixed(2)}°`);

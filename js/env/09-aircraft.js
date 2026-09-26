@@ -257,8 +257,11 @@ function acQuadArea(a, b, c, d) {
 function acWingGeometry(part, modelMat) {
   const m = acPartMatrix(part, modelMat);
   const P = {};
-  for (const k of AIRCRAFT_WING_CORNER_KEYS) {
-    const c = (part.props && part.props.corners && part.props.corners[k]) || { x: 0, y: 0, z: 0 };
+  const src = (part.props && part.props.corners) || {};
+  // 後縁（や前縁）が途中で折れる翼は、折れ目の2点も持つ（js/env/09e-part-proxy.js の csWingHasKink）
+  const keys = (typeof csWingCornerKeys === 'function') ? csWingCornerKeys(src) : AIRCRAFT_WING_CORNER_KEYS;
+  for (const k of keys) {
+    const c = src[k] || { x: 0, y: 0, z: 0 };
     P[k] = acVec(c).applyMatrix4(m);
   }
   const mid = (a, b) => new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
@@ -275,7 +278,9 @@ function acWingGeometry(part, modelMat) {
     corners: P, center,
     chordVec: new THREE.Vector3().subVectors(trailing, leading), // 前縁→後縁（＝後ろ向き）
     spanVec: new THREE.Vector3().subVectors(tip, root),
-    area: acQuadArea(P.rootLeading, P.tipLeading, P.tipTrailing, P.rootTrailing),
+    // 面積は折れ目があれば2枚ぶん（csRegionArea）
+    area: (typeof csRegionArea === 'function') ? csRegionArea(P, 0, 1, 0, 1)
+      : acQuadArea(P.rootLeading, P.tipLeading, P.tipTrailing, P.rootTrailing),
   };
 }
 
@@ -428,7 +433,8 @@ function buildAircraftModel(config) {
     // 翼幅は機体の横方向（垂直尾翼なら上下方向）を向くはずなので、
     // そうなっていなければ2つを入れ替える。
     const spanAxis = w.role === 'vtail' ? 'y' : 'x';
-    if (Math.abs(spanVec[spanAxis]) < Math.abs(chordVec[spanAxis])) {
+    const cornersSwapped = Math.abs(spanVec[spanAxis]) < Math.abs(chordVec[spanAxis]);
+    if (cornersSwapped) {
       const t = chordVec; chordVec = spanVec; spanVec = t;
       // 翼弦は「前縁→後縁」＝後ろ向き(+Z)でなければならない。入れ替えた側は
       // 向きが保証されないので、前を向いていたら裏返す（さもないと翼が前後逆になり、
@@ -449,7 +455,36 @@ function buildAircraftModel(config) {
       if (new THREE.Vector3().crossVectors(spanA, fwd).y < 0) spanA.negate();
     }
     const up = new THREE.Vector3().crossVectors(spanA, fwd).normalize();
-    center.addScaledVector(fwd, chord * 0.25); // 翼弦中央 → 前縁から1/4へ
+    // 揚力のかかる点は**平均空力翼弦の前縁から1/4**（js/env/09e-part-proxy.js の csWingMacInfo）。
+    // 以前は「4頂点の真ん中（翼幅の真ん中・翼弦の中央）から1/4翼弦前」で、後退角と先細りのある翼では
+    // 大きく後ろへずれていた（Boeing 747 で 2.76m）。頂点の付け根／翼端と前縁／後縁が入れ替わって
+    // 入っている翼は、上で直した向きに合わせて並べ直してから測る。
+    let macLen = chord;
+    if (typeof csWingMacInfo === 'function') {
+      const P = geo.corners;
+      // 付け根／翼端と前縁／後縁が入れ替わって入っている翼は、折れ目の意味も崩れているので4頂点で扱う
+      let C4 = cornersSwapped
+        ? { rootLeading: P.rootLeading, rootTrailing: P.tipLeading, tipLeading: P.rootTrailing, tipTrailing: P.tipTrailing }
+        : { rootLeading: P.rootLeading, rootTrailing: P.rootTrailing, tipLeading: P.tipLeading, tipTrailing: P.tipTrailing,
+          kinkLeading: P.kinkLeading, kinkTrailing: P.kinkTrailing };
+      const cv = new THREE.Vector3(
+        (C4.rootTrailing.x + C4.tipTrailing.x - C4.rootLeading.x - C4.tipLeading.x) / 2,
+        (C4.rootTrailing.y + C4.tipTrailing.y - C4.rootLeading.y - C4.tipLeading.y) / 2,
+        (C4.rootTrailing.z + C4.tipTrailing.z - C4.rootLeading.z - C4.tipLeading.z) / 2);
+      if (dirBody(cv).dot(chordVec) < 0) {
+        C4 = { rootLeading: C4.rootTrailing, rootTrailing: C4.rootLeading, tipLeading: C4.tipTrailing, tipTrailing: C4.tipLeading,
+          kinkLeading: C4.kinkTrailing, kinkTrailing: C4.kinkLeading };
+      }
+      const mi = csWingMacInfo(C4);
+      if (mi.area > 1e-9) {
+        center.copy(toBody(new THREE.Vector3(mi.ac.x, mi.ac.y, mi.ac.z)));
+        macLen = mi.mac;
+      } else {
+        center.addScaledVector(fwd, chord * 0.25);
+      }
+    } else {
+      center.addScaledVector(fwd, chord * 0.25); // 翼弦中央 → 前縁から1/4へ
+    }
 
     const surf = {
       id: w.part.id,
@@ -457,7 +492,8 @@ function buildAircraftModel(config) {
       role: w.role,
       center, fwd, spanA, up,
       area: geo.area,
-      span, chord,
+      // 翼弦は平均空力翼弦（静安定の基準・翼弦方向の回転減衰・舵の腕に使う）
+      span, chord: macLen,
       // アスペクト比はあとで「左右をつないだ翼ぜんぶ」で計算し直す。
       // 片翼だけで span²/面積 を出すと実際の半分になり、誘導抗力が倍になってしまう。
       aspect: Math.max((span * span) / geo.area, 0.6),
@@ -471,6 +507,9 @@ function buildAircraftModel(config) {
     };
     surf.alphaGain = surfaceAlphaGain(surf);
     surf.corners = w.part.props && w.part.props.corners; // 舵面を切り取るのに使う（翼のローカル座標）
+    // 翼端がどこまで横へ出ているか（翼幅の見積もりに使う）。揚力のかかる点（平均空力翼弦の位置）は
+    // 翼幅の真ん中より付け根寄りなので、そこから翼幅を出すと短く見積もってしまう。
+    surf.reachX = Math.max(...Object.values(geo.corners).map((v) => Math.abs(toBody(v).x)));
     surfaces.push(surf);
     wingById.set(w.part.id, surf);
   }
@@ -577,6 +616,24 @@ function buildAircraftModel(config) {
 
   // 誘導抗力に使うアスペクト比を、役割ごとに「左右をつないだ翼ぜんぶ」で出し直す
   applyGroupAspect(surfaces);
+
+  // **主翼の吹き下ろし**。主翼は揚力を出すぶん後ろの空気を押し下げるので、その後ろにある
+  // 水平尾翼は、機体の迎角が変わっても迎角が (1 − dε/dα) 倍しか変わらない（dε/dα は
+  // csDownwashSlope。主翼のアスペクト比8で0.5）。これを入れていなかったので水平尾翼が
+  // 実際の倍ほど効き、実機どおりの大きさで尾翼を作ると「安定しすぎ」と出ていた
+  // （送ってもらった Boeing 747 で静安定77%MAC）。飛行中は主翼の揚力係数から吹き下ろしの角度
+  // ε = 2·CL/(π·AR) を出して、主翼より後ろの水平尾翼の迎角から引く（10-flight.js）。
+  const mainGroup = surfaces.filter((s) => s.role === 'main');
+  let downwashK = 0, mainAcZ = 0;
+  if (mainGroup.length && typeof csDownwashSlope === 'function') {
+    const ar = mainGroup[0].aspect;
+    downwashK = csDownwashSlope(ar) / (2 * Math.PI);       // CL → ε（ラジアン）
+    const a = mainGroup.reduce((t, s) => t + s.area, 0);
+    mainAcZ = mainGroup.reduce((t, s) => t + s.center.z * s.area, 0) / Math.max(a, 1e-9);
+    for (const s of surfaces) s.inWake = s.role === 'htail' && s.center.z > mainAcZ;
+  }
+  // 力を積み上げるとき、主翼の揚力係数を先に出しておきたいので、主翼を先頭に並べる
+  surfaces.sort((a, b) => (a.role === 'main' ? 0 : 1) - (b.role === 'main' ? 0 : 1));
 
   // 4) エンジン
   // 推力の向きは Builder の spinAxis（プロペラ/ファンの回転軸）から決める。
@@ -709,12 +766,15 @@ function buildAircraftModel(config) {
 
   const wingArea = surfaces.filter((s) => s.role === 'main').reduce((a, s) => a + s.area, 0)
     || surfaces.reduce((a, s) => a + s.area, 0);
-  const wingSpan = Math.max(...surfaces.filter((s) => s.role === 'main').map((s) => Math.abs(s.center.x) * 2 + s.span), 1);
+  const wingSpan = Math.max(...surfaces.filter((s) => s.role === 'main')
+    .map((s) => (s.reachX !== undefined ? s.reachX * 2 : Math.abs(s.center.x) * 2 + s.span)), 1);
 
   return {
     massKg, cg, cgModel, qFix, modelMat, vMaxMps,
     surfaces, engines, engineGroups, contacts, inertia, extent,
     controlSurfaces: model_controlSurfaces,
+    downwashK, // 主翼の揚力係数1あたりの吹き下ろしの角度(rad)。主翼より後ろの水平尾翼に効く
+
     wingArea, wingSpan,
     // 胴体の抗力。境界箱から出すと**翼幅を胴体の幅として数えてしまい**、
     // 前面投影が6m²を超えて推力の何倍もの抗力になる（実際にそうなって飛ばなかった）。
@@ -792,7 +852,7 @@ function applyGroupAspect(surfaces) {
       span = Math.max(...group.map((s) => s.span)); // 尾びれは片側だけなのでそのまま
     } else {
       // 左右対称に生えている前提で、翼端までの距離を2倍したものが全翼幅
-      span = 2 * Math.max(...group.map((s) => Math.abs(s.center.x) + s.span * 0.5));
+      span = 2 * Math.max(...group.map((s) => (s.reachX !== undefined ? s.reachX : Math.abs(s.center.x) + s.span * 0.5)));
     }
     const aspect = Math.max((span * span) / Math.max(area, 1e-6), 0.6);
     for (const s of group) { s.aspect = aspect; s.groupSpan = span; s.groupArea = area; }
@@ -939,7 +999,7 @@ function fallbackContacts(surfaces, cg) {
   let minZ = 0, maxX = 1;
   for (const s of surfaces) {
     minZ = Math.min(minZ, s.center.z - s.chord);
-    maxX = Math.max(maxX, Math.abs(s.center.x));
+    maxX = Math.max(maxX, s.reachX !== undefined ? s.reachX * 0.5 : Math.abs(s.center.x));
   }
   const y = -Math.max(1, maxX * 0.18); // 重心の下に適当な脚の長さ
   return [
@@ -1024,11 +1084,14 @@ function analyzeAircraftPerformance(model) {
   const takeoffM = accel > 0.05 ? (liftoffMps * liftoffMps) / (2 * accel) : null;
 
   // 静安定。水平の翼を面積で重み付けした位置（中立点）が重心より後ろなら安定。
+  // 主翼の後ろの水平尾翼は、吹き下ろしで迎角の変化が (1 − dε/dα) 倍になるぶん軽く数える。
   let num = 0, den = 0, mac = 1;
+  const dwSlope = (model.downwashK || 0) * 2 * Math.PI;
   for (const s of model.surfaces) {
     if (s.role !== 'main' && s.role !== 'htail') continue;
-    num += s.area * s.center.z;
-    den += s.area;
+    const k = s.inWake ? 1 - dwSlope : 1;
+    num += s.area * k * s.center.z;
+    den += s.area * k;
     if (s.role === 'main') mac = Math.max(mac, s.chord);
   }
   const neutralZ = den > 0 ? num / den : 0;
