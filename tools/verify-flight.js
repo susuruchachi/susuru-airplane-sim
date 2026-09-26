@@ -4391,6 +4391,101 @@ function autopilotFlight(opts) {
   check(Math.abs(vis - phys.y) < 1e-6, '仮モデルの脚の先端は、接地に使う点と同じ高さ', `${vis.toFixed(4)} / ${phys.y.toFixed(4)}`);
 }
 
+// --- 自動操縦：標高の高い空港から離陸しても、目的地へ旋回する -----------------------------
+// 旋回を待つ高さを対地高度で測っていたので、標高1,200mの空港から目標1,500mへ飛ぶと
+// 待つ高さ（450m）に一生届かず、離陸の向きのまま飛び続けた。
+{
+  const cfg = defaultAircraftConfig();
+  for (const [elev, alt] of [[1200, 1500], [0, 3000]]) {
+    const gh = () => elev;
+    const m = buildAircraftModel(cfg);
+    const st = createFlightState(), c = createFlightControls();
+    placeAircraftOnGround(m, st, 0, 0, 90, gh);
+    settleAircraftOnGround(m, st, gh);
+    const ap = createAutopilotState();
+    ap.full = true; ap.targetAltitudeM = alt; ap.destAirportId = 'DST'; ap.phase = 'takeoff'; ap.takeoffHeadingDeg = 90;
+    ap.plan = apMakeApproachPlan({ id: 'DST', x: -60000, z: 0, elevationM: elev }, { runwayLengthM: 3000, headingDeg: 270 }, 0);
+    let t = 0, turned = null;
+    for (; t < 400 && turned === null; t += 1 / 60) {
+      stepAutopilot(m, st, c, ap, 1 / 60, { groundHeightAt: gh });
+      advanceFlight(m, st, c, noWind, gh, 1 / 60);
+      const brg = apBearingTo(st.position.x, st.position.z, ap.plan.faf.x, ap.plan.faf.z);
+      if (ap.phase !== 'takeoff' && Math.abs(apWrap180(brg - st.headingDeg)) < 20) turned = t;
+      if (st.crashed) break;
+    }
+    note(`離陸後の旋回（標高${elev}m・目標${alt}m・目的地は真後ろ）`, turned === null ? '向かない' : `${turned.toFixed(0)}秒で目的地へ向いた`);
+    check(turned !== null && turned < 200, `標高${elev}mの空港から目標${alt}mへ離陸して、200秒以内に目的地へ向く`,
+      turned === null ? '向かない' : `${turned.toFixed(0)}秒`);
+  }
+}
+
+// --- 垂直着陸：進入でしっかり減速し、遅すぎたらメインエンジンで前へ出る --------------------
+{
+  const cfg = defaultAircraftConfig();
+  cfg.modelMaxSpeedValue = 2; cfg.modelMaxSpeedUnit = 'mach';
+  for (const p of cfg.parts) if (p.type === 'engine' && p.props) p.props.thrustKgf *= 20;
+  for (const p of cfg.parts) {
+    if (p.type !== 'wing' || !p.props || !p.props.corners || p.props.role !== 'main') continue;
+    for (const k in p.props.corners) { const v = p.props.corners[k]; v.x *= 0.45; v.z *= 0.45; }
+  }
+  for (const p of cfg.parts) {
+    if (p.type === 'landing_gear' && !(p.props && p.props.gearPosition === 'nose')) p.position.z += 1.2;
+  }
+  const lift = cfg.modelWeightKg * 1.6 / 4;
+  const eng = (id, x, z) => ({ id, type: 'engine', name: '垂直' + id,
+    position: { x, y: 0.4, z }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+    props: { thrustKgf: lift, spinAxis: 'y' } });
+  cfg.parts = cfg.parts.concat([eng('v1', -1.2, -1.5), eng('v2', 1.2, -1.5), eng('v3', -1.2, 1.5), eng('v4', 1.2, 1.5)]);
+  const m = buildAircraftModel(cfg);
+  const spdV = apSpeedSchedule(m);
+  // (1) 進入速度で25km手前から：着地点を通り過ぎない
+  {
+    const st = createFlightState(), c = createFlightControls();
+    const plan = apMakeApproachPlan({ id: 'DST', x: 0, z: -60000, elevationM: 0 }, { runwayLengthM: 3000, headingDeg: 0 }, 180);
+    st.position.set(plan.pad.x, 1200, plan.pad.z + 25000);
+    st.velocity.set(0, 0, -spdV.approach);
+    const ap = createAutopilotState();
+    ap.full = true; ap.vtolLanding = true; ap.destAirportId = 'DST'; ap.plan = plan; ap.phase = 'vtol_approach'; ap.targetAltitudeM = 1200;
+    let t = 0, over = 0, hoverAt = null, descentAt = null;
+    for (; t < 900; t += 1 / 60) {
+      stepAutopilot(m, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+      advanceFlight(m, st, c, noWind, flatGround, 1 / 60);
+      over = Math.max(over, plan.pad.z - st.position.z);   // 北へ進んで、着地点を越えたぶん
+      if (hoverAt === null && ap.phase === 'vtol_hover') hoverAt = t;
+      if (descentAt === null && ap.phase === 'vtol_descent') descentAt = t;
+      if (ap.phase === 'done' || st.crashed) break;
+    }
+    note('垂直着陸の寄せ（進入速度で25km手前から）', `着地点を越えた最大${over.toFixed(0)}m・ホバリング${hoverAt !== null && descentAt !== null ? (descentAt - hoverAt).toFixed(0) + '秒' : '—'}・${ap.phase}`);
+    check(ap.phase === 'done' && over < 60, '垂直着陸の進入で減速しきり、着地点を通り過ぎない', `${over.toFixed(0)}m`);
+  }
+  // (2) 着地点の2km手前で止まっているところから：メインエンジンで前へ出て寄せる
+  // (3) 着地点を背にして0.5km手前で止まっているところから：機首を回してから寄せる（押しながら回って飛び去らない）
+  for (const [label, padX, maxSec] of [['2km手前で止まっている', 2000, 100], ['着地点を背にして1km', -1000, 180]]) {
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, 200 + m.gearHeight, 0);
+    st.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 2);   // 東向き
+    c.gearDown = true; c.parkingBrake = false;
+    c.vtolThrottle = ctx.apVtolHoverLever(m); st.enginePower = { lift: c.vtolThrottle };
+    refreshFlightReadouts(m, st, flatGround);
+    const plan = apMakeApproachPlan({ id: 'DST', x: padX + 1500, z: 0, elevationM: 0 }, { runwayLengthM: 3000, headingDeg: 90 }, 0);
+    const ap = createAutopilotState();
+    ap.full = true; ap.vtolLanding = true; ap.plan = plan; ap.phase = 'vtol_hover'; ap.targetAltitudeM = 1200;
+    let t = 0, reached = null, thrMax = 0, far = 0;
+    for (; t < 400 && reached === null; t += 1 / 60) {
+      stepAutopilot(m, st, c, ap, 1 / 60, { groundHeightAt: flatGround });
+      advanceFlight(m, st, c, noWind, flatGround, 1 / 60);
+      thrMax = Math.max(thrMax, c.throttle);
+      far = Math.max(far, Math.hypot(st.position.x - plan.pad.x, st.position.z - plan.pad.z));
+      if (ap.phase === 'vtol_descent') reached = t;
+      if (st.crashed) break;
+    }
+    note(`垂直着陸の寄せ（${label}）`, `着地点の上に${reached === null ? '着かない' : reached.toFixed(0) + '秒'}・メイン出力最大${(thrMax * 100).toFixed(0)}%・いちばん離れた${far.toFixed(0)}m`);
+    check(reached !== null && reached < maxSec && far < Math.abs(padX) + 400,
+      `垂直着陸：${label}ところから、${maxSec}秒以内に着地点の上へ寄せる`, reached === null ? '着かない' : `${reached.toFixed(0)}秒・最大${far.toFixed(0)}m`);
+    if (padX > 0) check(thrMax > 0.01, `垂直着陸：遅すぎるときはメインエンジンで前へ出る`, `${(thrMax * 100).toFixed(0)}%`);
+  }
+}
+
 // --- 手で飛ばすときの補助（13b-pilot-assist.js） ------------------------------------
 //
 // 直接：レバーを離したら、離した瞬間の姿勢（ピッチ角・バンク角）を保つ。

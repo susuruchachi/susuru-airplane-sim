@@ -184,9 +184,31 @@ function applyCgOffset() {
 // --- 滑走路に置く -------------------------------------------------------------
 
 // 飛行で使う地面の高さ。描かれている面をそのまま読む。
+// 機体がぶつかる面の高さ。**海・湖・川の上では水面**（地面ではなく）。
+// 地面だけを返していたので、海の上では対地高度を海底から測っていた——海面より下へ沈んでも
+// 「まだ海底まで余裕がある」ので自動操縦は上昇せず、機体はそのまま海へ潜り込んだ。
+// 物理の接地・当たり判定、対地高度、自動操縦の地形の先読みは、どれもここを通る。
+// 水面に触れたら着水（墜落）にする（updateFlight の墜落判定。flightWaterAt）。
 function flightGroundHeightAt(x, z) {
-  if (typeof terrainSurfaceHeightAt === 'function') return terrainSurfaceHeightAt(x, z);
-  return worldHeightAt(x, z);
+  const g = typeof terrainSurfaceHeightAt === 'function' ? terrainSurfaceHeightAt(x, z) : worldHeightAt(x, z);
+  const w = flightWaterLevelAt(x, z, g);
+  return w !== null ? w : g;
+}
+
+// その地点が水の上なら水面の高さ（海は0m）、陸なら null。g はその地点の地面の高さ
+function flightWaterLevelAt(x, z, g) {
+  let w = g < 0 ? 0 : null;   // 海
+  if (typeof worldWaterSurfaceAt === 'function') {
+    const lake = worldWaterSurfaceAt(x, z);   // 湖・川
+    if (lake !== null && lake > g && (w === null || lake > w)) w = lake;
+  }
+  return w !== null && w > g ? w : null;
+}
+
+// 機体の真下が水か
+function flightWaterAt(x, z) {
+  const g = typeof terrainSurfaceHeightAt === 'function' ? terrainSurfaceHeightAt(x, z) : worldHeightAt(x, z);
+  return flightWaterLevelAt(x, z, g) !== null;
 }
 
 // 選んでいる空港の滑走路の端に、離陸の向きで置く
@@ -337,7 +359,11 @@ function updateFlight(dt) {
   // 脚は触れる前提の場所だからGで見極めが要るが、そこ以外は触れること自体が
   // 異常なので判定は要らない（山にまっすぐ突っ込んだときは onGround にもならない）。
   if (!f.state.crashed) {
-    if (f.state.hullContactCount > 0) {
+    // 水面に触れたら着水（脚で触れても同じ。水の上は滑走できない）
+    if ((f.state.onGround || f.state.hullContactCount > 0) && flightWaterAt(f.state.position.x, f.state.position.z)) {
+      f.state.crashed = true;
+      announceFlight('着水しました（墜落） — R で滑走路へ戻る');
+    } else if (f.state.hullContactCount > 0) {
       f.state.crashed = true;
       announceFlight('墜落しました — R で滑走路へ戻る');
     } else if (f.state.onGround

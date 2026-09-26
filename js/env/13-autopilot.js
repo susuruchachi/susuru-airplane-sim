@@ -179,6 +179,57 @@ function apVtolBrakeDecel(model, controls) {
     AP_VTOL_BRAKE_MIN_MPS2, AP_VTOL_BRAKE_MAX_MPS2) * AP_VTOL_BRAKE_PLAN_FRAC;
 }
 
+// --- 垂直着陸：着地点までの距離で、前後の速さを追う（進入・ホバリング共通） -------------
+//
+// **進入のあいだにしっかり減速し、遅すぎたらメインエンジンでゆっくり前へ出る**。
+// 以前は、進入の段は逆噴射を見積もりから決め打ち（開ループ）で当てていたので、速さによる
+// 推力の落ち方やアイドルの押しが入らず、計画の半分ほどしか減速しなかった（実測でTB1新は
+// 計画2.4m/s²に対して1.3m/s²）。失速の0.9倍でホバリングに渡ったときには、着地点の1〜1.7km手前で
+// まだ250kt出ていて、ホバリングは前進エンジンを切って傾きだけで寄せるので、着地点を494〜1,560m
+// 通り過ぎてから、機首を上げて垂直エンジンで戻っていた（TB1 はホバリングに131秒）。
+// いまは、進入でもホバリングでも「残りの距離で止まりきれる速さ」
+//   v = √(2 · 減速度 · (残り距離 − 着地点の上とみなす半径の半分))
+// を目標にして、速すぎれば逆噴射、遅すぎればメインエンジンで押す（比例＋積分。見積もりがずれても
+// 追いつく）。前進は AP_VTOL_CREEP_ACCEL まで、止まるのも同じ減速度で計画する。
+const AP_VTOL_SPEED_TAU = 2;        // 速さのずれを詰める時定数(秒)
+const AP_VTOL_SPEED_KI = 0.3;       // 速さのずれ1m/sが1秒続くと足す加速度(m/s²)
+const AP_VTOL_CREEP_ACCEL = 1.5;    // メインエンジンで前へ出すときの加速度の上限(m/s²)
+const AP_VTOL_CREEP_MAX_MPS = 40;   // ホバリングで前へ出す速さの上限(m/s ≒ 78kt)
+const AP_VTOL_FINE_M = 25;          // ここまで寄ったら、機体を傾けて合わせる（前後のエンジンは使わない）
+const AP_VTOL_FACE_DEG = 40;        // 遠いとき、着地点の方位と機首のずれがこれ以内でだけメインエンジンで押す
+const AP_VTOL_TURN_TO_PAD_M = 300;  // これより遠ければ、機首を着地点へ回す（近ければ機首はそのまま、前後で寄せる）
+const AP_VTOL_BACK_MAX_MPS = 5;     // 通り過ぎたとき、機首上げで後ろへ戻る速さの上限(m/s)
+// extraDecel：逆噴射のほかに見込める減速度（ホバリングで機首を上げて推力を後ろへ傾けるぶん）。
+// stopAtM：止まりきる点（着地点からの距離）。ホバリングでは、傾けて合わせる範囲（AP_VTOL_FINE_M）の
+// 入口で歩くくらいの速さになるように、その少し内側で止まる計画にする。入口へ7m/sのまま入ると、
+// 傾けて止めきれずに着地点を越えて行き来し、止まるまで30秒近くかかった（検証の垂直離着陸機）
+function apVtolPadSpeed(model, controls, distM, extraDecel, stopAtM) {
+  const a = apVtolBrakeDecel(model, controls) + (extraDecel || 0) * AP_VTOL_BRAKE_PLAN_FRAC;
+  const stopAt = stopAtM === undefined ? AP_VTOL_STOP_RADIUS_M * 0.5 : stopAtM;
+  return Math.sqrt(2 * a * Math.max(distM - stopAt, 0));
+}
+// 前後の速さ vAlong（着地点へ向かう向きが＋）を vWant へ寄せる出力と逆噴射。controls に書く
+function apVtolAlongSpeed(model, state, controls, ap, vWant, vAlong, dt) {
+  const err = vWant - vAlong;
+  ap.vtolAccI = apClamp((ap.vtolAccI || 0) + err * AP_VTOL_SPEED_KI * dt, -AP_VTOL_BRAKE_MAX_MPS2, AP_VTOL_CREEP_ACCEL);
+  const accel = apClamp(err / AP_VTOL_SPEED_TAU + ap.vtolAccI, -AP_VTOL_BRAKE_MAX_MPS2, AP_VTOL_CREEP_ACCEL);
+  // 要る推力（抗力のぶんを足す）。＋ならメインエンジン、−なら逆噴射
+  const v = Math.max(state.airspeed, 0);
+  const force = model.massKg * accel + apDragEstimateN(model, v, state.altitudeM);
+  if (force > 0 && accel > 0) {
+    controls.throttle = apLeverForThrustN(model, controls, force, v, state.altitudeM);
+    controls.reverse = 0;
+  } else {
+    controls.throttle = 0;
+    const revN = apReverseThrustAvailN(model, controls);
+    // 逆噴射は前へ動いているあいだしか効かない（10-flight.js の revLever）
+    controls.reverse = revN > 0 && vAlong > 0.5 ? apClamp(model.massKg * -accel / revN, 0, 1) : 0;
+  }
+  // 逆噴射で出しきれない減速度（ホバリングでは、そのぶん機首を上げて推力を後ろへ傾ける）
+  const revA = vAlong > 0.5 ? apReverseThrustAvailN(model, controls) / Math.max(model.massKg, 1) : 0;
+  return { accel, brakeShort: accel < 0 ? Math.max(-accel - revA, 0) : 0 };
+}
+
 // 減速しながらの進入で、**翼が支えきれなくなるぶんを垂直エンジンに移す**。
 // 揚力は速度の2乗で効くので、失速速度の1.2倍を下回ったところから
 // (1 - (v/1.2Vs)²) ぶんの重さが宙に浮く。昇降率の輪（apVtolThrottleForVs）
@@ -187,7 +238,13 @@ function apVtolBrakeDecel(model, controls) {
 function apVtolSupport(model, state, controls, ap, spd, wantVs, dt) {
   const fb = apVtolThrottleForVs(controls, state.verticalSpeed, wantVs, dt, ap);
   const wing = apClamp(state.airspeed / Math.max(spd.stall * 1.2, 1), 0, 1);
-  const floor = apVtolHoverLever(model) * (1 - wing * wing);
+  let floor = apVtolHoverLever(model) * (1 - wing * wing);
+  // **狙いより上がっているあいだは、下限を外していく**。翼の揚力は見積もり（失速の1.2倍で全部）より
+  // 残っていることが多く、下限のぶん垂直エンジンを回し続けると上がっていく——実測（検証の
+  // 垂直離着陸機）で、ホバリングの高さ（対地200m）を保つはずが650mまで上がり、そこから降りるのに
+  // 何十秒もかかっていた。狙いより1m/s上がったところから、3m/sで下限を0にする。
+  const over = state.verticalSpeed - wantVs - 1;
+  if (over > 0) floor *= apClamp(1 - over / 3, 0, 1);
   return apClamp(Math.max(fb, floor), 0, 1);
 }
 
@@ -460,6 +517,15 @@ const AP_TAKEOFF_TURN_FRAC = 0.4;
 const AP_TAKEOFF_TURN_MIN_M = 450;
 const AP_TAKEOFF_TURN_MAX_M = 1500;
 const AP_TAKEOFF_TURN_RAMP = 1.6;
+// **待つ高さは「出発した地面から上がった高さ」で測り、目標高度まで上がる高さの半分を超えない**。
+// 対地高度で測っていたので、標高1,200mの空港から目標1,500mへ飛ぶと対地は300mにしかならず、
+// 待つ高さ（下限450m）に一生届かないまま、離陸の向きでまっすぐ飛び続けた（練習機・747・TB1新、
+// 垂直離陸でも。山の上を飛んで対地高度が小さいときも同じ）。
+const AP_TAKEOFF_TURN_SPAN_MAX = 0.5;
+// **浮いてから一定の時間がたったら、高さに届かなくても旋回を許す**。上昇の遅い機体は待つ高さまで
+// 何分もかかる（練習機は標高0mから目標3,000mで、目的地へ向くまで448秒まっすぐ飛んでいた）。
+const AP_TAKEOFF_TURN_WAIT_S = 45;   // 浮いてからこれだけは、高さで決める
+const AP_TAKEOFF_TURN_RAMP_S = 30;   // そこからこの秒数で旋回の上限を戻しきる
 const AP_BANK_AGL_LO = 60;   // これ以下の対地高度では傾けない(m)
 const AP_BANK_AGL_HI = 300;  // ここまで上がれば上限いっぱいまで使う(m)
 function apBankAglFactor(state) {
@@ -1770,6 +1836,8 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 垂直降下から出たら、覚えた風の傾きと「降りられない」時間を取り直す
     if (phase !== 'vtol_descent') { ap.vtolWindPitch = undefined; ap.vtolWindBank = undefined; ap.vtolLowSec = 0; }
     if (phase !== 'vtol_touchdown') ap.vtolParked = false;
+    if (phase !== 'vtol_hover') ap.vtolHoverCapMps = undefined;
+    if (phase !== 'vtol_hover' && phase !== 'vtol_approach') ap.vtolAccI = 0;
     ap.gndPrevHdg = undefined; // 地上の操向の積分・すべり角は段ごとに取り直す
     if (phase !== 'approach') { ap.apprThr = undefined; ap.apprFlapMax = undefined; }
     // やり直すときは、FAFへまっすぐ戻るか入口を経由するかを決め直す
@@ -1862,6 +1930,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
 
   // ---- 垂直離陸：真上へ上がる -------------------------------------------------
   if (ap.phase === 'vtol_takeoff') {
+    if (ap.departElevM === undefined) ap.departElevM = state.altitudeM - state.altitudeAglM;
     controls.throttle = 0;
     controls.brake = 0;
     controls.gearDown = true;
@@ -1978,6 +2047,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     if (ap.takeoffOrigin === undefined) {
       ap.takeoffOrigin = { x: state.position.x, z: state.position.z };
     }
+    if (ap.departElevM === undefined) ap.departElevM = state.altitudeM - state.altitudeAglM;
     const toCross = apCrossFromLine(state, ap.takeoffOrigin.x, ap.takeoffOrigin.z, ap.takeoffHeadingDeg);
     if (state.onGround) {
       controls.yaw = apGroundSteer(state, ap, ap.takeoffHeadingDeg, toCross, dt);
@@ -2023,10 +2093,16 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 届く見込みが立つと対地400mでもう巡航の段へ移り、そこで倒し込んでいた。
     if ((ap.phase === 'climb' || ap.phase === 'cruise') && ap.takeoffHeadingDeg !== undefined
       && !terrain.dodgeDeg && !ap.takeoffTurnDone) {
-      const groundElev = state.altitudeM - state.altitudeAglM;
-      const turnH = apClamp(AP_TAKEOFF_TURN_FRAC * (ap.targetAltitudeM - groundElev),
-        AP_TAKEOFF_TURN_MIN_M, AP_TAKEOFF_TURN_MAX_M);
-      turnFactor = apClamp((state.altitudeAglM - turnH) / (turnH * (AP_TAKEOFF_TURN_RAMP - 1)), 0, 1);
+      // 出発した地面の高さ（途中から入れたときは、いまの地面）から上がった高さで測る
+      const depElev = ap.departElevM !== undefined ? ap.departElevM : state.altitudeM - state.altitudeAglM;
+      const span = Math.max(ap.targetAltitudeM - depElev, 0);
+      const turnH = Math.min(apClamp(AP_TAKEOFF_TURN_FRAC * span, AP_TAKEOFF_TURN_MIN_M, AP_TAKEOFF_TURN_MAX_M),
+        span * AP_TAKEOFF_TURN_SPAN_MAX);
+      const byHeight = turnH > 1
+        ? apClamp((state.altitudeM - depElev - turnH) / (turnH * (AP_TAKEOFF_TURN_RAMP - 1)), 0, 1) : 1;
+      ap.departSec = (ap.departSec || 0) + dt;
+      const byTime = apClamp((ap.departSec - AP_TAKEOFF_TURN_WAIT_S) / AP_TAKEOFF_TURN_RAMP_S, 0, 1);
+      turnFactor = Math.max(byHeight, byTime);
       if (turnFactor <= 0) want = ap.takeoffHeadingDeg;
       // 一度上がりきったら、あとで沈んでも（山越えなどで）まっすぐに戻さない
       if (turnFactor >= 1) ap.takeoffTurnDone = true;
@@ -2328,9 +2404,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // **残りの距離で止まりきる速度を目標にする**。以前はここが進入速度の
     // 据え置きで、止まる算段がどこにも無かった（AP_VTOL_STOP_AGL_M の説明）。
     //   v = √(2 · 減速度 · 残り距離)
-    const brakeM = Math.max(distToTouchdown - AP_VTOL_STOP_RADIUS_M, 0);
-    const vForDist = Math.min(spd.approach,
-      Math.sqrt(2 * apVtolBrakeDecel(model, controls) * brakeM));
+    const vForDist = Math.min(spd.approach, apVtolPadSpeed(model, controls, distToTouchdown));
     // **一度下げた目標は上げない**。距離だけで決めると、行き過ぎたとたんに
     // 「まだ遠いから速くていい」に戻って加速しなおす——着地点の周りを
     // 速いまま行ったり来たりすることになる。降下の速度上限（descentSpeedCapMps）
@@ -2338,14 +2412,13 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     ap.vtolSpeedCapMps = ap.vtolSpeedCapMps === undefined
       ? vForDist : Math.min(ap.vtolSpeedCapMps, vForDist);
     ap.targetSpeedMps = ap.vtolSpeedCapMps;
-    controls.throttle = apThrottleForSpeed(state, controls, ap.targetSpeedMps, dt);
     controls.spoiler = terrainPushing ? 0
       : apSpoilerCommand(model, controls, state, ap.targetSpeedMps, 0);
     // 翼が支えきれなくなるぶんは垂直エンジンへ移す
     controls.vtolThrottle = apVtolSupport(model, state, controls, ap, spd, ap.vsCmd, dt);
-    // まだ速いぶんは逆噴射で削る（垂直着陸用の機体だけが空中で開ける。
-    // 10-flight.js の revLever を参照）
-    controls.reverse = apVtolBrakeCommand(model, controls, state, brakeM, ap.targetSpeedMps);
+    // 速さは、速すぎれば逆噴射（垂直着陸用の機体だけが空中で開ける。10-flight.js の revLever）、
+    // 遅すぎればメインエンジンで（apVtolAlongSpeed。見積もりの逆噴射を決め打ちで当てると減速が足りなかった）
+    apVtolAlongSpeed(model, state, controls, ap, ap.targetSpeedMps, state.airspeed, dt);
 
     // **翼が支えを失ったらホバリングへ**。距離だけで切り替えると、止まりきる前に
     // 着地点の真上へ来た機体がそのまま通り過ぎ、ホバーの傾き（±10°）では
@@ -2369,51 +2442,94 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
   if (ap.phase === 'vtol_hover') {
     controls.gearDown = true;
     controls.flap = 1;
-    controls.throttle = 0;
 
     const distToTouchdown = Math.hypot(
       state.position.x - plan.pad.x, state.position.z - plan.pad.z);
     ap.distanceM = distToTouchdown;
-
-    // 位置と速度は機体の傾きで詰める（垂直降下と同じ仕掛け）。
-    // **傾けていい角度は、失速速度をどれだけ下回っているかで決める**。
-    // ホバーの傾きは「推力の向きを変えて水平に動く」ための道具で、翼が生きて
-    // いる速度でやると翼のほうが強い——実測で、まだ278ktある機体に10°の
-    // 指示を出したとたんバンク95°・ピッチ-33°まで持っていかれ、対地16mまで
-    // 落ちて34.4Gを記録した。速いうちは水平のまま逆噴射で削り、遅くなるほど
-    // 傾けられるようにする。
     const slowFrac = apClamp(1 - state.airspeed / Math.max(spd.stall, 1), 0, 1);
-    const hover = apVtolHoverAngles(state, plan.pad.x, plan.pad.z,
-      AP_VTOL_TILT_MAX * slowFrac, ap);
-    controls.pitch = apElevatorForPitch(state, controls, hover.wantPitchDeg, dt, spd, ap);
-    controls.roll = apAileronForBank(state, hover.wantBankDeg, spd);
-    // **機首の向きを合わせるのも、止まってから**。垂直降下と同じ式
-    // （方位のずれ×AP_STEER_KP）をそのまま使っていたが、あれは前輪の操舵用で
-    // 20°ずれれば舵一杯になる。ホバリングに入った瞬間の機首は着地点のほうを
-    // 向いていて滑走路の方位とは何十度も違うから、246ktの機体がいきなり
-    // ラダー一杯を当てることになり、横滑り11°から横転していった——実測で
-    // バンクが4°→-79°まで流れ、そのまま地面へ落ちた。速いうちは横滑りを
-    // 消すだけにして、遅くなるほど方位合わせに移す。
-    const yawHold = apClamp(apWrap180(plan.heading - state.headingDeg)
-      * AP_VTOL_HOVER_YAW_KP, -0.5, 0.5);
-    controls.yaw = yawHold * slowFrac + apRudderForCoordination(state) * (1 - slowFrac);
+    // 着地点へ向かう向きと、機首の向きに沿った前後の距離・速さ（前が＋）
+    const bearingPad = apBearingTo(state.position.x, state.position.z, plan.pad.x, plan.pad.z);
+    const hf = apForward(state.headingDeg);
+    const dAlong = (plan.pad.x - state.position.x) * hf.x + (plan.pad.z - state.position.z) * hf.z;
+    const vFwd = state.velocity.x * hf.x + state.velocity.z * hf.z;
+    // **着地点のすぐ近くまで、前後はエンジンと機首の上げ下げで寄せる**（apVtolAlongSpeed）。
+    // 以前はここで前進エンジンを切り、機体を傾けるだけ（10°まで）で寄せていたので遅く、
+    // 着地点を通り過ぎてから機首を上げて戻っていた。前へはメインエンジン、止まるのは逆噴射と
+    // 機首上げ（推力を後ろへ傾ける）、後ろへ戻るのは機首上げ。着地点のすぐ上（AP_VTOL_FINE_M）まで
+    // 来たら、傾けて合わせる仕掛け（apVtolHoverAngles）に任せる。
+    const fine = distToTouchdown < AP_VTOL_FINE_M;
+    const tiltMaxDeg = AP_VTOL_TILT_MAX * slowFrac;
+    if (!fine) {
+      // 前後：残りの距離で止まりきれる速さ（逆噴射を持たない機体もあるので、機首を上げて推力を後ろへ
+      // 傾けるぶんも減速に見込む）。上限は AP_VTOL_CREEP_MAX_MPS と入ってきた速さ。後ろへは傾きだけで戻る
+      const tiltDecel = FLIGHT_GRAVITY * Math.tan(tiltMaxDeg * Math.PI / 180);
+      if (ap.vtolHoverCapMps === undefined) ap.vtolHoverCapMps = Math.max(vFwd, AP_VTOL_CREEP_MAX_MPS);
+      let vWant = Math.min(apVtolPadSpeed(model, controls, Math.abs(dAlong), tiltDecel, AP_VTOL_FINE_M), ap.vtolHoverCapMps);
+      ap.vtolHoverCapMps = Math.max(Math.min(ap.vtolHoverCapMps, Math.max(vWant, AP_VTOL_CREEP_MAX_MPS)), 0);
+      if (dAlong < 0) vWant = -Math.min(vWant, AP_VTOL_BACK_MAX_MPS);
+      // **押すのは機首が着地点を向いているときだけ**（遠いとき）。メインエンジンは機首の向きにしか
+      // 押せないので、向きがずれたまま押すと着地点から離れていく（実測で、着地点を背にしてホバリングに
+      // 入った機体が、機首を回しながら押し続けて輪を描き、342ktまで加速して50km先へ飛んでいった）。
+      const errPad = apWrap180(bearingPad - state.headingDeg);
+      const turnToPad = distToTouchdown > AP_VTOL_TURN_TO_PAD_M;
+      if (turnToPad) {
+        const face = apClamp((Math.cos(errPad * Math.PI / 180) - Math.cos(AP_VTOL_FACE_DEG * Math.PI / 180))
+          / (1 - Math.cos(AP_VTOL_FACE_DEG * Math.PI / 180)), 0, 1);
+        vWant = Math.max(vWant, 0) * face;
+      }
+      ap.targetSpeedMps = vWant;
+      const cmd = apVtolAlongSpeed(model, state, controls, ap, vWant, vFwd, dt);
+      // 逆噴射で足りない減速（と後ろへ戻るぶん）は、機首を上げて推力を後ろへ傾けて出す（遅いほど深く。最大10°）
+      const noseUp = apClamp(Math.atan(cmd.brakeShort / FLIGHT_GRAVITY) * 180 / Math.PI, 0, tiltMaxDeg);
+      // 横：着地点への線からのずれを、傾きで詰める（apVtolHoverAngles の横の成分）
+      const hover = apVtolHoverAngles(state, plan.pad.x, plan.pad.z, tiltMaxDeg, ap);
+      controls.pitch = apElevatorForPitch(state, controls, noseUp, dt, spd, ap);
+      controls.roll = apAileronForBank(state, hover.wantBankDeg, spd);
+      // 機首：遠ければ着地点へ回す（遅いほど強く。速いうちは横滑りを消すだけ）。近ければそのまま
+      const yawToPad = turnToPad ? apClamp(errPad * AP_VTOL_HOVER_YAW_KP, -0.5, 0.5) : 0;
+      controls.yaw = yawToPad * slowFrac + apRudderForCoordination(state) * (1 - slowFrac);
+    } else {
+      controls.throttle = 0;
+      ap.vtolAccI = 0;
+      // 位置と速度は機体の傾きで詰める（垂直降下と同じ仕掛け）。
+      // **傾けていい角度は、失速速度をどれだけ下回っているかで決める**。
+      // ホバーの傾きは「推力の向きを変えて水平に動く」ための道具で、翼が生きて
+      // いる速度でやると翼のほうが強い——実測で、まだ278ktある機体に10°の
+      // 指示を出したとたんバンク95°・ピッチ-33°まで持っていかれ、対地16mまで
+      // 落ちて34.4Gを記録した。速いうちは水平のまま逆噴射で削り、遅くなるほど
+      // 傾けられるようにする。
+      const hover = apVtolHoverAngles(state, plan.pad.x, plan.pad.z,
+        AP_VTOL_TILT_MAX * slowFrac, ap);
+      controls.pitch = apElevatorForPitch(state, controls, hover.wantPitchDeg, dt, spd, ap);
+      controls.roll = apAileronForBank(state, hover.wantBankDeg, spd);
+      // **機首の向きを合わせるのも、止まってから**。垂直降下と同じ式
+      // （方位のずれ×AP_STEER_KP）をそのまま使っていたが、あれは前輪の操舵用で
+      // 20°ずれれば舵一杯になる。ホバリングに入った瞬間の機首は着地点のほうを
+      // 向いていて滑走路の方位とは何十度も違うから、246ktの機体がいきなり
+      // ラダー一杯を当てることになり、横滑り11°から横転していった——実測で
+      // バンクが4°→-79°まで流れ、そのまま地面へ落ちた。速いうちは横滑りを
+      // 消すだけにして、遅くなるほど方位合わせに移す。
+      const yawHold = apClamp(apWrap180(plan.heading - state.headingDeg)
+        * AP_VTOL_HOVER_YAW_KP, -0.5, 0.5);
+      controls.yaw = yawHold * slowFrac + apRudderForCoordination(state) * (1 - slowFrac);
+      // 残った前進速度は逆噴射で殺す。**前へ進んでいるあいだだけ**——
+      // apReverseCommand が見る groundSpeed は向きを持たない大きさなので、
+      // 止まったあとも押し続けて機体を後ろ向きに飛ばしていた（実測で、
+      // 一度7ktまで落ちたあと逆向きに48ktまで加速し、迎角180°・横滑り-120°の
+      // 尻から飛ぶ姿勢で戻ってきた）。機首方向の対地速度で見る。
+      const fwd = apForward(state.headingDeg);
+      const vFwd = state.velocity.x * fwd.x + state.velocity.z * fwd.z;
+      controls.reverse = vFwd > AP_VTOL_STOP_GS_MPS
+        ? apReverseCommand(model, state, controls) : 0;
+      ap.targetSpeedMps = 0;
+    }
 
     // 高さは対地200mのまま保つ
     const hoverAltM = plan.elevationM + AP_VTOL_STOP_AGL_M;
     ap.vsCmd = apClamp((hoverAltM - state.altitudeM) * AP_VS_KP,
       -AP_VTOL_SINK_MAX, AP_VTOL_SINK_MAX);
     controls.vtolThrottle = apVtolSupport(model, state, controls, ap, spd, ap.vsCmd, dt);
-    // 残った前進速度は逆噴射で殺す。**前へ進んでいるあいだだけ**——
-    // apReverseCommand が見る groundSpeed は向きを持たない大きさなので、
-    // 止まったあとも押し続けて機体を後ろ向きに飛ばしていた（実測で、
-    // 一度7ktまで落ちたあと逆向きに48ktまで加速し、迎角180°・横滑り-120°の
-    // 尻から飛ぶ姿勢で戻ってきた）。機首方向の対地速度で見る。
-    const fwd = apForward(state.headingDeg);
-    const vFwd = state.velocity.x * fwd.x + state.velocity.z * fwd.z;
-    controls.reverse = vFwd > AP_VTOL_STOP_GS_MPS
-      ? apReverseCommand(model, state, controls) : 0;
 
-    ap.targetSpeedMps = 0;
     if (state.groundSpeed < AP_VTOL_STOP_GS_MPS
       && distToTouchdown < AP_VTOL_STOP_RADIUS_M) say('vtol_descent', '垂直降下');
     return;
@@ -3564,6 +3680,8 @@ function startFullAutopilot() {
   ap.altHold = false;
   ap.takeoffHeadingDeg = f.state.headingDeg;
   ap.takeoffTurnDone = !f.state.onGround; // 飛んでいる途中で入れたときは、まっすぐ登る段は無い
+  ap.departElevM = undefined;             // 離陸の段で、出発した地面の高さを覚える
+  ap.departSec = 0;
   const vtolTakeoff = ap.vtolTakeoff && f.aircraft.model.hasVtol;
   ap.phase = f.state.onGround ? (vtolTakeoff ? 'vtol_takeoff' : 'takeoff') : 'cruise';
   ap.rotating = false;
