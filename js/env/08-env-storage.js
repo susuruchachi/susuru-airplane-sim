@@ -45,6 +45,8 @@ function collectEnvSnapshot() {
       windFromWeather: EnvState.env.windFromWeather,
       quality: EnvState.env.quality,
       shadowsOn: EnvState.env.shadowsOn,
+      controlMode: EnvState.env.controlMode,
+      attitudeHold: EnvState.env.attitudeHold,
     },
     weather: {
       presetId: EnvState.weather.presetId,
@@ -95,6 +97,8 @@ function applyEnvSnapshot(data) {
     if (typeof data.env.soundVolume === 'number') EnvState.env.soundVolume = data.env.soundVolume;
     if (typeof data.env.windFromWeather === 'boolean') EnvState.env.windFromWeather = data.env.windFromWeather;
     if (typeof data.env.shadowsOn === 'boolean') EnvState.env.shadowsOn = data.env.shadowsOn;
+    if (data.env.controlMode === 'direct' || data.env.controlMode === 'radius') EnvState.env.controlMode = data.env.controlMode;
+    if (typeof data.env.attitudeHold === 'boolean') EnvState.env.attitudeHold = data.env.attitudeHold;
     if (typeof data.env.quality === 'string' && ENV_QUALITY_PRESETS[data.env.quality]) {
       EnvState.env.quality = data.env.quality;
     }

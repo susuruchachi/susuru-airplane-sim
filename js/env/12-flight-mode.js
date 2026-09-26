@@ -298,18 +298,31 @@ function flightWindVector(out) {
   return out;
 }
 
+const FLIGHT_CONTROL_STEP_S = 1 / 60;   // 舵を決め直す間隔（秒）。下の updateFlight を参照
+
 function updateFlight(dt) {
   const f = EnvState.flight;
   if (!f.active || !f.aircraft) return;
 
-  updateFlightInput(dt);
-  // 自動操縦は手の入力のあと。自分が受け持つ舵だけを上書きするので、
-  // 高度維持だけ入れているときは横と出力を手で操れる。
-  if (typeof updateAutopilot === 'function') updateAutopilot(dt);
+  // **1フレームを1/60秒ずつに刻んで、そのたびに舵を決め直す**（入力・操縦の補助・自動操縦）。
+  // 物理は1/240秒で細かく回っているが、舵を決めるのが1フレームに1回だけだと、画面が重くて
+  // 1フレームが長い端末ほど、舵の輪が大きな刻みで動いて暴れる——実測（swiftshader、数fps）で
+  // 旋回半径のレバーを倒すと、昇降舵と補助翼が毎回±1の端から端へ振れていた。
+  // 60fps なら1回で今までと同じ。1フレームで進める時間の上限は advanceFlight と同じ。
   const wind = flightWindVector(_flightWind);
-
-  const sinkBefore = f.state.velocity.y;
-  advanceFlight(f.aircraft.model, f.state, f.controls, wind, flightGroundHeightAt, dt, f.aircraft.hull);
+  let remain = Math.min(dt, FLIGHT_SUBSTEP * FLIGHT_MAX_SUBSTEPS);
+  let sinkBefore = f.state.velocity.y;
+  while (remain > 1e-6) {
+    const step = Math.min(remain, FLIGHT_CONTROL_STEP_S);
+    updateFlightInput(step);
+    // 自動操縦は手の入力のあと。自分が受け持つ舵だけを上書きするので、
+    // 高度維持だけ入れているときは横と出力を手で操れる。
+    if (typeof updateAutopilot === 'function') updateAutopilot(step);
+    sinkBefore = f.state.velocity.y;
+    advanceFlight(f.aircraft.model, f.state, f.controls, wind, flightGroundHeightAt, step, f.aircraft.hull);
+    remain -= step;
+    if (f.state.hullContactCount > 0 || f.state.crashed) break;
+  }
 
   // 墜落判定。接地の瞬間の沈下と、機体にかかる上下方向のG（loadFactor）で見る。
   //

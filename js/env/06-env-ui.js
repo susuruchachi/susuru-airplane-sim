@@ -32,8 +32,41 @@ function setupEnvPanelToggle() {
   });
 }
 
+// --- タブ（右のメニューを機能ごとに分ける） ----------------------------------------
+//
+// 飛行・自動操縦・地図・天気・設定。選んだタブは localStorage に覚える。
+const ENV_TAB_KEY = 'flightSimEnvTab';
+const ENV_TABS = ['flight', 'auto', 'map', 'sky', 'settings'];
+let _envTab = 'flight';
+
+function envCurrentTab() { return _envTab; }
+
+function setEnvTab(id) {
+  if (!ENV_TABS.includes(id)) id = 'flight';
+  _envTab = id;
+  document.querySelectorAll('#envTabs button').forEach((b) => {
+    const on = b.dataset.tab === id;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  document.querySelectorAll('#right .env-tab').forEach((el) => el.classList.toggle('active', el.dataset.tab === id));
+  const right = document.getElementById('right');
+  if (right) right.scrollTop = 0;
+  try { localStorage.setItem(ENV_TAB_KEY, id); } catch (err) { /* 覚えられなくても続行 */ }
+}
+
+function setupEnvTabs() {
+  let saved = null;
+  try { saved = localStorage.getItem(ENV_TAB_KEY); } catch (err) { /* 読めなくても続行 */ }
+  document.querySelectorAll('#envTabs button').forEach((b) => {
+    b.addEventListener('click', () => { setEnvTab(b.dataset.tab); b.blur(); });
+  });
+  setEnvTab(saved || 'flight');
+}
+
 function setupEnvUI() {
   setupEnvPanelToggle();
+  setupEnvTabs();
   const timeSlider = document.getElementById('envTimeSlider');
   const timeReadout = document.getElementById('envTimeReadout');
   const btnToggle = document.getElementById('envBtnToggleTime');
@@ -93,6 +126,7 @@ function setupEnvUI() {
   setupWorldUI();
   setupWeatherUI();
   setupFlightPanelUI();
+  setupControlModeUI();
   setupAirportUI();
   setupPerformanceUI();
 
@@ -156,6 +190,10 @@ function syncEnvUIToState() {
   document.getElementById('envShowRadar').checked = EnvState.env.radarVisible === true;
   const shadowsBox = document.getElementById('envShadowsOn');
   if (shadowsBox) shadowsBox.checked = EnvState.env.shadowsOn !== false;
+  set('envControlMode', EnvState.env.controlMode === 'radius' ? 'radius' : 'direct');
+  const holdBox = document.getElementById('envAttitudeHold');
+  if (holdBox) holdBox.checked = EnvState.env.attitudeHold !== false;
+  if (typeof refreshFlightTouchLabels === 'function') refreshFlightTouchLabels();
 
   const qualityHost = document.getElementById('envQualityButtons');
   if (qualityHost) {
@@ -173,6 +211,29 @@ function syncEnvUIToState() {
   if (typeof soundSetEnabled === 'function') soundSetEnabled(EnvState.env.soundOn !== false);
 
   syncAirportUIToSelection();
+}
+
+// --- 操縦（レバーの意味と、離したら姿勢を保つか） -----------------------------------
+
+function setupControlModeUI() {
+  const sel = document.getElementById('envControlMode');
+  if (sel) {
+    sel.value = EnvState.env.controlMode === 'radius' ? 'radius' : 'direct';
+    sel.addEventListener('change', () => {
+      if (typeof setFlightControlMode === 'function') setFlightControlMode(sel.value, !(EnvState.flight && EnvState.flight.active));
+      else EnvState.env.controlMode = sel.value;
+      sel.blur();
+    });
+  }
+  const hold = document.getElementById('envAttitudeHold');
+  if (hold) {
+    hold.checked = EnvState.env.attitudeHold !== false;
+    hold.addEventListener('change', () => {
+      EnvState.env.attitudeHold = hold.checked;
+      onEnvSettingsChanged();
+      hold.blur();
+    });
+  }
 }
 
 // --- 保存と読み込み ---------------------------------------------------------

@@ -43,12 +43,12 @@ function initFlightTouch() {
         <div class="ft-lever ft-elevator" id="ftElevator">
           <div class="ft-center-line ft-center-h"></div>
           <div class="ft-fill"></div>
-          <div class="ft-lever-label"><span>昇降舵</span><b>0%</b></div>
+          <div class="ft-lever-label"><span id="ftElevatorName">昇降舵</span><b>0%</b></div>
         </div>
         <div class="ft-lever ft-aileron" id="ftAileron">
           <div class="ft-center-line ft-center-v"></div>
           <div class="ft-fill"></div>
-          <div class="ft-lever-label"><span>補助翼</span><b>0%</b></div>
+          <div class="ft-lever-label"><span id="ftAileronName">補助翼</span><b>0%</b></div>
         </div>
       </div>
       <div class="ft-rudder">
@@ -79,6 +79,7 @@ function initFlightTouch() {
       <button type="button" class="ft-btn" id="ftSpoiler" data-tap="spoiler" hidden>スポイラー</button>
       <button type="button" class="ft-btn" id="ftReverse" data-hold="reverse" hidden>逆噴射</button>
       ${[1, 2, 3, 4].map((n) => `<button type="button" class="ft-btn ft-eng" id="ftEng${n}" data-tap="eng${n}" hidden>E${n}</button>`).join('')}
+      <button type="button" class="ft-btn" id="ftCtlMode" data-tap="ctlMode">操縦：直接</button>
       <button type="button" class="ft-btn" data-tap="trim">トリム</button>
       <button type="button" class="ft-btn" data-tap="park">駐機</button>
       <button type="button" class="ft-btn" data-tap="camera">視点</button>
@@ -94,9 +95,22 @@ function initFlightTouch() {
   for (const b of el.querySelectorAll('[data-hold]')) bindFlightTouchHold(b);
   for (const b of el.querySelectorAll('[data-tap]')) bindFlightTouchTap(b);
 
+  refreshFlightTouchLabels();
   // 保存から戻した選択があればそれを使い、無ければ端末を見て決める
   setFlightTouchEnabled(_flightTouch.explicit ? _flightTouch.enabled : flightTouchLikely(),
     _flightTouch.explicit);
+}
+
+// 操縦のしかたでレバーの名前を変える（旋回半径のときは「どれだけきつく曲がるか」のレバー）
+function refreshFlightTouchLabels() {
+  const el = _flightTouch.el;
+  if (!el) return;
+  const radius = typeof flightControlMode === 'function' && flightControlMode() === 'radius';
+  const e = el.querySelector('#ftElevatorName'), a = el.querySelector('#ftAileronName');
+  if (e) e.textContent = radius ? '上下旋回' : '昇降舵';
+  if (a) a.textContent = radius ? '水平旋回' : '補助翼';
+  const b = el.querySelector('#ftCtlMode');
+  if (b) { b.textContent = radius ? '操縦：旋回半径' : '操縦：直接'; b.classList.toggle('on', radius); }
 }
 
 function setFlightTouchEnabled(on, explicit) {
@@ -263,6 +277,7 @@ function bindFlightTouchTap(btn) {
     // エンジングループの入り切り（キーボードの数字キーと同じ入口）
     eng1: 'Digit1', eng2: 'Digit2', eng3: 'Digit3', eng4: 'Digit4',
     attitude: 'KeyU',
+    ctlMode: 'KeyM',   // 操縦のしかた（直接／旋回半径）
   };
   btn.addEventListener('click', (e) => {
     e.preventDefault();
@@ -350,7 +365,11 @@ function updateFlightTouchReadout() {
   paint('#ftVtol', f.controls.vtolThrottle || 0);
 
   // 指で触れていない間は、キーボードで動かした値もレバーの表示に映す
-  // （触れた瞬間に自分の値へ戻すので、取り合いにはならない）
-  if (!t.hold.pitch) paintAxisLever(t.el.querySelector('#ftElevator'), f.controls.pitch);
-  if (!t.hold.roll) paintAxisLever(t.el.querySelector('#ftAileron'), f.controls.roll);
+  // （触れた瞬間に自分の値へ戻すので、取り合いにはならない）。
+  // 旋回半径のときはレバーの位置（どれだけきつく曲がるか）を、直接のときは舵そのもの
+  // （離して姿勢を保っているあいだは、保つために当てている舵）を出す
+  const radius = typeof flightControlMode === 'function' && flightControlMode() === 'radius';
+  const st = typeof flightStickAxes === 'function' ? flightStickAxes() : null;
+  if (!t.hold.pitch) paintAxisLever(t.el.querySelector('#ftElevator'), radius && st ? st.pitch : f.controls.pitch);
+  if (!t.hold.roll) paintAxisLever(t.el.querySelector('#ftAileron'), radius && st ? st.roll : f.controls.roll);
 }

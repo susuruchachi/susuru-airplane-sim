@@ -94,6 +94,16 @@
     white-space:nowrap;
   }
   #envBtnPanel:hover{border-color:var(--accent-dim);color:var(--text);}
+  /* 右のメニューのタブ（機能ごとに分ける。縦に長くなりすぎてスクロールが大変だった） */
+  #envTabs{position:sticky;top:0;z-index:2;display:flex;gap:2px;padding:6px 6px 0;background:var(--panel);
+    border-bottom:1px solid var(--line);}
+  #envTabs button{flex:1;min-width:0;background:transparent;border:1px solid transparent;border-bottom:none;
+    color:var(--text-dim);padding:7px 2px 6px;border-radius:6px 6px 0 0;font-size:12px;cursor:pointer;
+    font-family:var(--sans);white-space:nowrap;}
+  #envTabs button:hover{color:var(--text);}
+  #envTabs button.active{background:var(--panel-2);border-color:var(--line);color:var(--text);font-weight:600;}
+  .env-tab{display:none;}
+  .env-tab.active{display:block;}
   #right .section-title{padding:14px 14px 8px;font-size:11px;letter-spacing:.04em;color:var(--text-dim);text-transform:uppercase;}
   .env-group{padding:0 14px 16px;border-bottom:1px solid var(--line);margin-bottom:4px;}
   .env-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;font-size:12.5px;}
@@ -106,6 +116,8 @@
   }
   .env-group select{font-family:var(--sans);}
   .env-note{font-size:11px;color:var(--text-dim);line-height:1.5;margin-top:4px;}
+  /* 「hint」は Builder（index.html）と同じ小さい注記。ここに無かったので、飛行・自動操縦の注記だけ本文より大きく出ていた */
+  .env-group .hint{font-size:11px;color:var(--text-dim);line-height:1.5;}
   #envBtnToggleTime, #envBtnReset, #envBtnToggleAirport, #envBtnFocusAirport,
   #envBtnFly, #envBtnFlightReset, #envBtnCgReset{
     width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
@@ -306,6 +318,112 @@ body.touch-controls #hudHelp { display:none; }
   </div>
 
   <div id="right">
+    <div id="envTabs" role="tablist">
+      <button type="button" role="tab" data-tab="flight">飛行</button>
+      <button type="button" role="tab" data-tab="auto">自動操縦</button>
+      <button type="button" role="tab" data-tab="map">地図</button>
+      <button type="button" role="tab" data-tab="sky">天気</button>
+      <button type="button" role="tab" data-tab="settings">設定</button>
+    </div>
+
+    <div class="env-tab" data-tab="flight" role="tabpanel">
+    <div class="section-title">飛行</div>
+    <div class="env-group">
+      <button id="envBtnFly" class="primary">✈ この空港から飛ぶ</button>
+      <div class="env-note" style="margin-top:6px;">
+        選んでいる空港の滑走路に出ます。<b>Shift</b>で出力を上げ、<b>S</b>／<b>↓</b>で機首を上げてください。
+      </div>
+      <div class="env-row" style="margin-top:10px;"><label>機体</label></div>
+      <select id="envFlightAircraft"></select>
+      <div class="env-note" style="margin-top:6px;"><span id="envFlightSpecReadout">—</span></div>
+      <div class="env-note" style="margin-top:4px;"><span id="envFlightPerfReadout"></span></div>
+      <div id="envFlightNotes"></div>
+      <div class="env-row" style="margin-top:12px;">
+        <label>重心の調整</label><span id="envCgReadout" class="val">±0.00 m</span>
+      </div>
+      <div class="env-note" style="margin-top:0;">Builderで決めた重心からのずれです。前へ出すとピッチが安定し、後ろへ下げると軽く動きます。</div>
+      <div class="env-row" style="margin-top:8px;"><label>前後</label><span id="envCgZReadout" class="val">0.00 m</span></div>
+      <input type="range" id="envCgZ" min="-100" max="100" step="1" value="0">
+      <div class="env-row" style="margin-top:6px;"><label>上下</label><span id="envCgYReadout" class="val">0.00 m</span></div>
+      <input type="range" id="envCgY" min="-100" max="100" step="1" value="0">
+      <div class="env-row" style="margin-top:6px;"><label>左右</label><span id="envCgXReadout" class="val">0.00 m</span></div>
+      <input type="range" id="envCgX" min="-100" max="100" step="1" value="0">
+      <button id="envBtnCgReset" style="margin-top:6px;">重心を元に戻す</button>
+
+      <div class="env-row" style="margin-top:12px;">
+        <label for="envFlightTouch">画面に操縦装置</label>
+        <input type="checkbox" id="envFlightTouch">
+      </div>
+      <div class="hint" style="margin:2px 0 8px;">キーボードが無くても指で飛ばせます（タッチ画面では自動で入ります）。</div>
+
+      <div class="env-row"><label>視点</label></div>
+      <select id="envFlightCamera"></select>
+      <button id="envBtnFlightReset" style="margin-top:8px;">滑走路へ戻る（R）</button>
+    </div>
+
+    <div class="section-title">操縦</div>
+    <div class="env-group">
+      <div class="env-row"><label for="envControlMode">レバーの意味（M で切替）</label></div>
+      <select id="envControlMode">
+        <option value="direct">直接（舵角そのもの）</option>
+        <option value="radius">旋回半径（100%で最小半径）</option>
+      </select>
+      <div class="env-note" style="margin-top:6px;">
+        <b>旋回半径</b>：昇降舵のレバーで上下に曲がり、補助翼のレバーで<b>高度を変えずに</b>左右へ水平旋回します。
+        100%がその速さで曲がれるいちばん小さい半径で、倒しっぱなしでもロールし続けません。離すと、昇降舵は
+        そのときの上昇角（ほぼ水平なら高度）を、補助翼は翼を水平に戻してまっすぐ飛びます。
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;">
+        <input type="checkbox" id="envAttitudeHold" checked>
+        <span>レバーを離したら、その瞬間の姿勢を保つ（直接）</span>
+      </label>
+      <div class="env-note">保つのに要る舵とトリムは自動で当てます。切ると、離した舵は中立へ戻ります。</div>
+      <div class="env-row" style="margin-top:10px;"><label>いまの最小旋回半径</label><span id="envMinRadiusReadout" class="val">—</span></div>
+    </div>
+    </div>
+
+    <div class="env-tab" data-tab="auto" role="tabpanel">
+    <div class="section-title">自動操縦</div>
+    <div class="env-group">
+      <div class="env-row">
+        <label for="envApAltHold">高度を維持（O）</label>
+        <input type="checkbox" id="envApAltHold">
+      </div>
+      <div class="hint" style="margin:2px 0 8px;">飛んでいる途中で入れると、そのときの高度を保ちます。</div>
+      <div class="env-row">
+        <label for="envApHover">ホバリング（J）</label>
+        <input type="checkbox" id="envApHover">
+      </div>
+      <div class="hint" style="margin:2px 0 8px;">垂直離着陸用エンジンを持つ機体だけ。その場に留まります。舵を当てているあいだは動かせて、離したところが新しい持ち場になります。ホバリング中は出力のキー（Shift／Ctrl）かタッチの「▲高度／▼高度」で保つ高さを上げ下げでき、下の目標高度のスライダーでも決められます。</div>
+      <div class="env-row"><label>目標高度</label><span id="envApAltReadout" class="val">1,500 m</span></div>
+      <input type="range" id="envApAltitude" min="100" max="12000" step="50" value="1500">
+
+      <div class="env-row" style="margin-top:12px;"><label>目的地の空港</label></div>
+      <select id="envApDestination"></select>
+      <button id="envApPickField" style="margin-top:6px;">🗺 地図で着陸地点を選ぶ</button>
+      <div class="hint" style="margin:2px 0 4px;">押してから右の地図をクリックすると、その近くで機体が降りられる長さの平らな地面を探して目的地にします。</div>
+
+      <div class="env-row" style="margin-top:10px;">
+        <label for="envApVtolTakeoff">垂直離陸</label>
+        <input type="checkbox" id="envApVtolTakeoff">
+      </div>
+      <div class="env-row">
+        <label for="envApVtolLanding">垂直着陸</label>
+        <input type="checkbox" id="envApVtolLanding">
+      </div>
+      <div class="hint" id="envApVtolHint" style="margin:2px 0 8px;">
+        垂直離着陸用エンジンを持つ機体だけ選べます。入れると滑走路を使わず、真上へ上がって／真下へ降りて発着します。
+      </div>
+
+      <button id="envBtnApFull" class="primary" style="margin-top:8px;">🛫 全自動で離陸〜着陸（I）</button>
+      <div class="env-note" style="margin-top:6px;"><span id="envApReadout">—</span></div>
+      <div class="hint" style="margin-top:4px;">
+        出発はいまいる空港です。離陸・上昇・巡航・降下・進入・着陸まで通しでやります。
+      </div>
+    </div>
+    </div>
+
+    <div class="env-tab" data-tab="map" role="tabpanel">
     <div class="section-title">世界</div>
     <div class="env-group">
       <canvas id="envMinimap"
@@ -329,35 +447,31 @@ body.touch-controls #hudHelp { display:none; }
       </label>
     </div>
 
-    <div class="section-title">パフォーマンス</div>
+    <div class="section-title">空港</div>
     <div class="env-group">
-      <div class="env-row"><label>コマ落ちするとき</label><span id="envFpsReadout" class="val">-- fps</span></div>
-      <div id="envQualityButtons" style="display:flex;gap:6px;margin-top:8px;"></div>
-      <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;">
-        <input type="checkbox" id="envShadowsOn" checked>
-        <span>影を落とす（画質「高」「中」のとき）</span>
-      </label>
-      <div class="env-note" style="margin-top:8px;">
-        地形・街・木・雲を実体化する範囲と、画面の解像度を下げます。近くの地形の
-        細かさ（滑走路など）や、脚・当たり判定には影響しません。
-      </div>
+      <div class="env-row"><label>空港</label></div>
+      <select id="envAirportSelect"></select>
+      <div class="env-note" style="margin-top:6px;"><span id="envAirportInfoReadout">--</span></div>
+      <button id="envBtnNearestAirport">現在地の最寄りを選ぶ</button>
+      <div class="env-row" style="margin-top:10px;"><label>滑走路</label><span id="envAirportDesignatorReadout" class="val">09/27</span></div>
+      <button id="envBtnToggleAirport">空港を隠す</button>
+      <div class="env-row" style="margin-top:10px;"><label>滑走路の方位</label><span id="envRunwayHeadingReadout" class="val">090°</span></div>
+      <input type="range" id="envRunwayHeading" min="0" max="359" step="1">
+      <div class="env-row" style="margin-top:10px;"><label>滑走路の長さ</label><span id="envRunwayLengthReadout" class="val">2400 m</span></div>
+      <input type="range" id="envRunwayLength" min="800" max="4000" step="100">
+      <div class="env-row" style="margin-top:10px;"><label>滑走路の幅</label><span id="envRunwayWidthReadout" class="val">45 m</span></div>
+      <input type="range" id="envRunwayWidth" min="23" max="60" step="1">
+      <div class="env-row" style="margin-top:10px;"><label>灯火</label></div>
+      <select id="envAirportLights">
+        <option value="auto">自動（夜間に点灯）</option>
+        <option value="on">常時点灯</option>
+        <option value="off">消灯</option>
+      </select>
+      <button id="envBtnFocusAirport">この空港へ視点を移す</button>
+    </div>
     </div>
 
-    <div class="section-title">音</div>
-    <div class="env-group">
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-        <input type="checkbox" id="envSoundOn" checked>
-        <span>音を鳴らす</span>
-      </label>
-      <div class="env-row" style="margin-top:8px;">
-        <label>音量</label>
-        <input type="range" id="envSoundVolume" min="0" max="100" step="1" value="70">
-        <span id="envSoundVolumeReadout" class="val">70%</span>
-      </div>
-      <div class="env-note">エンジンの音は機体の設定（種別・基数・出力）から、その場で合成しています。
-        ブラウザの決まりで、画面を一度クリックするまで音は出ません。</div>
-    </div>
-
+    <div class="env-tab" data-tab="sky" role="tabpanel">
     <div class="section-title">昼夜サイクル</div>
     <div class="env-group">
       <div class="env-row"><label>時刻</label><span id="envTimeReadout" class="val">09:00</span></div>
@@ -404,107 +518,42 @@ body.touch-controls #hudHelp { display:none; }
       <input type="range" id="envWindDirection" min="0" max="360" step="1">
     </div>
 
-    <div class="section-title">飛行</div>
-    <div class="env-group">
-      <button id="envBtnFly" class="primary">✈ この空港から飛ぶ</button>
-      <div class="env-note" style="margin-top:6px;">
-        選んでいる空港の滑走路に出ます。<b>Shift</b>で出力を上げ、<b>S</b>／<b>↓</b>で機首を上げてください。
-      </div>
-      <div class="env-row" style="margin-top:10px;"><label>機体</label></div>
-      <select id="envFlightAircraft"></select>
-      <div class="env-note" style="margin-top:6px;"><span id="envFlightSpecReadout">—</span></div>
-      <div class="env-note" style="margin-top:4px;"><span id="envFlightPerfReadout"></span></div>
-      <div id="envFlightNotes"></div>
-      <div class="env-row" style="margin-top:12px;">
-        <label>重心の調整</label><span id="envCgReadout" class="val">±0.00 m</span>
-      </div>
-      <div class="env-note" style="margin-top:0;">Builderで決めた重心からのずれです。前へ出すとピッチが安定し、後ろへ下げると軽く動きます。</div>
-      <div class="env-row" style="margin-top:8px;"><label>前後</label><span id="envCgZReadout" class="val">0.00 m</span></div>
-      <input type="range" id="envCgZ" min="-100" max="100" step="1" value="0">
-      <div class="env-row" style="margin-top:6px;"><label>上下</label><span id="envCgYReadout" class="val">0.00 m</span></div>
-      <input type="range" id="envCgY" min="-100" max="100" step="1" value="0">
-      <div class="env-row" style="margin-top:6px;"><label>左右</label><span id="envCgXReadout" class="val">0.00 m</span></div>
-      <input type="range" id="envCgX" min="-100" max="100" step="1" value="0">
-      <button id="envBtnCgReset" style="margin-top:6px;">重心を元に戻す</button>
-
-      <div class="env-row" style="margin-top:12px;">
-        <label for="envFlightTouch">画面に操縦装置</label>
-        <input type="checkbox" id="envFlightTouch">
-      </div>
-      <div class="hint" style="margin:2px 0 8px;">キーボードが無くても指で飛ばせます（タッチ画面では自動で入ります）。</div>
-
-      <div class="env-row"><label>視点</label></div>
-      <select id="envFlightCamera"></select>
-      <button id="envBtnFlightReset" style="margin-top:8px;">滑走路へ戻る（R）</button>
-    </div>
-
-    <div class="section-title">自動操縦</div>
-    <div class="env-group">
-      <div class="env-row">
-        <label for="envApAltHold">高度を維持（O）</label>
-        <input type="checkbox" id="envApAltHold">
-      </div>
-      <div class="hint" style="margin:2px 0 8px;">飛んでいる途中で入れると、そのときの高度を保ちます。</div>
-      <div class="env-row">
-        <label for="envApHover">ホバリング（J）</label>
-        <input type="checkbox" id="envApHover">
-      </div>
-      <div class="hint" style="margin:2px 0 8px;">垂直離着陸用エンジンを持つ機体だけ。その場に留まります。舵を当てているあいだは動かせて、離したところが新しい持ち場になります。ホバリング中は出力のキー（Shift／Ctrl）かタッチの「▲高度／▼高度」で保つ高さを上げ下げでき、下の目標高度のスライダーでも決められます。</div>
-      <div class="env-row"><label>目標高度</label><span id="envApAltReadout" class="val">1,500 m</span></div>
-      <input type="range" id="envApAltitude" min="100" max="12000" step="50" value="1500">
-
-      <div class="env-row" style="margin-top:12px;"><label>目的地の空港</label></div>
-      <select id="envApDestination"></select>
-      <button id="envApPickField" style="margin-top:6px;">🗺 地図で着陸地点を選ぶ</button>
-      <div class="hint" style="margin:2px 0 4px;">押してから右の地図をクリックすると、その近くで機体が降りられる長さの平らな地面を探して目的地にします。</div>
-
-      <div class="env-row" style="margin-top:10px;">
-        <label for="envApVtolTakeoff">垂直離陸</label>
-        <input type="checkbox" id="envApVtolTakeoff">
-      </div>
-      <div class="env-row">
-        <label for="envApVtolLanding">垂直着陸</label>
-        <input type="checkbox" id="envApVtolLanding">
-      </div>
-      <div class="hint" id="envApVtolHint" style="margin:2px 0 8px;">
-        垂直離着陸用エンジンを持つ機体だけ選べます。入れると滑走路を使わず、真上へ上がって／真下へ降りて発着します。
-      </div>
-
-      <button id="envBtnApFull" class="primary" style="margin-top:8px;">🛫 全自動で離陸〜着陸（I）</button>
-      <div class="env-note" style="margin-top:6px;"><span id="envApReadout">—</span></div>
-      <div class="hint" style="margin-top:4px;">
-        出発はいまいる空港です。離陸・上昇・巡航・降下・進入・着陸まで通しでやります。
-      </div>
-    </div>
-
-    <div class="section-title">空港</div>
-    <div class="env-group">
-      <div class="env-row"><label>空港</label></div>
-      <select id="envAirportSelect"></select>
-      <div class="env-note" style="margin-top:6px;"><span id="envAirportInfoReadout">--</span></div>
-      <button id="envBtnNearestAirport">現在地の最寄りを選ぶ</button>
-      <div class="env-row" style="margin-top:10px;"><label>滑走路</label><span id="envAirportDesignatorReadout" class="val">09/27</span></div>
-      <button id="envBtnToggleAirport">空港を隠す</button>
-      <div class="env-row" style="margin-top:10px;"><label>滑走路の方位</label><span id="envRunwayHeadingReadout" class="val">090°</span></div>
-      <input type="range" id="envRunwayHeading" min="0" max="359" step="1">
-      <div class="env-row" style="margin-top:10px;"><label>滑走路の長さ</label><span id="envRunwayLengthReadout" class="val">2400 m</span></div>
-      <input type="range" id="envRunwayLength" min="800" max="4000" step="100">
-      <div class="env-row" style="margin-top:10px;"><label>滑走路の幅</label><span id="envRunwayWidthReadout" class="val">45 m</span></div>
-      <input type="range" id="envRunwayWidth" min="23" max="60" step="1">
-      <div class="env-row" style="margin-top:10px;"><label>灯火</label></div>
-      <select id="envAirportLights">
-        <option value="auto">自動（夜間に点灯）</option>
-        <option value="on">常時点灯</option>
-        <option value="off">消灯</option>
-      </select>
-      <button id="envBtnFocusAirport">この空港へ視点を移す</button>
-    </div>
-
     <div class="section-title">高度（プレビュー）</div>
     <div class="env-group">
       <div class="env-row"><label>高度</label><span id="envAltitudeReadout" class="val">0 m</span></div>
       <input type="range" id="envAltitude" min="0" max="15000" step="100">
       <div class="env-note">空の色・霧の変化を確認するための仮スライダー。実際の機体高度と連動させるのは飛行シーン本体の実装後。</div>
+    </div>
+    </div>
+
+    <div class="env-tab" data-tab="settings" role="tabpanel">
+    <div class="section-title">パフォーマンス</div>
+    <div class="env-group">
+      <div class="env-row"><label>コマ落ちするとき</label><span id="envFpsReadout" class="val">-- fps</span></div>
+      <div id="envQualityButtons" style="display:flex;gap:6px;margin-top:8px;"></div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;">
+        <input type="checkbox" id="envShadowsOn" checked>
+        <span>影を落とす（画質「高」「中」のとき）</span>
+      </label>
+      <div class="env-note" style="margin-top:8px;">
+        地形・街・木・雲を実体化する範囲と、画面の解像度を下げます。近くの地形の
+        細かさ（滑走路など）や、脚・当たり判定には影響しません。
+      </div>
+    </div>
+
+    <div class="section-title">音</div>
+    <div class="env-group">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="envSoundOn" checked>
+        <span>音を鳴らす</span>
+      </label>
+      <div class="env-row" style="margin-top:8px;">
+        <label>音量</label>
+        <input type="range" id="envSoundVolume" min="0" max="100" step="1" value="70">
+        <span id="envSoundVolumeReadout" class="val">70%</span>
+      </div>
+      <div class="env-note">エンジンの音は機体の設定（種別・基数・出力）から、その場で合成しています。
+        ブラウザの決まりで、画面を一度クリックするまで音は出ません。</div>
     </div>
 
     <div class="section-title">保存</div>
@@ -523,6 +572,7 @@ body.touch-controls #hudHelp { display:none; }
 
     <div class="env-group" style="border-bottom:none;">
       <button id="envBtnReset">初期値に戻す</button>
+    </div>
     </div>
   </div>
 
@@ -596,6 +646,7 @@ body.touch-controls #hudHelp { display:none; }
 <script src="js/env/11b-flight-touch.js" onerror="_markFailed('js/env/11b-flight-touch.js')"></script>
 <script src="js/env/12-flight-mode.js" onerror="_markFailed('js/env/12-flight-mode.js')"></script>
 <script src="js/env/13-autopilot.js" onerror="_markFailed('js/env/13-autopilot.js')"></script>
+<script src="js/env/13b-pilot-assist.js" onerror="_markFailed('js/env/13b-pilot-assist.js')"></script>
 <script src="js/env/14-sound.js" onerror="_markFailed('js/env/14-sound.js')"></script>
 <script src="js/env/06-env-ui.js" onerror="_markFailed('js/env/06-env-ui.js')"></script>
 <script src="js/env/08-env-storage.js" onerror="_markFailed('js/env/08-env-storage.js')"></script>

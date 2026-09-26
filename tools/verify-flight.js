@@ -33,7 +33,7 @@ if (!THREE) {
 
 // ブラウザ用のファイルを1つのスコープに並べて読む（flight.html と同じ読み方）
 const ctx = vm.createContext({ THREE, console, module: undefined, Math, Number, Array, Object, JSON });
-for (const f of ['09-aircraft.js', '09e-part-proxy.js', '10-flight.js', '13-autopilot.js']) {
+for (const f of ['09-aircraft.js', '09e-part-proxy.js', '10-flight.js', '13-autopilot.js', '13b-pilot-assist.js']) {
   const src = fs.readFileSync(path.join(__dirname, '..', 'js', 'env', f), 'utf8');
   vm.runInContext(src, ctx, { filename: f });
 }
@@ -4389,6 +4389,117 @@ function autopilotFlight(opts) {
   const root = px.gears[0].root; root.position.set(0, 0, 0); root.rotation.set(0, 0, 0); root.scale.set(1, 1, 1);
   const vis = tipY();
   check(Math.abs(vis - phys.y) < 1e-6, '仮モデルの脚の先端は、接地に使う点と同じ高さ', `${vis.toFixed(4)} / ${phys.y.toFixed(4)}`);
+}
+
+// --- 手で飛ばすときの補助（13b-pilot-assist.js） ------------------------------------
+//
+// 直接：レバーを離したら、離した瞬間の姿勢（ピッチ角・バンク角）を保つ。
+// 旋回半径：補助翼のレバーは高度を変えない水平旋回（100%で最小半径）、昇降舵のレバーは上下に曲がる。
+{
+  const DT = 1 / 60;
+  const setupLevel = (cfg, vMult, altM) => {
+    const m = buildAircraftModel(cfg);
+    const vs = apSpeedSchedule(m).stall;
+    const v = vs * vMult;
+    const st = createFlightState(), c = createFlightControls();
+    c.gearDown = false; c.parkingBrake = false;
+    const tr = solveLevelTrim(m, v, altM);
+    st.position.set(0, altM, 0);
+    st.velocity.set(0, 0, -v);
+    st.quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), tr.alphaDeg * Math.PI / 180);
+    c.trim = tr.trim; c.throttle = tr.throttle;
+    refreshFlightReadouts(m, st, flatGround);
+    const pa = ctx.createPilotAssist();
+    const step = (stick, active, mode, hold) => {
+      const y = ctx.pilotAssistStep(m, st, c, pa, stick, active, mode, hold === undefined ? true : hold, DT);
+      c.yaw = y !== null ? y : 0;
+      advanceFlight(m, st, c, noWind, flatGround, DT);
+    };
+    for (let i = 0; i < 300; i++) step({ pitch: 0, roll: 0 }, { pitch: false, roll: false }, 'direct');
+    return { m, st, c, pa, step, v, vs };
+  };
+  const S0 = { pitch: 0, roll: 0 }, A0 = { pitch: false, roll: false };
+  const trainer = defaultAircraftConfig();
+  const fast = defaultAircraftConfig();
+  fast.name = '高速機テスト'; fast.modelMaxSpeedValue = 2; fast.modelMaxSpeedUnit = 'mach';
+  for (const [label, cfg, vMult] of [['練習機', trainer, 2.5], ['マッハ2級', fast, 5]]) {
+    // 直接：引いて離す → ピッチ角を保つ
+    {
+      const { st, step } = setupLevel(cfg, vMult, 3000);
+      for (let i = 0; i < 90; i++) step({ pitch: 0.25, roll: 0 }, { pitch: true, roll: false }, 'direct');
+      const th0 = st.pitchDeg; let maxE = 0;
+      for (let i = 0; i < 1200; i++) { step(S0, A0, 'direct'); maxE = Math.max(maxE, Math.abs(st.pitchDeg - th0)); }
+      note(`${label}：昇降舵を引いて離す`, `離したピッチ${th0.toFixed(1)}° 20秒の最大ずれ${maxE.toFixed(2)}°`);
+      check(th0 > 3 && maxE < 3, `${label}：昇降舵を離すと、離した瞬間のピッチ角を保つ`, `${maxE.toFixed(2)}°`);
+    }
+    // 直接：倒して離す → バンク角（とピッチ角）を保つ
+    {
+      const { st, step } = setupLevel(cfg, vMult, 3000);
+      const th0 = st.pitchDeg;
+      for (let i = 0; i < 60; i++) step({ pitch: 0, roll: 0.5 }, { pitch: false, roll: true }, 'direct');
+      const b0 = st.rollDeg; let maxB = 0;
+      for (let i = 0; i < 1200; i++) { step(S0, A0, 'direct'); maxB = Math.max(maxB, Math.abs(st.rollDeg - b0)); }
+      note(`${label}：補助翼を倒して離す`, `離したバンク${b0.toFixed(1)}° 最大ずれ${maxB.toFixed(2)}° ピッチのずれ${(st.pitchDeg - th0).toFixed(2)}°`);
+      check(Math.abs(b0) > 3 && maxB < 5 && Math.abs(st.pitchDeg - th0) < 2,
+        `${label}：補助翼を離すと、離した瞬間のバンク角を保つ（ピッチも保つ）`, `${maxB.toFixed(2)}°`);
+    }
+    // 保たない設定なら、いままでどおり舵はレバーそのまま
+    {
+      const { c, step } = setupLevel(cfg, vMult, 3000);
+      step({ pitch: 0, roll: 0 }, A0, 'direct', false);
+      check(c.pitch === 0 && c.roll === 0, `${label}：「姿勢を保つ」を切ると、離した舵はそのまま（中立）`, `${c.pitch}/${c.roll}`);
+    }
+    // 旋回半径：補助翼100%・50%で60秒 → 高度を保ったまま水平旋回。半径は100%で最小、50%でその2倍ほど
+    const turn = (frac) => {
+      const { st, step, pa, m, c } = setupLevel(cfg, vMult, 3000);
+      const h0 = st.altitudeM; let dh = 0, bankMax = 0, hdgPrev = st.headingDeg, rSum = 0, rNowSum = 0, n = 0;
+      for (let i = 0; i < 3600; i++) {
+        step({ pitch: 0, roll: frac }, { pitch: false, roll: true }, 'radius');
+        const d = apWrap180(st.headingDeg - hdgPrev); hdgPrev = st.headingDeg;
+        bankMax = Math.max(bankMax, Math.abs(st.rollDeg));
+        if (i > 600) {
+          dh = Math.max(dh, Math.abs(st.altitudeM - h0));
+          rSum += st.velocity.length() / Math.max(Math.abs(d * Math.PI / 180) / DT, 1e-6); n++;
+          rNowSum += ctx.paLevelTurnRadiusNow(m, st, c, pa);
+        }
+      }
+      const bankHeld = st.rollDeg;
+      let t = 0; while (t < 10 && Math.abs(st.rollDeg) > 3) { step(S0, A0, 'radius'); t += DT; }
+      return { dh, r: rSum / n, rNow: rNowSum / n, bankMax, bankHeld, levelSec: t };
+    };
+    const full = turn(1), half = turn(0.5);
+    note(`${label}：旋回半径の補助翼100%`, `半径${full.r.toFixed(0)}m（その速さの100%の半径${full.rNow.toFixed(0)}m） 高度のずれ最大${full.dh.toFixed(1)}m バンク${full.bankHeld.toFixed(0)}° 離して${full.levelSec.toFixed(1)}秒で水平`);
+    note(`${label}：旋回半径の補助翼50%`, `半径${half.r.toFixed(0)}m 高度のずれ最大${half.dh.toFixed(1)}m バンク${half.bankHeld.toFixed(0)}°`);
+    check(full.dh < 30 && half.dh < 30, `${label}：補助翼のレバーでは高度がほとんど変わらない（60秒で30m以内）`, `${full.dh.toFixed(1)}m / ${half.dh.toFixed(1)}m`);
+    check(full.bankMax < 86 && full.bankHeld > 30, `${label}：倒しっぱなしでもロールし続けず、一定のバンクで回る`, `最大${full.bankMax.toFixed(0)}°`);
+    check(full.r < full.rNow * 1.3, `${label}：100%で、その速さの最小半径（計器に出す値）の近くを回る`, `${full.r.toFixed(0)}m / ${full.rNow.toFixed(0)}m`);
+    check(half.r > full.r * 1.4, `${label}：50%は100%より大きな半径で回る`, `${half.r.toFixed(0)}m / ${full.r.toFixed(0)}m`);
+    check(full.levelSec < 8, `${label}：補助翼のレバーを離すと、翼を水平に戻す`, `${full.levelSec.toFixed(1)}秒`);
+    // 旋回半径：昇降舵を引いて上昇角を付け、離す → 上昇角を保つ
+    {
+      const { st, step } = setupLevel(cfg, vMult, 3000);
+      for (let i = 0; i < 60; i++) step({ pitch: 0.3, roll: 0 }, { pitch: true, roll: false }, 'radius');
+      const g0 = Math.asin(st.velocity.y / st.velocity.length()) * 180 / Math.PI; let maxE = 0;
+      for (let i = 0; i < 600; i++) {
+        step(S0, A0, 'radius');
+        if (i > 120) maxE = Math.max(maxE, Math.abs(Math.asin(st.velocity.y / st.velocity.length()) * 180 / Math.PI - g0));
+      }
+      note(`${label}：旋回半径の昇降舵を引いて離す`, `上昇角${g0.toFixed(1)}° 最大ずれ${maxE.toFixed(2)}°`);
+      check(g0 > 0.2 && maxE < 3, `${label}：昇降舵のレバーを離すと、そのときの上昇角を保つ`, `${maxE.toFixed(2)}°`);
+    }
+  }
+  // ヘリ：操縦桿は姿勢の指示なので、離した位置に置いておけば姿勢が保たれる
+  {
+    const m = buildAircraftModel(ctx.defaultHelicopterConfig());
+    const st = createFlightState(), c = createFlightControls();
+    st.position.set(0, 500, 0); st.onGround = false;
+    refreshFlightReadouts(m, st, flatGround);
+    const pa = ctx.createPilotAssist();
+    st.pitchDeg = 10; st.rollDeg = -7;
+    ctx.pilotAssistStep(m, st, c, pa, { pitch: 0, roll: 0 }, A0, 'direct', true, DT);
+    check(Math.abs(c.pitch - 10 / 25) < 1e-6 && Math.abs(c.roll + 7 / 35) < 1e-6,
+      'ヘリ：操縦桿を離すと、離したときの姿勢を指示し続ける', `${c.pitch.toFixed(2)}/${c.roll.toFixed(2)}`);
+  }
 }
 
 console.log(`\n${failures === 0 ? '✅ すべて通過' : `❌ ${failures} 件の失敗`}`);

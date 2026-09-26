@@ -60,6 +60,28 @@ const FLIGHT_KEYMAP = {
 
 const FLIGHT_TRIM_RATE = 0.35; // トリムが端から端まで動く速さ（毎秒）
 let _flightYawStick = 0;        // 手で当てているラダー（ヨーダンパーのぶんを除く）
+// 手で動かしているレバーの位置（昇降舵・補助翼）。controls.pitch / roll とは別に持つ——
+// レバーを離したときの姿勢の保持と旋回半径の操縦（13b-pilot-assist.js）は、controls の舵を
+// 自分で書くので、キーのばね戻りを controls から始めると、自分の書いた舵を「手の舵」と取り違える。
+const _flightStick = { pitch: 0, roll: 0 };
+let _flightAssist = null;       // createPilotAssist() の状態
+function flightStickAxes() { return _flightStick; }
+
+// 操縦のしかた（直接／旋回半径）と、離したら姿勢を保つか
+function flightControlMode() { return EnvState.env.controlMode === 'radius' ? 'radius' : 'direct'; }
+function setFlightControlMode(mode, quiet) {
+  EnvState.env.controlMode = mode === 'radius' ? 'radius' : 'direct';
+  if (_flightAssist) { _flightAssist.pitchHold = _flightAssist.rollHold = null; }
+  const sel = document.getElementById('envControlMode');
+  if (sel && sel.value !== EnvState.env.controlMode) sel.value = EnvState.env.controlMode;
+  if (typeof refreshFlightTouchLabels === 'function') refreshFlightTouchLabels();
+  if (typeof onEnvSettingsChanged === 'function') onEnvSettingsChanged();
+  if (!quiet) {
+    announceFlight(EnvState.env.controlMode === 'radius'
+      ? '操縦：旋回半径（昇降舵で上下・補助翼で水平旋回。100%で最小半径）'
+      : '操縦：直接（レバーは舵角そのもの）');
+  }
+}
 const _flightGroundHold = {};   // 手で滑走しているときに保つ線（apManualGroundHold）
 
 function setupFlightControls() {
@@ -120,6 +142,7 @@ function handleFlightKeyPress(code) {
     }
     case 'KeyJ': if (typeof toggleHover === 'function') toggleHover(); return true;
     case 'KeyU': return toggleAttitudeIndicator();
+    case 'KeyM': setFlightControlMode(flightControlMode() === 'radius' ? 'direct' : 'radius'); return true;
     case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4':
       return toggleEngineGroup(parseInt(code.slice(5), 10));
     case 'KeyL':
@@ -221,8 +244,25 @@ function updateFlightInput(dt) {
   _flightManual.yaw = ty !== null
     || _keyDown(FLIGHT_KEYMAP.yawLeft) || _keyDown(FLIGHT_KEYMAP.yawRight);
 
-  c.pitch = tp !== null ? tp : axis(c.pitch, FLIGHT_KEYMAP.pitchDown, FLIGHT_KEYMAP.pitchUp);
-  c.roll = tr !== null ? tr : axis(c.roll, FLIGHT_KEYMAP.rollLeft, FLIGHT_KEYMAP.rollRight);
+  // 自動操縦（高度維持・ホバリング・全自動）が舵を持っているあいだは、いままでどおり controls を直に動かす
+  // （自動操縦は「前のコマに自分が書いた値」と比べて手の操作に気付くので、そこを変えない）
+  const ap = f.autopilot;
+  const apOn = !!(ap && (ap.full || ap.altHold || ap.hover));
+  let yawAssist = null;
+  if (apOn || !f.aircraft || typeof pilotAssistStep !== 'function') {
+    c.pitch = tp !== null ? tp : axis(c.pitch, FLIGHT_KEYMAP.pitchDown, FLIGHT_KEYMAP.pitchUp);
+    c.roll = tr !== null ? tr : axis(c.roll, FLIGHT_KEYMAP.rollLeft, FLIGHT_KEYMAP.rollRight);
+    _flightStick.pitch = _flightStick.roll = 0;
+    if (_flightAssist) _flightAssist.pitchHold = _flightAssist.rollHold = _flightAssist.heliHold = null;
+  } else {
+    _flightStick.pitch = tp !== null ? tp : axis(_flightStick.pitch, FLIGHT_KEYMAP.pitchDown, FLIGHT_KEYMAP.pitchUp);
+    _flightStick.roll = tr !== null ? tr : axis(_flightStick.roll, FLIGHT_KEYMAP.rollLeft, FLIGHT_KEYMAP.rollRight);
+    if (!_flightAssist) _flightAssist = createPilotAssist();
+    const mode = flightControlMode();
+    const out = pilotAssistStep(f.aircraft.model, f.state, c, _flightAssist, _flightStick,
+      { pitch: _flightManual.pitch, roll: _flightManual.roll }, mode, EnvState.env.attitudeHold !== false, dt);
+    if (mode === 'radius' && out !== null) yawAssist = out;
+  }
   // ラダーは「手の舵」と「ヨーダンパー」を分けて持つ。手の舵はばねで中央へ戻り、
   // 触っていないあいだはヨーダンパー（apManualYawDamper）が機首の振れを止める
   _flightYawStick = ty !== null ? ty : axis(_flightYawStick, FLIGHT_KEYMAP.yawLeft, FLIGHT_KEYMAP.yawRight);
@@ -232,6 +272,7 @@ function updateFlightInput(dt) {
   const hold = !_flightManual.yaw && typeof apManualGroundHold === 'function'
     ? apManualGroundHold(f.state, _flightGroundHold, dt) : null;
   if (_flightManual.yaw || typeof apManualYawDamper !== 'function') c.yaw = _flightYawStick;
+  else if (yawAssist !== null && !f.state.onGround) c.yaw = THREE.MathUtils.clamp(_flightYawStick + yawAssist, -1, 1);
   else c.yaw = THREE.MathUtils.clamp(_flightYawStick + (hold !== null ? hold : apManualYawDamper(f.state)), -1, 1);
 
   // 出力レバーは画面側が controls を直接書くので、ここではキーぶんを足すだけでいい
@@ -542,6 +583,7 @@ function initFlightHUD() {
       <div class="hud-tile sm"><span class="k">G</span><b id="hudG">1.0</b></div>
       <div class="hud-tile sm"><span class="k">対地</span><b id="hudAgl">--</b><span class="u">ft</span></div>
       <div class="hud-tile sm" id="hudApTile" hidden><span class="k">自動</span><b id="hudAp">—</b></div>
+      <div class="hud-tile sm" id="hudCtlTile" hidden><span class="k">操縦</span><b id="hudCtl">半径</b></div>
     </div>
     <div id="hudAttitude"><canvas id="hudAttitudeCanvas" width="300" height="300"></canvas></div>
     <div id="hudWarn"></div>
@@ -550,7 +592,7 @@ function initFlightHUD() {
       W/S・↑↓ ピッチ ／ A/D・←→ ロール ／ Q/E ラダー ／ Shift・Ctrl 出力 ／ X/Z 垂直エンジン ／
       T トリムを取る ／ Y/H トリム微調整 ／ B・Space ブレーキ ／ G 脚 ／ V・C フラップ ／
       K スポイラー ／ N 逆噴射（地上のみ） ／ J ホバリング ／ L 着陸灯 ／
-      1〜4 エンジングループ入切 ／ U 水平器 ／
+      1〜4 エンジングループ入切 ／ U 水平器 ／ M 操縦（直接／旋回半径） ／
       O 高度維持 ／ I 全自動（離陸〜着陸） ／
       P 駐機 ／ Tab 視点 ／ R 滑走路へ戻る ／ F 飛行終了
     </div>`;
@@ -751,6 +793,17 @@ function updateFlightHUD() {
   set('hudAoa', s.alphaDeg.toFixed(1));
   set('hudG', s.loadFactor.toFixed(1));
   set('hudAgl', s.altitudeAglM > 3000 ? '—' : Math.round(s.altitudeAglM * 3.28084).toLocaleString());
+
+  // 操縦のしかた。旋回半径のときだけ出す（直接はいままでどおりなので計器を増やさない）。
+  // 右のメニューの「いまの最小旋回半径」もここで書き直す（10回/秒）
+  const radiusMode = flightControlMode() === 'radius';
+  const ctlTile = document.getElementById('hudCtlTile');
+  if (ctlTile) ctlTile.hidden = !radiusMode;
+  const rNow = model && _flightAssist && typeof paLevelTurnRadiusNow === 'function'
+    ? paLevelTurnRadiusNow(model, s, c, _flightAssist) : Infinity;
+  const rText = !Number.isFinite(rNow) ? '—' : rNow >= 10000 ? `${(rNow / 1000).toFixed(1)} km` : `${Math.round(rNow).toLocaleString()} m`;
+  if (radiusMode) set('hudCtl', `半径 ${rText}`);
+  set('envMinRadiusReadout', rText);
 
   // 自動操縦。切れているあいだは枠ごと隠す（計器を増やしすぎないように）
   const apText = typeof autopilotHudText === 'function' ? autopilotHudText() : null;

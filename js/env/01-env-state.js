@@ -157,5 +157,9 @@ const EnvState = {
     soundVolume: 0.7,        // 音量（0〜1）
     shadowsOn: true,         // 太陽の影（js/env/03m-shadows.js。画質「低」では描かない）
     quality: 'high',         // 画質プリセット 'high'|'medium'|'low'（js/env/03h-env-quality.js）
+    // 手で飛ばすときのレバーの意味（js/env/13b-pilot-assist.js）。
+    //   'direct' … 舵角そのもの（いままでどおり） ／ 'radius' … 旋回半径（100%で最小半径）
+    controlMode: 'direct',
+    attitudeHold: true,      // 直接のとき、レバーを離したら離した瞬間の姿勢を保つか
   },
 };

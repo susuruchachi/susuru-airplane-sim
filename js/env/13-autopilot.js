@@ -3714,8 +3714,13 @@ function setupAutopilotUI() {
   const pick = document.getElementById('envApPickField');
   if (pick) pick.addEventListener('click', () => {
     EnvState.flight.pickingField = !EnvState.flight.pickingField;
-    // 右のメニューを閉じていると地図が見えないので開く
+    // 右のメニューを閉じていると地図が見えないので開く。地図は「地図」のタブにあるので、そちらへ移る
+    // （選び終わったら元のタブへ戻す。03e-minimap.js の onMinimapClick）
     if (EnvState.flight.pickingField && typeof setEnvPanelCollapsed === 'function') setEnvPanelCollapsed(false);
+    if (typeof setEnvTab === 'function') {
+      if (EnvState.flight.pickingField) { EnvState.flight.tabBeforePick = envCurrentTab(); setEnvTab('map'); }
+      else if (EnvState.flight.tabBeforePick) { setEnvTab(EnvState.flight.tabBeforePick); EnvState.flight.tabBeforePick = null; }
+    }
     if (EnvState.flight.pickingField) announceFlight(EnvState.flight.aircraft && apVerticalLanding(EnvState.flight.aircraft.model, flightAutopilot())
       ? '右の地図をクリックすると、そのすぐそばに垂直着陸します（地図はドラッグで動かし、ホイール・2本指で拡大）'
       : '右の地図をクリックすると、そのそばの平地を探して着陸地点にします（地図はドラッグで動かし、ホイール・2本指で拡大）');

@@ -1110,6 +1110,11 @@ function onMinimapClick(ev) {
   if (EnvState.flight && EnvState.flight.pickingField && typeof apPickLandingField === 'function') {
     EnvState.flight.pickingField = false;
     apPickLandingField(wx, wz);
+    // 選ぶために「地図」のタブへ移っていたなら、元のタブ（自動操縦）へ戻す
+    if (EnvState.flight.tabBeforePick && typeof setEnvTab === 'function') {
+      setEnvTab(EnvState.flight.tabBeforePick);
+      EnvState.flight.tabBeforePick = null;
+    }
     if (typeof updateAutopilotUI === 'function') updateAutopilotUI();
     return;
   }
