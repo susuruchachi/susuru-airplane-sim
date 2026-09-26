@@ -245,6 +245,149 @@ function partShapeApplyGearDeploy(root, props, deployState) {
   });
 }
 
+// ---- 舵面の形（親の翼から切り取る） ------------------------------------------
+//
+// 舵面（エレベーター・ラダー・エルロン・フラップ・スポイラー）は、**親の翼の後ろ側を切り取った板**
+// として持つ。大きさは3つの数で決まる：
+//   spanFrom / spanTo … 翼幅方向の範囲（0＝付け根 〜 1＝翼端）
+//   chordFrac          … 後縁から測った舵面の翼弦の割合（0.3 なら後ろ30%が動く）
+// 前の辺（前縁から 1−chordFrac の線）が蝶番＝回転軸になる。
+//
+// 以前は舵面が「位置（翼幅のどこか）」しか持たず、効きは種類ごとの固定値だった——
+// Boeing 747 の大きなフラップも、小さな練習機のフラップも同じ効き。いまは切り取った
+// 大きさから効きを出す（10-flight.js・09-aircraft.js）。
+// 翼そのもの（固定部＋舵面）はこれまでどおり1枚の翼として揚力を出し、舵を切ったときの
+// 揚力の変化だけが、舵面が覆っている範囲の分になる（実機でも中立の舵面は翼型の一部として揚力を出す）。
+
+// 新しく置くときの形（種類ごと）。実機の目安：エルロンは外翼の後ろ25%、昇降舵・方向舵は
+// 尾翼の全幅で後ろ30%、フラップは内翼の後ろ30%、スポイラーは翼の上面の15%。
+const CS_KIND_SHAPE = {
+  aileron: { spanFrom: 0.65, spanTo: 0.95, chordFrac: 0.25 },
+  elevator: { spanFrom: 0, spanTo: 1, chordFrac: 0.3 },
+  rudder: { spanFrom: 0, spanTo: 1, chordFrac: 0.3 },
+  flap: { spanFrom: 0.05, spanTo: 0.6, chordFrac: 0.3 },
+  spoiler: { spanFrom: 0.25, spanTo: 0.65, chordFrac: 0.15 },
+};
+// 大きさを持っていなかった旧データを読み替えるときの形。**これまでと同じ効きになる大きさ**にする：
+// 以前の効き（種類ごとの固定値）は「翼のどれだけを覆うか」に直すと、昇降舵・方向舵が全面、
+// エルロン・スポイラーが翼面積の20%、フラップが64%（09-aircraft.js の CONTROL_SPAN_FRACTION・flapEffect）。
+const CS_LEGACY_SHAPE = {
+  aileron: { areaFrac: 0.2, chordFrac: 0.25 },
+  elevator: { areaFrac: 1, chordFrac: 0.25 },
+  rudder: { areaFrac: 1, chordFrac: 0.25 },
+  flap: { areaFrac: 0.636, chordFrac: 0.25 },
+  spoiler: { areaFrac: 0.2, chordFrac: 0.15 },
+};
+const CS_CHORD_MIN = 0.05, CS_CHORD_MAX = 0.6;
+
+// 翼の4頂点の中の点（spanS: 0=付け根〜1=翼端、chordT: 0=前縁〜1=後縁）。05c-wing-corners.js の wingPointAt と同じ
+function csWingPoint(corners, spanS, chordT) {
+  const l = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t });
+  return l(l(corners.rootLeading, corners.rootTrailing, chordT),
+    l(corners.tipLeading, corners.tipTrailing, chordT), spanS);
+}
+// 4点の四角形の面積（対角線の外積の半分。少しねじれた四角形でも使える）
+function csQuadArea(a, b, c, d) {
+  const d1 = { x: c.x - a.x, y: c.y - a.y, z: c.z - a.z };
+  const d2 = { x: d.x - b.x, y: d.y - b.y, z: d.z - b.z };
+  const cx = d1.y * d2.z - d1.z * d2.y, cy = d1.z * d2.x - d1.x * d2.z, cz = d1.x * d2.y - d1.y * d2.x;
+  return 0.5 * Math.hypot(cx, cy, cz);
+}
+// 翼の、翼幅 s0〜s1・翼弦 t0〜t1 の範囲の面積
+function csRegionArea(corners, s0, s1, t0, t1) {
+  return csQuadArea(csWingPoint(corners, s0, t0), csWingPoint(corners, s1, t0),
+    csWingPoint(corners, s1, t1), csWingPoint(corners, s0, t1));
+}
+
+// 旧データ：翼幅の中心 spanS のまわりに、翼の面積の areaFrac を覆う幅を探す（端に当たったら内へずらす）
+function csLegacyRange(corners, spanS, areaFrac) {
+  if (areaFrac >= 0.999) return { spanFrom: 0, spanTo: 1 };
+  const total = Math.max(csRegionArea(corners, 0, 1, 0, 1), 1e-9);
+  const c = Math.min(Math.max(Number.isFinite(spanS) ? spanS : 0.5, 0), 1);
+  const range = (w) => {
+    let a = c - w / 2, b = c + w / 2;
+    if (a < 0) { b -= a; a = 0; }
+    if (b > 1) { a -= b - 1; b = 1; }
+    return [Math.max(a, 0), Math.min(b, 1)];
+  };
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 30; i++) {
+    const w = (lo + hi) / 2;
+    const [a, b] = range(w);
+    if (csRegionArea(corners, a, b, 0, 1) / total < areaFrac) lo = w; else hi = w;
+  }
+  const [a, b] = range(hi);
+  return { spanFrom: a, spanTo: b };
+}
+
+// 舵面の形（範囲と翼弦比）。大きさを持っていない旧データは、これまでと同じ効きの大きさに読み替える
+function csResolveShape(props, corners) {
+  const kind = (props && props.kind) || 'aileron';
+  const p = props || {};
+  if (Number.isFinite(p.spanFrom) && Number.isFinite(p.spanTo) && Number.isFinite(p.chordFrac)) {
+    const a = Math.min(Math.max(Math.min(p.spanFrom, p.spanTo), 0), 1);
+    const b = Math.min(Math.max(Math.max(p.spanFrom, p.spanTo), 0), 1);
+    return { spanFrom: a, spanTo: b, chordFrac: Math.min(Math.max(p.chordFrac, CS_CHORD_MIN), CS_CHORD_MAX), legacy: false };
+  }
+  const lg = CS_LEGACY_SHAPE[kind] || CS_LEGACY_SHAPE.aileron;
+  const r = corners ? csLegacyRange(corners, p.spanS, lg.areaFrac) : { spanFrom: 0, spanTo: 1 };
+  return { spanFrom: r.spanFrom, spanTo: r.spanTo, chordFrac: lg.chordFrac, legacy: true };
+}
+
+// 切り取った板の形と面積（翼のローカル座標）。
+// hingeRoot/hingeTip が蝶番（前の辺）、trailRoot/trailTip が後縁。
+function csPanel(corners, shape) {
+  const t0 = 1 - shape.chordFrac;
+  const hingeRoot = csWingPoint(corners, shape.spanFrom, t0), hingeTip = csWingPoint(corners, shape.spanTo, t0);
+  const trailRoot = csWingPoint(corners, shape.spanFrom, 1), trailTip = csWingPoint(corners, shape.spanTo, 1);
+  const wingArea = csRegionArea(corners, 0, 1, 0, 1);
+  const stripArea = csRegionArea(corners, shape.spanFrom, shape.spanTo, 0, 1);
+  const panelArea = csQuadArea(hingeRoot, hingeTip, trailTip, trailRoot);
+  const w = Math.max(wingArea, 1e-9);
+  return {
+    hingeRoot, hingeTip, trailRoot, trailTip,
+    hingeMid: { x: (hingeRoot.x + hingeTip.x) / 2, y: (hingeRoot.y + hingeTip.y) / 2, z: (hingeRoot.z + hingeTip.z) / 2 },
+    wingArea, stripArea, panelArea,
+    stripFrac: stripArea / w,   // 舵面が覆う翼幅の範囲の、翼ぜんぶに対する面積比（翼弦は全部）
+    panelFrac: panelArea / w,   // 舵面そのものの面積比
+  };
+}
+
+// 舵面の効き（薄翼理論のフラップ効率 τ）。舵面を δ 振ると、覆っている範囲の翼は
+// 迎角が τ·δ 増えたのと同じ揚力を出す。翼弦比25%で0.61、30%で0.66、50%で0.82。
+function csFlapTau(chordFrac) {
+  const cf = Math.min(Math.max(chordFrac, 0.01), 0.99);
+  const th = Math.acos(2 * cf - 1);
+  return 1 - (th - Math.sin(th)) / Math.PI;
+}
+// 舵を切って増えた揚力が、翼の空力中心（前縁から1/4）からどれだけ後ろに掛かるか（翼弦に対する割合）。
+// 薄翼理論で ΔCm/ΔCl = sinθ(1−cosθ) / (4(π−θ+sinθ))。翼弦比25%で0.170。
+function csFlapArm(chordFrac) {
+  const cf = Math.min(Math.max(chordFrac, 0.01), 0.99);
+  const th = Math.acos(2 * cf - 1);
+  return Math.sin(th) * (1 - Math.cos(th)) / (4 * (Math.PI - th + Math.sin(th)));
+}
+
+// 舵面の形の板（蝶番の中点を原点に置く）。Builder のギズモと飛行画面の仮モデルが使う
+function partShapeControlSurfaceGeometry(panel, role) {
+  const o = panel.hingeMid;
+  const rel = (p) => ({ x: p.x - o.x, y: p.y - o.y, z: p.z - o.z });
+  return partShapeWingGeometry({
+    rootLeading: rel(panel.hingeRoot), tipLeading: rel(panel.hingeTip),
+    rootTrailing: rel(panel.trailRoot), tipTrailing: rel(panel.trailTip),
+  }, role);
+}
+
+// 翼のパーツの変換（位置・回転(°)・拡縮）で、翼のローカル座標の点を機体（部品の入れ物）の座標へ
+function csWingToParent(wingPart, p) {
+  const s = wingPart.scale || { x: 1, y: 1, z: 1 };
+  const r = wingPart.rotation || { x: 0, y: 0, z: 0 };
+  const v = new THREE.Vector3(p.x * s.x, p.y * s.y, p.z * s.z)
+    .applyEuler(new THREE.Euler(THREE.MathUtils.degToRad(r.x), THREE.MathUtils.degToRad(r.y), THREE.MathUtils.degToRad(r.z)));
+  const pos = wingPart.position || { x: 0, y: 0, z: 0 };
+  return { x: v.x + pos.x, y: v.y + pos.y, z: v.z + pos.z };
+}
+
 // ---- 飛行画面の仮モデル ------------------------------------------------------
 
 const _ppQ = new THREE.Quaternion();
@@ -285,17 +428,29 @@ function buildPartProxies(config, modelXform, body, unit) {
     } else if (p.type === 'wing' && p.props.corners) {
       obj = new THREE.Mesh(partShapeWingGeometry(p.props.corners, p.props.role), paint(0xd6dbe1, { side: THREE.DoubleSide }));
     } else if (p.type === 'control_surface') {
-      // 舵面は回転の中心（ヒンジ）が前縁に来るよう、形を後ろへずらしてから回す（下の aft で決める）
-      const geo = new THREE.BoxGeometry(0.4, 0.04, 0.18);
+      const wing = p.props.parentWingId
+        ? (config.parts || []).find(w => w.id === p.props.parentWingId && w.type === 'wing' && w.props && w.props.corners) : null;
       const pivot = new THREE.Group();
-      pivot.add(new THREE.Mesh(geo, skin));
+      if (wing) {
+        // 親の翼から切り取った板。原点が蝶番（前の辺）の中点なので、そのまま回せば前の辺で回る
+        const panel = csPanel(wing.props.corners, csResolveShape(p.props, wing.props.corners));
+        pivot.add(new THREE.Mesh(partShapeControlSurfaceGeometry(panel, wing.props.role),
+          paint(0xd6dbe1, { side: THREE.DoubleSide })));
+        pivot.userData.csPanel = panel;
+        pivot.userData.csPlace = { position: csWingToParent(wing, panel.hingeMid), rotation: wing.rotation, scale: wing.scale };
+      } else {
+        // 翼に付いていない舵面は小さな板。回転の中心（ヒンジ）が前縁に来るよう、形を後ろへずらしてから回す（下の aft で決める）
+        pivot.add(new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.04, 0.18), skin));
+      }
       obj = pivot;
     }
     if (!obj) continue;
-    obj.position.set(p.position.x, p.position.y, p.position.z);
-    obj.rotation.set(THREE.MathUtils.degToRad(p.rotation.x), THREE.MathUtils.degToRad(p.rotation.y),
-      THREE.MathUtils.degToRad(p.rotation.z));
-    obj.scale.set(p.scale.x, p.scale.y, p.scale.z);
+    // 翼に付いた舵面の位置・向きは翼から決める（保存された位置は古いことがある）
+    const place = obj.userData.csPlace || p;
+    obj.position.set(place.position.x, place.position.y, place.position.z);
+    obj.rotation.set(THREE.MathUtils.degToRad(place.rotation.x), THREE.MathUtils.degToRad(place.rotation.y),
+      THREE.MathUtils.degToRad(place.rotation.z));
+    obj.scale.set(place.scale.x, place.scale.y, place.scale.z);
     out.group.add(obj);
     placed.push({ part: p, obj });
   }
@@ -311,8 +466,16 @@ function buildPartProxies(config, modelXform, body, unit) {
     if (part.type !== 'control_surface') continue;
     const props = part.props;
     const kind = props.kind || 'aileron';
+    const panel = obj.userData.csPanel;
     let localAxis = props.hingeAxis === 'y' ? new THREE.Vector3(0, 1, 0)
       : props.hingeAxis === 'z' ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
+    // 翼から切り取った舵面は、蝶番（前の辺）そのものを軸にする
+    if (panel) {
+      localAxis = new THREE.Vector3(panel.hingeTip.x - panel.hingeRoot.x, panel.hingeTip.y - panel.hingeRoot.y,
+        panel.hingeTip.z - panel.hingeRoot.z);
+      if (localAxis.lengthSq() < 1e-12) continue;
+      localAxis.normalize();
+    }
     obj.getWorldQuaternion(_ppQ).premultiply(bodyInv);      // 部品 → 機体座標
     let axisBody = _ppAxis.copy(localAxis).applyQuaternion(_ppQ).normalize();
     // 決めてあるヒンジ軸では、その舵の動くべき向き（方向舵なら左右、ほかは上下）へ後縁が動かない
@@ -320,7 +483,7 @@ function buildPartProxies(config, modelXform, body, unit) {
     // 内蔵の練習機の方向舵はヒンジ軸がXのままで、仮モデルが上下に振れていた。
     const want = kind === 'rudder' ? 'x' : 'y';
     const moveTry = new THREE.Vector3().crossVectors(axisBody, new THREE.Vector3(0, 0, 1));
-    if (Math.abs(moveTry[want]) < 0.3) {
+    if (!panel && Math.abs(moveTry[want]) < 0.3) {
       axisBody.set(kind === 'rudder' ? 0 : 1, kind === 'rudder' ? 1 : 0, 0);
       localAxis = axisBody.clone().applyQuaternion(_ppQ.clone().invert()).normalize();
     }
@@ -328,10 +491,11 @@ function buildPartProxies(config, modelXform, body, unit) {
     _ppAft.set(0, 0, 1).addScaledVector(axisBody, -axisBody.z);
     if (_ppAft.lengthSq() < 1e-4) continue;                // ヒンジが前後を向いている舵は回せない
     _ppAft.normalize();
-    // 形を後ろへ半分ずらして、前縁をヒンジ（部品の原点）に合わせる
-    const aftLocal = _ppV.copy(_ppAft).applyQuaternion(_ppQ.clone().invert());
-    const mesh = obj.children[0];
-    mesh.position.copy(aftLocal).multiplyScalar(0.09);
+    // 形を後ろへ半分ずらして、前縁をヒンジ（部品の原点）に合わせる（切り取った板は初めから合っている）
+    if (!panel) {
+      const aftLocal = _ppV.copy(_ppAft).applyQuaternion(_ppQ.clone().invert());
+      obj.children[0].position.copy(aftLocal).multiplyScalar(0.09);
+    }
     // 回したときの後縁の動き（機体座標）
     const move = new THREE.Vector3().crossVectors(axisBody, _ppAft);
     obj.getWorldPosition(_ppV).applyMatrix4(new THREE.Matrix4().copy(body.matrixWorld).invert());

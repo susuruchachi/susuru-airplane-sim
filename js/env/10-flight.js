@@ -473,7 +473,8 @@ function accumulateAeroForces(model, state, controls, windWorld, out) {
       // +0.59MN·m の機首上げになり、引き起こしが止まらず背面へ回っていた。
       if (dCl * hinged < 0) dCl = 0;
       if (dCl) {
-        const arm = _fv.arm.copy(s.fwd).multiplyScalar(-AERO_DEFAULTS.hingeArmChord * s.chord);
+        const arm = _fv.arm.copy(s.fwd).multiplyScalar(
+          -(s.hingeArm !== undefined ? s.hingeArm : AERO_DEFAULTS.hingeArmChord) * s.chord);
         out.torque.add(_fv.tmp.crossVectors(arm, _fv.dF.copy(liftDir).multiplyScalar(dCl * q)));
       }
     }

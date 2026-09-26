@@ -38,7 +38,11 @@ function defaultPropsForType(type) {
         minDeg: -20,
         maxDeg: 20,
         parentWingId: null,    // どの主翼に属するか（任意）
-        spanS: 0.78,           // 翼幅方向の位置（0=付け根 〜 1=翼端）。「後縁1/4に自動配置」で使う
+        spanS: 0.78,           // 翼幅方向の位置（0=付け根 〜 1=翼端）。範囲の中央（旧データ互換）
+        // 大きさ（親の翼から切り取る。js/env/09e-part-proxy.js の csPanel）
+        spanFrom: CS_KIND_SHAPE.aileron.spanFrom,   // 翼幅方向の範囲（0=付け根 〜 1=翼端）
+        spanTo: CS_KIND_SHAPE.aileron.spanTo,
+        chordFrac: CS_KIND_SHAPE.aileron.chordFrac, // 後縁から測った翼弦の割合。前の辺が蝶番
       };
     case 'viewpoint':
       // コックピットの目の位置。パーツの回転がそのまま視線の向きになる
@@ -472,6 +476,11 @@ function selectPart(id) {
 // gizmoが動かされた後、part.position/rotation/scaleへ反映
 function syncPartFromGizmo(part) {
   if (!part || !part.gizmo) return;
+  // 翼に付いている舵面は、ギズモで動かしても翼の上に戻す（形は範囲と翼弦比で決める）
+  if (part.type === 'control_surface' && controlSurfaceParentWing(part)) {
+    syncControlSurfaceToWing(part);
+    return;
+  }
   part.position.x = part.gizmo.position.x;
   part.position.y = part.gizmo.position.y;
   part.position.z = part.gizmo.position.z;
@@ -481,6 +490,7 @@ function syncPartFromGizmo(part) {
   part.scale.x = part.gizmo.scale.x;
   part.scale.y = part.gizmo.scale.y;
   part.scale.z = part.gizmo.scale.z;
+  if (part.type === 'wing') syncControlSurfacesOfWing(part);
 }
 
 function applyPartToGizmo(part) {
@@ -492,6 +502,8 @@ function applyPartToGizmo(part) {
     THREE.MathUtils.degToRad(part.rotation.z)
   );
   part.gizmo.scale.set(part.scale.x, part.scale.y, part.scale.z);
+  // 翼を動かしたら、付いている舵面もついてくる（舵面の位置は翼から決まる）
+  if (part.type === 'wing') syncControlSurfacesOfWing(part);
 }
 
 // パーツをX軸反転（機体中心線=X0を挟んで鏡像）した複製を作る
@@ -557,6 +569,20 @@ function mirrorPart(id) {
   };
   State.parts.push(part);
   gizmoMesh.userData.partId = newId;
+  // 舵面は、親の翼の鏡像の翼（同じ役割で左右反対にあるもの）へ付け替えてから形を合わせる
+  if (src.type === 'control_surface') {
+    const srcWing = controlSurfaceParentWing(src);
+    if (srcWing) {
+      const tol = Math.max(0.05, Math.abs(srcWing.position.x) * 0.05);
+      const twin = State.parts.find(w => w.type === 'wing' && w.id !== srcWing.id
+        && w.props.role === srcWing.props.role
+        && Math.abs(w.position.x + srcWing.position.x) <= tol
+        && Math.abs(w.position.y - srcWing.position.y) <= tol + Math.abs(srcWing.position.y) * 0.05
+        && Math.abs(w.position.z - srcWing.position.z) <= tol + Math.abs(srcWing.position.z) * 0.05);
+      if (twin) mirroredProps.parentWingId = twin.id;
+    }
+    syncControlSurfaceToWing(part);
+  }
 
   selectPart(newId);
   renderPartList();
@@ -625,5 +651,21 @@ function rebuildPartsFromSaved(savedParts) {
   State.partIdCounter = maxIdNum + 1;
   State.jointIdCounter = maxJointNum + 1;
   State.strutIdCounter = maxStrutNum + 1;
+  // 舵面を親の翼から切り取った形にする（翼が後から読まれることもあるので、全部読んでから）。
+  // 大きさを持っていない旧データは、これまでと同じ効きの大きさに読み替わる。
+  // 親の翼の指定が、この機体に無い翼を指しているとき（部品を消した・別の機体から写した）は、
+  // 飛行の側と同じく、いちばん近い翼を親にする。
+  for (const p of State.parts) {
+    if (p.type !== 'control_surface' || !p.props.parentWingId || controlSurfaceParentWing(p)) continue;
+    let best = null, bestD = Infinity;
+    for (const w of State.parts) {
+      if (w.type !== 'wing' || !w.props.corners) continue;
+      const c = csWingToParent(w, wingCornersCenter(w.props.corners));
+      const d = (c.x - p.position.x) ** 2 + (c.y - p.position.y) ** 2 + (c.z - p.position.z) ** 2;
+      if (d < bestD) { bestD = d; best = w; }
+    }
+    if (best) p.props.parentWingId = best.id;
+  }
+  for (const p of State.parts) if (p.type === 'control_surface') syncControlSurfaceToWing(p);
   renderPartList();
 }

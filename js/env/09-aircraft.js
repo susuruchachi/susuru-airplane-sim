@@ -143,6 +143,10 @@ function buildEngineGroups(engines, vMaxMps) {
 // 自動操縦でも姿勢が発散して飛ばせず、9%あれば同じ設定のまま着陸できた。
 const AC_MIN_STATIC_MARGIN_PCT = 3;
 
+// スポイラーの効きの基準（これまでの効き＝翼の面積の20%を、翼弦15%の板で覆う）
+const CS_SPOILER_REF_COVER = 0.20;
+const CS_SPOILER_REF_CHORD = 0.15;
+
 const CONTROL_SPAN_FRACTION = {
   elevator: 1.00,  // 水平尾翼の全幅
   rudder: 1.00,    // 垂直尾翼の全高
@@ -403,6 +407,7 @@ function buildAircraftModel(config) {
 
   // 3) 舵面を親の翼へ割り当てる。親指定が無ければいちばん近い翼に付ける。
   const surfaces = [];
+  const model_controlSurfaces = [];  // 舵面ごとの大きさ（表示と検証用）
   const wingById = new Map();
   for (const w of rawWings) {
     const geo = w.geo;
@@ -465,6 +470,7 @@ function buildAircraftModel(config) {
       spoiler: 0, spoilerCd: 0,
     };
     surf.alphaGain = surfaceAlphaGain(surf);
+    surf.corners = w.part.props && w.part.props.corners; // 舵面を切り取るのに使う（翼のローカル座標）
     surfaces.push(surf);
     wingById.set(w.part.id, surf);
   }
@@ -490,8 +496,37 @@ function buildAircraftModel(config) {
       Math.abs((p.props && p.props.maxDeg) || 0),
       Math.abs((p.props && p.props.minDeg) || 0)
     ) || AERO_DEFAULTS.controlMaxDeg;
-    const gain = THREE.MathUtils.degToRad(maxDeg) * AERO_DEFAULTS.surfaceEffect
-      * (CONTROL_SPAN_FRACTION[kind] || CONTROL_SPAN_FRACTION.aileron);
+    // **舵面の大きさで効きを決める**（js/env/09e-part-proxy.js の csPanel）。舵面は親の翼の後ろを
+    // 切り取った板で、振ると覆っている範囲の翼が τ·δ だけ迎角を増したのと同じ揚力を出す
+    // （τ は翼弦比で決まる薄翼理論のフラップ効率）。翼まるごとに換算すると
+    //   効き = τ(翼弦比) × 覆う範囲の面積比 × 係数
+    // で、係数は「翼弦比25%で全面を覆う舵面」がこれまでの surfaceEffect(0.55) になるように取る。
+    // 以前は種類ごとの固定値（昇降舵は尾翼まるごと、エルロンは20%、フラップはいつも0.35）で、
+    // Boeing 747 の大きなフラップも練習機の小さなフラップも同じ効きだった。
+    // 大きさを持っていない旧データは、これまでと同じ効きの大きさに読み替える（csResolveShape）。
+    let cover = CONTROL_SPAN_FRACTION[kind] || CONTROL_SPAN_FRACTION.aileron;
+    let tauRel = 1, armChord = AERO_DEFAULTS.hingeArmChord, plateFrac = null;
+    if (target.corners && typeof csPanel === 'function') {
+      const shape = csResolveShape(p.props, target.corners);
+      const panel = csPanel(target.corners, shape);
+      cover = panel.stripFrac;
+      tauRel = csFlapTau(shape.chordFrac) / csFlapTau(0.25);
+      // 増えた揚力の腕も翼弦比で変わる（大きい舵面ほど前寄り）。翼弦比25%でこれまでの値
+      armChord = AERO_DEFAULTS.hingeArmChord * csFlapArm(shape.chordFrac) / csFlapArm(0.25);
+      // 旧データはこれまでと同じ抗力に（先細りの翼では板の面積比が 20%×15% からずれる）
+      plateFrac = shape.legacy ? null : panel.panelFrac;
+      model_controlSurfaces.push({
+        id: p.id, name: p.name || kind, kind, parentId: target.id, shape, maxDeg,
+        areaM2: panel.panelFrac * target.area, wingAreaM2: target.area,
+        stripFrac: panel.stripFrac, tau: csFlapTau(shape.chordFrac),
+      });
+    }
+    const gain = THREE.MathUtils.degToRad(maxDeg) * AERO_DEFAULTS.surfaceEffect * tauRel * cover;
+    // 蝶番の舵の、増えた揚力の腕（翼ごとに、効きで重みをつけた平均）
+    if (kind === 'elevator' || kind === 'rudder' || kind === 'aileron') {
+      target.hingeArmSum = (target.hingeArmSum || 0) + gain * armChord;
+      target.hingeGainSum = (target.hingeGainSum || 0) + gain;
+    }
 
     // 符号は操縦桿の向きに合わせる。エレベーターは「引く＝機首上げ」なので、
     // 尾翼の迎角は下がる向き（尾を押し下げる向き）に動かす。
@@ -499,16 +534,26 @@ function buildAircraftModel(config) {
     if (kind === 'elevator') target.pitch -= gain;
     else if (kind === 'rudder') target.yaw += gain;
     else if (kind === 'aileron') target.roll += gain * (target.side === 'left' ? 1 : -1);
-    else if (kind === 'flap') target.flap += THREE.MathUtils.degToRad(maxDeg) * AERO_DEFAULTS.flapEffect;
+    // フラップも同じ式（以前は大きさによらず flapEffect=0.35 ＝ 翼弦比25%で翼の64%を覆うのと同じ）
+    else if (kind === 'flap') target.flap += gain;
     // スポイラーは**フラップとは別のレバー**。ここを target.flap の引き算にすると、
     // フラップを下ろした瞬間にスポイラーも一緒に立ち上がり、増えるはずの揚力を
     // 自分で削ってしまう——実測で Thunderbird2 のフラップ全開が、スポイラーを
     // 積んでいるせいで揚力+94%から+47%まで落ち、抗力も52kNから34kNしか出ず、
     // 「スポイラーを付けるほど降りられず止まれない機体」になっていた。
+    // スポイラーは、覆う翼幅の範囲の揚力を削り（翼の20%を覆うのがこれまでの値）、
+    // 立てた板の面積ぶんの抗力を出す（翼の20%×翼弦15%の板がこれまでの値）。
     else if (kind === 'spoiler') {
-      target.spoiler += THREE.MathUtils.degToRad(maxDeg) * AERO_DEFAULTS.spoilerEffect;
-      target.spoilerCd += Math.sin(THREE.MathUtils.degToRad(maxDeg)) * AERO_DEFAULTS.spoilerDragCd;
+      const liftK = cover / CS_SPOILER_REF_COVER;
+      const dragK = plateFrac === null ? 1 : plateFrac / (CS_SPOILER_REF_COVER * CS_SPOILER_REF_CHORD);
+      target.spoiler += THREE.MathUtils.degToRad(maxDeg) * AERO_DEFAULTS.spoilerEffect * liftK;
+      target.spoilerCd += Math.sin(THREE.MathUtils.degToRad(maxDeg)) * AERO_DEFAULTS.spoilerDragCd * dragK;
     }
+  }
+
+  for (const s of surfaces) {
+    if (s.hingeGainSum > 1e-9) s.hingeArm = s.hingeArmSum / s.hingeGainSum;
+    delete s.hingeArmSum; delete s.hingeGainSum;
   }
 
   // **1枚の翼に積み上がった舵の効きに上限を置く**。
@@ -669,6 +714,7 @@ function buildAircraftModel(config) {
   return {
     massKg, cg, cgModel, qFix, modelMat, vMaxMps,
     surfaces, engines, engineGroups, contacts, inertia, extent,
+    controlSurfaces: model_controlSurfaces,
     wingArea, wingSpan,
     // 胴体の抗力。境界箱から出すと**翼幅を胴体の幅として数えてしまい**、
     // 前面投影が6m²を超えて推力の何倍もの抗力になる（実際にそうなって飛ばなかった）。
@@ -1036,7 +1082,7 @@ function analyzeAircraftPerformance(model) {
       // その翼自身の空力中心より後ろに掛かるので、重心の真上にある翼でも
       // 翼弦ぶんの腕を持つ（10-flight.js の hingeArmChord）。ここを入れないと、
       // 尾翼を持たないデルタ機の舵の効きを 0 と報告してしまう。
-      const arm = Math.abs(s.center.z) + AERO_DEFAULTS.hingeArmChord * s.chord;
+      const arm = Math.abs(s.center.z) + (s.hingeArm !== undefined ? s.hingeArm : AERO_DEFAULTS.hingeArmChord) * s.chord;
       elevatorPower += qL * s.area * 2 * Math.PI * Math.abs(s.pitch) * arm;
     }
   }
@@ -1057,9 +1103,19 @@ function analyzeAircraftPerformance(model) {
       + `推力を上げるか、翼を大きくしてください。` });
   }
   if (rotateRatio !== null && rotateRatio < 1) {
+    // 原因を数字で出す。「尾翼が車輪の真上」だけでなく、**いちばん後ろの車輪が重心から遠すぎる**
+    // ときも起きる（重さのてこが長くなる）——送ってもらった Boeing 747 は翼の脚が重心の 8.0m 後ろにあり、
+    // 引き起こしの速さで尾翼が出せる力は必要な分の69%だった（実機は重心の少し後ろ）。
+    const behind = rear.position.z;
+    const tailArm = Math.max(...model.surfaces.filter((s) => Math.abs(s.pitch) > 1e-6)
+      .map((s) => s.center.z - behind), 0);
     notes.push({ level: 'error', text:
-      '地上で機首を上げられません。水平尾翼が後ろの車輪の真上にあると、'
-      + '舵を切っても機体を回すてこが働きません。尾翼を後ろへ、または車輪を前へ。' });
+      `地上で機首を上げられません（引き起こしの速さで、尾翼が出せる力は必要な分の${Math.round(rotateRatio * 100)}%）。`
+      + `機首はいちばん後ろの車輪を支点に回るので、その車輪が重心の ${behind.toFixed(1)} m 後ろ、`
+      + `尾翼がその車輪の ${tailArm.toFixed(1)} m 後ろにあります。`
+      + (behind > tailArm * 0.15
+        ? `車輪が重心から遠いほど持ち上げる重さのてこが長くなります。主脚を重心のすぐ後ろ（ふつうは数m以内）へ寄せてください。`
+        : `尾翼が車輪に近いと、舵を切っても機体を回すてこが働きません。尾翼を後ろへ、または車輪を前へ。`) });
   }
   // 車輪の並びが重心を挟んでいないと、駐機しているだけで前か後ろへ倒れる。
   // 機体座標では**機首が-Z**なので、zが小さいほど前。重心はz=0。

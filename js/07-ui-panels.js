@@ -654,20 +654,15 @@ function renderTypeSpecificFields(part) {
 
   } else if (part.type === 'control_surface') {
     const wingOptions = State.parts.filter(p => p.type === 'wing');
+    const attachedWing = controlSurfaceParentWing(part);
+    const pct = (v) => Math.round(v * 100);
+    const shape = attachedWing ? csResolveShape(part.props, attachedWing.props.corners) : null;
     container.innerHTML = `
       <div class="subgroup-title">可動翼面の設定</div>
       <div class="field">
         <label>種類</label>
         <select id="fKind">
           ${CONTROL_SURFACE_KINDS.map(k => `<option value="${k.value}" ${part.props.kind === k.value ? 'selected' : ''}>${k.label}</option>`).join('')}
-        </select>
-      </div>
-      <div class="field">
-        <label>可動軸（ローカル座標）</label>
-        <select id="fHingeAxis">
-          <option value="x" ${part.props.hingeAxis === 'x' ? 'selected' : ''}>X軸</option>
-          <option value="y" ${part.props.hingeAxis === 'y' ? 'selected' : ''}>Y軸</option>
-          <option value="z" ${part.props.hingeAxis === 'z' ? 'selected' : ''}>Z軸</option>
         </select>
       </div>
       <div class="row3" style="grid-template-columns:1fr 1fr;">
@@ -681,66 +676,114 @@ function renderTypeSpecificFields(part) {
         </div>
       </div>
       <div class="field" style="margin-top:12px;">
-        <label>所属する主翼／尾翼（任意）</label>
+        <label>所属する主翼／尾翼</label>
         <select id="fParentWing">
           <option value="">未設定</option>
           ${wingOptions.map(w => `<option value="${w.id}" ${part.props.parentWingId === w.id ? 'selected' : ''}>${escapeHtml(w.name)}（${WING_ROLES.find(r => r.value === w.props.role)?.label || '主翼'}）</option>`).join('')}
         </select>
       </div>
-      <div class="hint">可動軸はこのパーツのローカル座標系での回転軸です。ギズモを「回転」モードにして向きを確認できます。</div>
-
+      ${attachedWing ? `
       <div class="divider"></div>
-      <div class="subgroup-title">翼から自動配置</div>
+      <div class="subgroup-title">大きさ（翼から切り取る）</div>
       <div class="field">
-        <label>翼幅方向の位置（0=付け根 〜 1=翼端）</label>
+        <label>翼幅方向の範囲（0=付け根 〜 1=翼端）</label>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="fSpanS" min="0" max="1" step="0.01" value="${part.props.spanS}" style="flex:1;">
-          <span class="hint" id="spanSReadout" style="margin:0;min-width:38px;text-align:right;">${Math.round(part.props.spanS * 100)}%</span>
+          <span class="hint" style="margin:0;min-width:36px;">始まり</span>
+          <input type="range" id="fSpanFrom" min="0" max="1" step="0.01" value="${shape.spanFrom}" style="flex:1;">
+          <span class="hint" id="spanFromReadout" style="margin:0;min-width:38px;text-align:right;">${pct(shape.spanFrom)}%</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="hint" style="margin:0;min-width:36px;">終わり</span>
+          <input type="range" id="fSpanTo" min="0" max="1" step="0.01" value="${shape.spanTo}" style="flex:1;">
+          <span class="hint" id="spanToReadout" style="margin:0;min-width:38px;text-align:right;">${pct(shape.spanTo)}%</span>
         </div>
       </div>
-      <button class="btn-danger-outline" id="btnPlaceAtTrailingQuarter" style="color:var(--accent);border-color:var(--accent-dim);" ${!part.props.parentWingId ? 'disabled' : ''}>
-        後縁1/4の位置に自動配置
-      </button>
-      <div class="hint">${part.props.parentWingId ? '選んだ主翼／尾翼の、前縁から75%（後縁側1/4）の位置・上のスライダーで指定した翼幅位置に配置します。' : '先に「所属する主翼／尾翼」を選んでください。'}</div>
+      <div class="field">
+        <label>翼弦の割合（後縁から）</label>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="fChordFrac" min="${CS_CHORD_MIN}" max="${CS_CHORD_MAX}" step="0.01" value="${shape.chordFrac}" style="flex:1;">
+          <span class="hint" id="chordFracReadout" style="margin:0;min-width:38px;text-align:right;">${pct(shape.chordFrac)}%</span>
+        </div>
+      </div>
+      <div class="hint" id="csAreaReadout"></div>
+      <button class="btn-danger-outline" id="btnCsKindShape" style="color:var(--accent);border-color:var(--accent-dim);">この種類の標準の大きさにする</button>
+      <div class="hint">舵面は「${escapeHtml(attachedWing.name)}」の後ろ側を切り取った板で、<b>前の辺が蝶番（回転軸）</b>です。位置と向きは翼から決まり、翼の頂点や翼を動かすとついてきます。舵の効きは切り取った大きさ（覆う範囲と翼弦の割合）で決まります。翼の面積は舵面を含めた全体で、舵を切ったときに揚力が変わるのは舵面が覆う範囲だけです。</div>
+      ` : `
+      <div class="field">
+        <label>可動軸（ローカル座標）</label>
+        <select id="fHingeAxis">
+          <option value="x" ${part.props.hingeAxis === 'x' ? 'selected' : ''}>X軸</option>
+          <option value="y" ${part.props.hingeAxis === 'y' ? 'selected' : ''}>Y軸</option>
+          <option value="z" ${part.props.hingeAxis === 'z' ? 'selected' : ''}>Z軸</option>
+        </select>
+      </div>
+      <div class="hint">「所属する主翼／尾翼」を選ぶと、その翼の後ろ側を切り取った板になり、大きさ（翼幅の範囲と翼弦の割合）を決められます。未設定のままだと、いちばん近い翼に付いたものとして扱い、効きは種類ごとの標準の大きさになります。</div>
+      `}
 
       <div class="divider"></div>
       <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
     `;
+    const refreshAreaReadout = () => {
+      const el = document.getElementById('csAreaReadout');
+      const a = controlSurfaceAreas(part);
+      if (!el || !a) return;
+      el.innerHTML = `舵面 <b>${a.panelM2.toFixed(1)} m²</b> ／ 翼 ${a.wingM2.toFixed(1)} m²（固定部 ${(a.wingM2 - a.panelM2).toFixed(1)} m²）`
+        + `・覆う範囲 ${Math.round(a.stripFrac * 100)}%・効き τ=${a.tau.toFixed(2)}`
+        + `（舵を1°切ると、覆う範囲の翼が${a.tau.toFixed(2)}°迎角を増したのと同じ）`;
+    };
+    refreshAreaReadout();
+    const isKindDefault = (kind) => {
+      const d = CS_KIND_SHAPE[kind];
+      return d && Math.abs(part.props.spanFrom - d.spanFrom) < 0.005 && Math.abs(part.props.spanTo - d.spanTo) < 0.005
+        && Math.abs(part.props.chordFrac - d.chordFrac) < 0.005;
+    };
+    const applyKindShape = (kind) => {
+      const d = CS_KIND_SHAPE[kind] || CS_KIND_SHAPE.aileron;
+      part.props.spanFrom = d.spanFrom; part.props.spanTo = d.spanTo; part.props.chordFrac = d.chordFrac;
+    };
     document.getElementById('fKind').addEventListener('change', (e) => {
-      const oldKindDef = CONTROL_SURFACE_KINDS.find(k => k.value === part.props.kind);
-      const wasAtSuggested = oldKindDef && Math.abs(part.props.spanS - oldKindDef.suggestedSpanS) < 0.001;
+      // 大きさがまだ「前の種類の標準」のままなら、新しい種類の標準に合わせる（調整済みの大きさは尊重する）
+      const wasDefault = isKindDefault(part.props.kind);
       part.props.kind = e.target.value;
-      // 位置がまだ「前の種類の推奨値」のままなら、新しい種類の推奨値に合わせておく（ユーザーが既に調整済みの位置は尊重し変更しない）
-      if (wasAtSuggested) {
-        const newKindDef = CONTROL_SURFACE_KINDS.find(k => k.value === part.props.kind);
-        if (newKindDef) part.props.spanS = newKindDef.suggestedSpanS;
-      }
+      if (wasDefault) applyKindShape(part.props.kind);
+      syncControlSurfaceToWing(part);
       renderInspector();
     });
-    document.getElementById('fHingeAxis').addEventListener('change', (e) => { part.props.hingeAxis = e.target.value; });
+    const hingeSel = document.getElementById('fHingeAxis');
+    if (hingeSel) hingeSel.addEventListener('change', (e) => { part.props.hingeAxis = e.target.value; });
     document.getElementById('fMinDeg').addEventListener('change', (e) => { part.props.minDeg = parseFloat(e.target.value) || 0; });
     document.getElementById('fMaxDeg').addEventListener('change', (e) => { part.props.maxDeg = parseFloat(e.target.value) || 0; });
     document.getElementById('fParentWing').addEventListener('change', (e) => {
       part.props.parentWingId = e.target.value || null;
-      renderInspector(); // ボタンの有効/無効状態を更新するため再描画
+      if (part.props.parentWingId && !Number.isFinite(part.props.spanFrom)) applyKindShape(part.props.kind);
+      syncControlSurfaceToWing(part);
+      renderInspector();
     });
-    document.getElementById('fSpanS').addEventListener('input', (e) => {
-      part.props.spanS = parseFloat(e.target.value);
-      document.getElementById('spanSReadout').textContent = Math.round(part.props.spanS * 100) + '%';
-    });
-    const btnPlace = document.getElementById('btnPlaceAtTrailingQuarter');
-    if (btnPlace) {
-      btnPlace.addEventListener('click', () => {
-        const wingPart = State.parts.find(p => p.id === part.props.parentWingId);
-        if (!wingPart) {
-          showToast('所属する主翼／尾翼を選んでください', true);
-          return;
-        }
-        placeControlSurfaceAtTrailingQuarter(part, wingPart, part.props.spanS);
-        renderInspector();
-        showToast(`「${wingPart.name}」の後縁1/4の位置に配置しました`);
+    const bindShapeSlider = (id, readoutId, key) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('input', (e) => {
+        let v = parseFloat(e.target.value);
+        // 範囲は少なくとも2%の幅を残す（幅0の舵面は効かないうえ、形が作れない）
+        if (key === 'spanFrom') v = Math.min(v, part.props.spanTo - 0.02);
+        if (key === 'spanTo') v = Math.max(v, part.props.spanFrom + 0.02);
+        v = Math.min(Math.max(v, key === 'chordFrac' ? CS_CHORD_MIN : 0), key === 'chordFrac' ? CS_CHORD_MAX : 1);
+        part.props[key] = v;
+        e.target.value = v;
+        document.getElementById(readoutId).textContent = Math.round(v * 100) + '%';
+        syncControlSurfaceToWing(part);
+        refreshAreaReadout();
       });
-    }
+    };
+    bindShapeSlider('fSpanFrom', 'spanFromReadout', 'spanFrom');
+    bindShapeSlider('fSpanTo', 'spanToReadout', 'spanTo');
+    bindShapeSlider('fChordFrac', 'chordFracReadout', 'chordFrac');
+    const btnKindShape = document.getElementById('btnCsKindShape');
+    if (btnKindShape) btnKindShape.addEventListener('click', () => {
+      applyKindShape(part.props.kind);
+      syncControlSurfaceToWing(part);
+      renderInspector();
+    });
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
 
   } else if (part.type === 'light') {

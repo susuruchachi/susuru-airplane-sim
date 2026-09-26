@@ -4350,7 +4350,14 @@ function autopilotFlight(opts) {
     if (flip) { mx.rotation.y = Math.PI; orient.rotation.y = Math.PI; }
     const px = ctx.buildPartProxies(cfg, mx, body, 10);
     const kinds = cfg.parts.filter((p) => p.type === 'control_surface').map((p) => p.props.kind);
-    const te = (sf) => { sf.obj.updateMatrixWorld(true); return sf.obj.localToWorld(sf.obj.children[0].position.clone().multiplyScalar(2)); };
+    // 後縁寄りの点：板の中心を蝶番（部品の原点）から2倍遠くへ（翼から切り取った板は原点が蝶番、小さな板は形をずらしてある）
+    const te = (sf) => {
+      sf.obj.updateMatrixWorld(true);
+      const mesh = sf.obj.children[0];
+      mesh.geometry.computeBoundingBox();
+      const c = mesh.geometry.boundingBox.getCenter(new THREE.Vector3()).add(mesh.position);
+      return sf.obj.localToWorld(c.multiplyScalar(2));
+    };
     const base = px.surfaces.map(te);
     const move = (c) => {
       for (const sf of px.surfaces) sf.angle = 0;
@@ -4389,6 +4396,78 @@ function autopilotFlight(opts) {
   const root = px.gears[0].root; root.position.set(0, 0, 0); root.rotation.set(0, 0, 0); root.scale.set(1, 1, 1);
   const vis = tipY();
   check(Math.abs(vis - phys.y) < 1e-6, '仮モデルの脚の先端は、接地に使う点と同じ高さ', `${vis.toFixed(4)} / ${phys.y.toFixed(4)}`);
+}
+
+// --- 舵面の大きさ（親の翼から切り取る。09e-part-proxy.js の csPanel）-------------------------
+// 舵面は親の翼の後ろを切り取った板で、効きは「覆う範囲の面積比 × 翼弦比で決まるフラップ効率 τ」。
+// 大きさを持っていない旧データは、これまでと同じ効きになること。
+{
+  console.log('\n(舵面) 大きさで効きが決まる');
+  const DEG = Math.PI / 180;
+  const gainsOf = (cfg) => {
+    const m = buildAircraftModel(cfg);
+    const sum = (role, key) => m.surfaces.filter((s) => s.role === role).reduce((a, s) => a + Math.abs(s[key]), 0);
+    return { m, pitch: sum('htail', 'pitch'), roll: sum('main', 'roll'), yaw: sum('vtail', 'yaw'), flap: sum('main', 'flap') };
+  };
+  // (a) 旧データ（大きさ無し）：これまでの式（種類ごとの固定の割合）と同じ
+  const legacyCfg = defaultAircraftConfig();
+  const cs = (cfg, kind) => cfg.parts.filter((p) => p.type === 'control_surface' && p.props.kind === kind);
+  for (const p of legacyCfg.parts) if (p.type === 'control_surface') { delete p.props.spanFrom; delete p.props.spanTo; delete p.props.chordFrac; }
+  const L = gainsOf(legacyCfg);
+  const el = cs(legacyCfg, 'elevator')[0], ai = cs(legacyCfg, 'aileron')[0];
+  const deg = (p) => Math.max(Math.abs(p.props.maxDeg), Math.abs(p.props.minDeg));
+  // 昇降舵1枚ぶんが尾翼まるごとを 舵角×0.55 ひねる（左右でならしても合計は変わらない）
+  const wantPitch = deg(el) * DEG * 0.55 * cs(legacyCfg, 'elevator').length;
+  note('舵面：旧データの効き', `昇降舵 ${(L.pitch / DEG).toFixed(2)}°（これまでの式 ${(wantPitch / DEG).toFixed(2)}°） ／ 補助翼 ${(L.roll / DEG).toFixed(2)}°`);
+  check(Math.abs(L.pitch - wantPitch) < 1e-3, '舵面：大きさの無い旧データは、これまでと同じ効き（昇降舵＝尾翼の全面）',
+    `${(L.pitch / DEG).toFixed(3)} / ${(wantPitch / DEG).toFixed(3)}°`);
+  const aiOld = deg(ai) * DEG * 0.55 * 0.20 * cs(legacyCfg, 'aileron').length;
+  check(Math.abs(L.roll - aiOld) / aiOld < 0.02, '舵面：大きさの無い旧データの補助翼は、これまでと同じ効き（翼の20%）',
+    `${(L.roll / DEG).toFixed(3)} / ${(aiOld / DEG).toFixed(3)}°`);
+  // (b) 昇降舵を半分の幅にすると効きも（覆う面積の比で）減る。翼弦を大きくすると増える（τの比）
+  const withShape = (kind, shape) => {
+    const cfg = defaultAircraftConfig();
+    for (const p of cs(cfg, kind)) Object.assign(p.props, shape);
+    return gainsOf(cfg);
+  };
+  // 舵角は±10°に抑えて比べる（大きく切ると、1枚の翼が曲げられる上限＝実舵角30°ぶんで頭打ちになる）
+  const small = { minDeg: -10, maxDeg: 10 };
+  const full25 = withShape('elevator', Object.assign({ spanFrom: 0, spanTo: 1, chordFrac: 0.25 }, small));
+  const half25 = withShape('elevator', Object.assign({ spanFrom: 0, spanTo: 0.5, chordFrac: 0.25 }, small));
+  const full50 = withShape('elevator', Object.assign({ spanFrom: 0, spanTo: 1, chordFrac: 0.5 }, small));
+  const tauRatio = ctx.csFlapTau(0.5) / ctx.csFlapTau(0.25);
+  note('舵面：昇降舵の大きさと効き', `全幅・翼弦25% ${(full25.pitch / DEG).toFixed(2)}° ／ 半分の幅 ${(half25.pitch / DEG).toFixed(2)}° ／ 翼弦50% ${(full50.pitch / DEG).toFixed(2)}°`);
+  check(half25.pitch < full25.pitch * 0.65 && half25.pitch > full25.pitch * 0.35, '舵面：昇降舵の幅を半分にすると、効きもおよそ半分',
+    (half25.pitch / full25.pitch).toFixed(3));
+  check(Math.abs(full50.pitch / full25.pitch - tauRatio) < 1e-3, '舵面：翼弦を大きくすると、フラップ効率の比だけ効きが増える',
+    `${(full50.pitch / full25.pitch).toFixed(3)} / τ比 ${tauRatio.toFixed(3)}`);
+  // (c) フラップ：大きいフラップほど効く（以前はどんな大きさでも同じ0.35だった）
+  const flapBig = withShape('flap', { spanFrom: 0.05, spanTo: 0.7, chordFrac: 0.3 });
+  const flapSmall = withShape('flap', { spanFrom: 0.05, spanTo: 0.3, chordFrac: 0.15 });
+  note('舵面：フラップの大きさ', `大（翼幅5〜70%・翼弦30%） ${(flapBig.flap / DEG).toFixed(2)}° ／ 小（5〜30%・15%） ${(flapSmall.flap / DEG).toFixed(2)}°`);
+  check(flapBig.flap > flapSmall.flap * 2, '舵面：大きいフラップほど効く', `${(flapBig.flap / flapSmall.flap).toFixed(2)}倍`);
+  // (d) 形：長方形の翼から翼弦30%を切り取ると、舵面の面積は翼の30%で、固定部は残り
+  const rect = { rootLeading: { x: 0, y: 0, z: -1 }, rootTrailing: { x: 0, y: 0, z: 1 }, tipLeading: { x: 5, y: 0, z: -1 }, tipTrailing: { x: 5, y: 0, z: 1 } };
+  const pn = ctx.csPanel(rect, { spanFrom: 0, spanTo: 1, chordFrac: 0.3 });
+  check(Math.abs(pn.panelArea - 3) < 1e-9 && Math.abs(pn.wingArea - 10) < 1e-9 && Math.abs(pn.hingeRoot.z - 0.4) < 1e-9,
+    '舵面：翼弦30%の舵面は翼の30%を切り取り、蝶番は後縁から30%の線', `舵面${pn.panelArea.toFixed(2)} / 翼${pn.wingArea.toFixed(2)} / 蝶番z${pn.hingeRoot.z.toFixed(2)}`);
+  // (e) 仮モデル：翼から切り取った舵面は、蝶番（前の辺）のまわりに回る——蝶番は動かず後縁だけが動く
+  const cfgP = defaultAircraftConfig();
+  const elP = cs(cfgP, 'elevator')[0];
+  elP.props.proxyInFlight = true; Object.assign(elP.props, { spanFrom: 0, spanTo: 1, chordFrac: 0.3 });
+  const body = new THREE.Group(), mx = new THREE.Group(); body.add(mx);
+  const px = ctx.buildPartProxies(cfgP, mx, body, 10);
+  const sf = px.surfaces[0];
+  const wingP = cfgP.parts.find((p) => p.id === elP.props.parentWingId);
+  const panelP = ctx.csPanel(wingP.props.corners, ctx.csResolveShape(elP.props, wingP.props.corners));
+  const hingeRootLocal = new THREE.Vector3(panelP.hingeRoot.x - panelP.hingeMid.x, panelP.hingeRoot.y - panelP.hingeMid.y, panelP.hingeRoot.z - panelP.hingeMid.z);
+  const trailLocal = new THREE.Vector3(panelP.trailRoot.x - panelP.hingeMid.x, panelP.trailRoot.y - panelP.hingeMid.y, panelP.trailRoot.z - panelP.hingeMid.z);
+  const w = (v) => { sf.obj.updateMatrixWorld(true); return sf.obj.localToWorld(v.clone()); };
+  const h0 = w(hingeRootLocal), t0 = w(trailLocal);
+  for (let i = 0; i < 60; i++) ctx.updatePartProxies({ proxies: px }, { pitch: 1, gearDown: true }, 1 / 60);
+  const h1 = w(hingeRootLocal), t1 = w(trailLocal);
+  note('仮モデル：翼から切り取った昇降舵', `蝶番の動き ${h1.distanceTo(h0).toFixed(4)} ／ 後縁の上下 ${(t1.y - t0.y).toFixed(3)}`);
+  check(h1.distanceTo(h0) < 1e-6 && t1.y - t0.y > 0.01, '仮モデル：切り取った舵面は前の辺（蝶番）のまわりに回る', `${h1.distanceTo(h0).toExponential(1)} / ${(t1.y - t0.y).toFixed(3)}`);
 }
 
 // --- 自動操縦：標高の高い空港から離陸しても、目的地へ旋回する -----------------------------
