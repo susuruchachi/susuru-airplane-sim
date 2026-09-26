@@ -623,7 +623,9 @@ const AP_FLAP_RAMP_M = 5000;
 // 4まで上げると今度は行き過ぎて19.4Gに戻る。
 const AP_PITCH_VS_KD = 2;
 const AP_FLARE_PITCH_MAX = 10;  // 引き起こしで許す機首上げの上限(°)
-const AP_FLARE_IDLE_AGL_M = 3;   // 引き起こしで出力を絞りはじめる対地高度(m)
+const AP_FLARE_THR_MAX_X = 1.5; // 引き起こしで足してよい出力（入口の出力の何倍まで）
+// 引き起こしの指示ピッチから、荷重倍数の1Gを超えたぶん1Gあたりこれだけ引く(°)（上下の加速度で減衰させる）
+const AP_FLARE_N_DAMP_DEG = 4;
 const AP_APPR_ACC_K = 1;        // 最終進入：加速度1Gあたり差し引く出力
 const AP_APPR_ACC_TAU = 0.5;    // 最終進入：加速度をならす時定数(秒)
 // 着陸滑走で跳ねて浮いたときに狙う機首上げ(°)。0にすると前輪から突っ込む
@@ -1550,6 +1552,10 @@ function createAutopilotState() {
     apprThr: undefined,     // 最終進入の出力の積分（絞るぶんとは別に持つ）
     apprPrevV: undefined,   // 最終進入：前のコマの対気速度（加速度を出す）
     apprAcc: 0,             // 最終進入：ならした加速度(m/s²)
+    flareThr: undefined,    // 引き起こし：出力の積分
+    flareThrEntry: undefined, // 引き起こし：入口の出力（足してよい上限の基準）
+    flarePrevV: undefined,  // 引き起こし：前のコマの対気速度
+    flareAcc: 0,            // 引き起こし：ならした加速度(m/s²)
     apprFlapMax: undefined, // 最終進入で下ろしていいフラップの上限（トリムの余裕で決まる）
     // 垂直エンジンの輪の減衰に使う、上下の加速度（apVtolThrottleForVs）
     vtolLastVs: undefined, vtolAccel: 0,
@@ -1942,6 +1948,7 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     if (phase !== 'vtol_hover' && phase !== 'vtol_approach') ap.vtolAccI = 0;
     ap.gndPrevHdg = undefined; // 地上の操向の積分・すべり角は段ごとに取り直す
     if (phase !== 'approach') { ap.apprThr = undefined; ap.apprFlapMax = undefined; ap.apprPrevV = undefined; ap.apprAcc = 0; }
+    if (phase !== 'flare') { ap.flareThr = undefined; ap.flareThrEntry = undefined; ap.flarePrevV = undefined; ap.flareAcc = 0; }
     // やり直すときは、FAFへまっすぐ戻るか入口を経由するかを決め直す
     if (phase === 'goaround') { ap.navMode = undefined; ap.gaThr = undefined; }
     ap.phase = phase;
@@ -3027,18 +3034,35 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     controls.yaw = state.altitudeAglM < AP_DECRAB_AGL_M
       ? apClamp(apWrap180(plan.heading - state.headingDeg) * AP_STEER_KP * 2, -1, 1)
       : apRudderForCoordination(state);
-    // **出力は接地の直前（AP_FLARE_IDLE_AGL_M）まで進入のまま保ち、そこから絞る**。引き起こしの入口で
-    // 絞っていたので、迎角を取ると抗力の大きい機体は引き起こしのあいだに速度を失い、機首を上げたぶんの
-    // 揚力が速度の低下で消えた——実測で Concorde（縦横比1.7のデルタ翼）は対地14mから173→159ktまで
-    // 落ち、ピッチを2°上げても沈下は-1000→-855fpmしか減らず -539fpm で接地した（保つと -281fpm）。
-    // 実機の Concorde も出力を戻すのは接地の直前。
-    // **保つのは、指示より速く沈んでいる（沈下を止めきれていない）ときだけ**。沈下が止まって浮いているのに
-    // 保つと、そのまま流れる——練習機が丘陵の970mの平地で、帯の中心から867m先まで流れた。
-    // （速度で分けると、Concorde も引き起こしの入口では進入速度をわずかに上回るので最初に絞ってしまい、
-    // -715〜-828fpm に戻った。）ap.vsCmd は前のコマの指示
+    // **沈下を止めきれていないあいだは、出力で進入速度を保つ**（接地まで）。引き起こしの入口で絞っていたので、
+    // 迎角を取ると抗力の大きい機体は引き起こしのあいだに速度を失い、機首を上げたぶんの揚力が速度の低下で消えた
+    // ——実測で Concorde（縦横比1.7のデルタ翼）は対地14mから173→159ktまで落ち、ピッチを2°上げても沈下は
+    // -1000→-855fpmしか減らず -539fpm で接地した。実機の Concorde も出力を戻すのは接地の直前。
+    // 出力を保つだけでは足りない路線があった（入口で-1026fpmと深く、出力0.32のまま176→166ktへ落ちて-530fpm）
+    // ので、進入速度を割ったら足す（最終進入の速度の輪と同じ強さ AP_THR_KP_REL_UP）。以前は対地3mで必ず
+    // 絞っていたが、そこでも速度を失って -300fpm 前後で接地していた（外して Concorde 80km -337→-216fpm）。
+    // **沈下が指示どおり止まったら絞る**。止まって浮いているのに保つと、そのまま流れる——練習機が丘陵の
+    // 970mの平地で、帯の中心から867m先まで流れた。（速度で分けると、Concorde も引き起こしの入口では進入速度を
+    // わずかに上回るので最初に絞ってしまい、-715〜-828fpm に戻った。）ap.vsCmd は前のコマの指示
     const sinkingTooFast = ap.vsCmd !== undefined && state.verticalSpeed < ap.vsCmd;
-    if (state.altitudeAglM < AP_FLARE_IDLE_AGL_M || !sinkingTooFast) {
-      controls.throttle = Math.max(controls.throttle - dt * 0.8, 0);
+    // 速度の輪は最終進入と同じ形（積分＋加速度の減衰。速ければ絞る）。積分だけで足すと、推力の桁外れな機体は
+    // 出力0⇔1を往復して速度が54⇔90ktで揺れ、浮き沈みを繰り返して降りられなかった（推力8倍の練習機が平地の
+    // 帯の9km手前で止まり、マッハ3級・6級は引き起こしのまま4000秒）
+    const acc = ap.flarePrevV === undefined ? 0 : (state.airspeed - ap.flarePrevV) / Math.max(dt, 1e-3);
+    ap.flarePrevV = state.airspeed;
+    ap.flareAcc = (ap.flareAcc || 0) + (acc - (ap.flareAcc || 0)) * Math.min(dt / AP_APPR_ACC_TAU, 1);
+    // **足してよいのは、引き起こしの入口の出力の AP_FLARE_THR_MAX_X 倍まで**。最終進入でほとんど出力を
+    // 使っていなかった機体（推力8倍の練習機は入口0.06）は、出力0.64を1秒入れただけで+20kt加速して浮いた。
+    // Concorde（入口0.3〜0.5）のように、もともと出力で速度を支えていた機体だけが足せる
+    if (ap.flareThr === undefined) { ap.flareThr = controls.throttle; ap.flareThrEntry = controls.throttle; }
+    if (!sinkingTooFast) {
+      ap.flareThr = Math.max(ap.flareThr - dt * 0.8, 0);
+      controls.throttle = ap.flareThr;
+    } else {
+      const errV = (spd.approach - state.airspeed) / Math.max(spd.approach, 1);
+      const cap = Math.min(ap.flareThrEntry * AP_FLARE_THR_MAX_X, 1);
+      ap.flareThr = apClamp(ap.flareThr + errV * (errV > 0 ? AP_THR_KP_REL_UP : AP_THR_KP_REL) * dt, 0, cap);
+      controls.throttle = apClamp(ap.flareThr - AP_APPR_ACC_K * ap.flareAcc / 9.80665, 0, cap);
     }
 
     // 沈下率は残りの高さに比例させる。一定の沈下率にすると、速い機体ほど
@@ -3061,7 +3085,13 @@ function apStepFull(model, state, controls, ap, spd, dt, env) {
     // 張り付き、1°ぶんの小さな舵でしか機首を下げられない——実測でTB1（静安定10%・420kt）が
     // 引き起こしでピッチ7.2°のまま+1300fpmで対地68mまで浮き、そこから-2310fpm・23Gで落ちた。
     const floor = state.velocity.y > 0 ? -Infinity : Math.min(state.pitchDeg - 1, AP_FLARE_PITCH_MAX);
-    const want = apClamp(apPitchForVs(state, ap.vsCmd, -3, AP_FLARE_PITCH_MAX),
+    // **上下の加速度（荷重倍数）で減衰させる**。速い機体ほど、同じ1°の機首上げで経路が大きく曲がる。
+    // 昇降率のずれだけで指示を決めると、沈下が止まる前に機首が上がりすぎ、経路の曲がりにつられて
+    // 機首がさらに上がって浮き上がる——実測で TB1新（390kt）が対地27mから1.37Gで引き起こし、対地6mで
+    // 沈下が止まったあとも +445fpm で10mまで浮いて、また -743fpm で落ちた。荷重倍数の1Gを超えたぶん
+    // AP_FLARE_N_DAMP_DEG°/G を指示から引くと -444fpm（旧TB1 -984→-593fpm）。8°/G では旧TB1が荒れた
+    const nDamp = AP_FLARE_N_DAMP_DEG * ((state.loadFactor || 1) - 1);
+    const want = apClamp(apPitchForVs(state, ap.vsCmd, -3, AP_FLARE_PITCH_MAX) - nDamp,
       floor, AP_FLARE_PITCH_MAX);
     controls.pitch = apClamp(apElevatorForPitch(state, controls, want, dt, spd, ap)
       + apGroundEffectElevator(model, state), -1, 1);
