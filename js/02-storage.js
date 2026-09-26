@@ -82,12 +82,13 @@ function serializeParts() {
   }));
 }
 
-async function saveCurrentConfig(configName) {
+// いま開いている機体を、IndexedDB に入れる形（3Dモデル本体 modelBuffer 付き）にまとめる
+function buildCurrentRecord(configName) {
   if (!State.model.fileBuffer) {
     throw new Error('モデルが読み込まれていません');
   }
   const root = State.model.root;
-  const record = {
+  return {
     name: configName,
     savedAt: Date.now(),
     modelName: State.model.name,
@@ -103,54 +104,37 @@ async function saveCurrentConfig(configName) {
     modelMaxSpeedValue: State.model.maxSpeedValue,
     modelMaxSpeedUnit: State.model.maxSpeedUnit,
     modelMeshOffset: { ...State.model.meshOffset },
+    modelBoneAxisOverrides: { ...State.model.boneAxisOverrides },
   };
+}
+
+async function saveCurrentConfig(configName) {
+  const record = buildCurrentRecord(configName);
   await dbPut(STORE_CONFIGS, record);
   await dbPut(STORE_META, { key: 'lastConfigName', value: configName });
   State.configName = configName;
   return record;
 }
 
-// 3Dモデル本体（modelBuffer）を含まない、デバイス間で持ち運ぶ用の設定データを作る
-// ファイルサイズを小さく保ち、モデルのライセンス上の懸念（バイナリ再配布）も避けるための設計
-function buildPortableConfig(configName) {
-  if (!State.model.root) {
-    throw new Error('モデルが読み込まれていません');
-  }
-  const root = State.model.root;
-  return {
-    formatVersion: 1, // 将来のインポート側での互換性判定用
-    exportedAppVersion: APP_VERSION,
-    name: configName,
-    savedAt: Date.now(),
-    modelNameHint: State.model.name, // 参考情報。インポート時のモデル一致チェックには使わない（別モデルへの流用もできるように）
-    parts: serializeParts(),
-    cg: { ...State.cg.position },
-    modelTransform: {
-      rotation: { x: root.rotation.x, y: root.rotation.y, z: root.rotation.z },
-      scale: { x: root.scale.x, y: root.scale.y, z: root.scale.z },
-    },
-    modelWeightKg: State.model.weightKg,
-    modelMaxSpeedValue: State.model.maxSpeedValue,
-    modelMaxSpeedUnit: State.model.maxSpeedUnit,
-    modelMeshOffset: { ...State.model.meshOffset },
-  };
+// いま開いている機体を、設定と3Dモデルの入った1つのZIPとしてダウンロードさせる（js/02b-pack.js の形）。
+// 中の config.json は、それだけで「設定だけの .json」としても読み込める
+async function downloadCurrentAircraftZip(configName) {
+  const record = buildCurrentRecord(configName);
+  const zip = await buildPackZip([record], null);
+  packDownload(zip, `${packSafeName(configName, 'flight-sim-config')}.zip`);
+  return zip.length;
 }
 
-// portable configをファイルとしてダウンロードさせる（3Dモデル本体は含まない）
-function downloadPortableConfig(configName) {
-  const data = buildPortableConfig(configName);
-  const json = JSON.stringify(data, null, 2);
-  const blob = new Blob([json], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const safeName = (configName || 'flight-sim-config').replace(/[\\/:*?"<>|]/g, '_');
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${safeName}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  return data;
+// 保存済みの機体すべてと、飛行画面の設定（この端末に保存されているもの）を1つのZIPにする
+async function downloadAllSavedZip() {
+  const records = (await listAllConfigs()).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+  const env = packStoredEnv();
+  if (!records.length && !env) return null;
+  const zip = await buildPackZip(records, env);
+  const d = new Date();
+  const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  packDownload(zip, `flight-sim-all-${ymd}.zip`);
+  return { count: records.length, env: !!env, bytes: zip.length };
 }
 
 // ダウンロードされたportable configファイル(JSON)を読み込み、パース済みオブジェクトを返す

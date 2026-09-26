@@ -18,6 +18,7 @@ function renderModelSettingsPanel() {
     z: THREE.MathUtils.radToDeg(root.rotation.z),
   };
   const scl = root.scale;
+  const boneCandidates = typeof listBoneAxisCandidates === 'function' ? listBoneAxisCandidates(root) : [];
 
   container.innerHTML = `
     <div class="subgroup-title">原点の調整</div>
@@ -69,6 +70,10 @@ function renderModelSettingsPanel() {
       </div>
     </div>
     <div class="hint" id="maxSpeedConverted"></div>
+
+    ${boneAxisSectionHtml(boneCandidates)}
+
+    ${typeof engineFleetPanelHtml === 'function' ? engineFleetPanelHtml() : ''}
   `;
 
   // 軸選択の初期値を推定値にし、各軸の実寸も表示して判断材料にする
@@ -81,6 +86,15 @@ function renderModelSettingsPanel() {
     document.getElementById('modelSizeReadout').textContent =
       `寸法 X ${s.x.toFixed(1)} / Y ${s.y.toFixed(1)} / Z ${s.z.toFixed(1)}（推定: 左右は${guessedAxis.toUpperCase()}軸）`;
   }
+
+  container.querySelectorAll('.fBoneAxis').forEach((sel) => {
+    const name = sel.dataset.bone;
+    sel.value = State.model.boneAxisOverrides[name] || '';
+    sel.addEventListener('change', () => {
+      if (sel.value) State.model.boneAxisOverrides[name] = sel.value;
+      else delete State.model.boneAxisOverrides[name];
+    });
+  });
 
   document.getElementById('btnCenterModelOnAxis').addEventListener('click', () => {
     // パーツは動かさないため、既に配置済みの場合は相対位置がずれる旨を確認する
@@ -151,6 +165,32 @@ function renderModelSettingsPanel() {
     updateSpeedReadout();
   });
   updateSpeedReadout();
+
+  if (typeof bindEngineFleetPanel === 'function') bindEngineFleetPanel();
+}
+
+// GLBのボーンで動く舵（09c-aircraft-bones.js が検出した候補）の、回転軸の手動指定欄。
+// 候補が無い機体（ボーンの無いモデル・内蔵機）では何も出さない
+const BONE_ROLE_LABELS = { flap: 'フラップ', spoiler: 'スポイラー／エアブレーキ', attitude: '姿勢の舵（ピッチ/ロール/ヨー）' };
+const BONE_AXIS_LABELS = { x: 'X軸', y: 'Y軸', z: 'Z軸' };
+function boneAxisSectionHtml(candidates) {
+  if (!candidates || !candidates.length) return '';
+  const rows = candidates.map((c) => `
+    <div class="field">
+      <label>${escapeHtml(c.name)}<span style="color:var(--text-dim);"> ・ ${BONE_ROLE_LABELS[c.role] || c.role}</span></label>
+      <select class="fBoneAxis" data-bone="${escapeHtml(c.name)}">
+        <option value="">自動判定${c.autoAxis ? `（いまは${BONE_AXIS_LABELS[c.autoAxis]}）` : '（決められず）'}</option>
+        <option value="x">X軸に固定</option>
+        <option value="y">Y軸に固定</option>
+        <option value="z">Z軸に固定</option>
+      </select>
+    </div>
+  `).join('');
+  return `
+    <div class="subgroup-title">舵のボーン（回転軸の指定）</div>
+    <div class="hint" style="margin-bottom:8px;">GLBに仕込まれたボーンで動く舵面の一覧です。ふだんは板の形と試し動作から回転軸を自動で決めますが、輪郭が歪む・変な向きに振れるなど自動判定が合わないときは、ここでボーンのローカルX/Y/Z軸を指定して固定できます。</div>
+    ${rows}
+  `;
 }
 
 // 入力された最高速度を、もう片方の単位に目安換算して表示する（音速は高度により変わるため海面高度の目安値を使用）
@@ -225,6 +265,8 @@ function escapeHtml(s) {
 function renderCgInspector(el) {
   const mainWings = State.parts.filter(p => p.type === 'wing' && p.props.role === 'main');
   const hasLeftRight = mainWings.some(w => w.props.side === 'left') && mainWings.some(w => w.props.side === 'right');
+  const hasRotor = typeof cgRotorEngines === 'function' && cgRotorEngines().length > 0;
+  const hasFwdEngine = typeof cgForwardEngines === 'function' && cgForwardEngines().length > 0;
 
   el.innerHTML = `
     <div class="section-title">プロパティ — 重心（原点）</div>
@@ -237,16 +279,37 @@ function renderCgInspector(el) {
 
     <div class="divider"></div>
     <div class="subgroup-title">主翼から決定</div>
-    <div class="hint" style="margin-bottom:8px;">左翼・右翼として登録された主翼のX位置から、左右対称の中心をXに反映します（Y・Zは変更しません）。</div>
+    <div class="hint" style="margin-bottom:8px;">主翼の空力中心（前縁から1/4翼弦）へ重心を合わせます。X＝左右主翼の中心線、Z＝前後、Y＝主翼の面の高さ。前後がずれていると飛ばしたときに勝手に機首が上がり下がりします。</div>
     <button class="btn-danger-outline" id="btnCgFromWings" style="color:var(--accent);border-color:var(--accent-dim);">
       主翼から決定
     </button>
     ${!hasLeftRight ? '<div class="hint" style="color:var(--warn);margin-top:8px;">左翼・右翼それぞれ1つ以上必要です</div>' : ''}
+    ${hasFwdEngine ? `
+    <div class="divider"></div>
+    <div class="subgroup-title">主翼と推力線から決定</div>
+    <div class="hint" style="margin-bottom:8px;">前後・左右は主翼の空力中心、上下は前へ押すエンジンの推力線の上に重心を合わせます。重心が推力線より上か下にあると、出力を変えるたびに機首が上下します。エンジンを傾けて付けていれば、その傾きも入ります（垂直離陸用とヘリのローターは数えません）。</div>
+    <button class="btn-danger-outline" id="btnCgFromWingsThrust" style="color:var(--accent);border-color:var(--accent-dim);">
+      主翼と推力線から決定
+    </button>` : ''}
+    ${hasRotor ? `
+    <div class="divider"></div>
+    <div class="subgroup-title">ローターから決定（ヘリ）</div>
+    <div class="hint" style="margin-bottom:8px;">ヘリは主翼を持たないので、重心をローターの回転軸の真下へ合わせます。X・Z＝ローターの真下、Y＝ローターより下（上にあればローターの直径の2割だけ下）。軸からずれていると、ローターの推力で機体が傾いて姿勢を保てません。</div>
+    <button class="btn-danger-outline" id="btnCgFromRotors" style="color:var(--accent);border-color:var(--accent-dim);">
+      ローターから決定
+    </button>` : ''}
+    ${typeof pbBalancePanelHtml === 'function' ? pbBalancePanelHtml() : ''}
   `;
 
   bindXyzFields('cg', State.cg.position, () => applyCgToGizmo());
 
   document.getElementById('btnCgFromWings').addEventListener('click', () => setCgFromWings());
+  const btnThrust = document.getElementById('btnCgFromWingsThrust');
+  if (btnThrust) btnThrust.addEventListener('click', () => setCgFromWingsAndThrust());
+  const btnRotor = document.getElementById('btnCgFromRotors');
+  if (btnRotor) btnRotor.addEventListener('click', () => setCgFromRotors());
+  const btnPb = document.getElementById('btnPitchBalance');
+  if (btnPb) btnPb.addEventListener('click', () => balancePitchTrim());
 }
 
 function renderInspector() {
@@ -292,6 +355,18 @@ function renderInspector() {
     <div class="divider"></div>
     <div id="typeSpecificFields"></div>
 
+    ${PART_PROXY_TYPES.includes(part.type) ? `
+    <div class="divider"></div>
+    <div class="toggle-row">
+      <label>飛行画面でも仮モデルを出す</label>
+      <label class="switch">
+        <input type="checkbox" id="fProxyInFlight" ${part.props.proxyInFlight ? 'checked' : ''}>
+        <span class="slider-toggle"></span>
+      </label>
+    </div>
+    <div class="hint">この画面に出ている仮の形（${part.type === 'landing_gear' ? '銀色の脚' : part.type === 'engine' ? 'エンジンの筒' : part.type === 'wing' ? '翼の板' : '舵面の板'}）を、飛行画面の機体にも出します。機体のモデルにこの部品が作り込まれていないときに使ってください。${part.type === 'landing_gear' ? '脚の上げ下げ（G）で格納・展開します。' : part.type === 'control_surface' ? '操縦に合わせて動きます。' : ''}見た目だけで、飛び方は変わりません。</div>
+    ` : ''}
+
     <div class="divider"></div>
     <button class="btn-danger-outline" id="btnDeletePart">このパーツを削除</button>
   `;
@@ -306,6 +381,9 @@ function renderInspector() {
   bindXyzFields('scl', part.scale, () => applyPartToGizmo(part));
 
   renderTypeSpecificFields(part);
+
+  const proxyBox = document.getElementById('fProxyInFlight');
+  if (proxyBox) proxyBox.addEventListener('change', (e) => { part.props.proxyInFlight = e.target.checked; });
 
   document.getElementById('btnDeletePart').addEventListener('click', () => removePart(part.id));
 }
@@ -373,6 +451,35 @@ function renderTypeSpecificFields(part) {
         <input type="text" inputmode="decimal" id="fThrust" value="${part.props.thrustKgf}">
       </div>
       <div class="field">
+        <label>種別</label>
+        <select id="fEngineKind">
+          <option value="prop" ${(part.props.engineKind || 'prop') === 'prop' ? 'selected' : ''}>プロペラ</option>
+          <option value="jet" ${part.props.engineKind === 'jet' ? 'selected' : ''}>ジェット</option>
+          <option value="jet_ab" ${part.props.engineKind === 'jet_ab' ? 'selected' : ''}>ジェット（アフターバーナー付き）</option>
+          <option value="rocket" ${part.props.engineKind === 'rocket' ? 'selected' : ''}>ロケット</option>
+          <option value="rotor" ${part.props.engineKind === 'rotor' ? 'selected' : ''}>ヘリのローター</option>
+        </select>
+      </div>
+      ${part.props.engineKind === 'rotor' ? `
+      <div class="field">
+        <label>ローターの直径（m／0で自動）</label>
+        <input type="text" inputmode="decimal" id="fRotorDiameter" value="${part.props.rotorDiameter || 0}">
+      </div>
+      <div class="hint"><b>ヘリコプター</b>になります。回転軸は上向き（Y軸）に固定し、推力は機体を浮かせる力（ヘリの機体の重さの1.2〜1.5倍が目安）。飛行画面では、出力レバー（Shift/Ctrl）がコレクティブ、操縦桿は機体の傾きの指示（放すと水平に戻る）、ラダーは向きを変える速さになります。前へ進むのは機首を下げて回転面ごと推力を前へ倒すからで、前へ進むエンジンは要りません。直径は地面効果（ローターの半径より低いと効きが増す）と、仮モデルの羽根の長さに使います。0なら推力から見積もります。</div>
+      ` : ''}
+      <div class="hint">プロペラは速度が上がるほど推力が落ち、空気が薄いと弱ります。ジェットは速度による落ちがゆるく、薄い空気にもプロペラより強い。アフターバーナー付きは出力レバーを9割より上げたときだけ推力が5割増しになり、炎を吹きます。ロケットは空気を使わないので、速度にも高度にもまったく左右されません。<br>見た目は、プロペラは何も出さず、ジェットはノズル後方の<b>陽炎</b>だけ（炎は出ません）。アフターバーナー付きは9割から上で炎、ロケットは炎と煙を吹きます。</div>
+      <div class="field">
+        <label>ノズルの直径（m／0で自動）</label>
+        <input type="text" inputmode="decimal" id="fPlumeWidth" value="${part.props.plumeWidth || 0}">
+      </div>
+      <div class="hint">ここで決めた太さの筒が画面のエンジンの形になり、飛行中の炎・排気もこの太さで出ます。<b>機体モデルのエンジンの大きさに合わせてください</b>。0なら推力から自動（いまは約 ${engineNozzleDiameter(Object.assign({}, part.props, { plumeWidth: 0 })).toFixed(2)} m。実機のノズルは推力の平方根におよそ比例するので、それに合わせています）。<br>筒の<b>太いほうの円が噴射口</b>で、その向きがそのまま噴射の向きです。</div>
+      ${part.props.engineKind === 'prop' ? '' : `
+      <div class="field">
+        <label>炎・排気の長さ（倍率）</label>
+        <input type="text" inputmode="decimal" id="fPlumeLength" value="${part.props.plumeLength === undefined ? 1 : part.props.plumeLength}">
+      </div>
+      `}
+      <div class="field">
         <label>回転軸（プロペラ/ファン）</label>
         <select id="fSpinAxis">
           <option value="x" ${part.props.spinAxis === 'x' ? 'selected' : ''}>X軸</option>
@@ -381,19 +488,104 @@ function renderTypeSpecificFields(part) {
         </select>
       </div>
       <div class="hint">位置は推力の作用点（機体重心からのオフセット）として飛行モデルに使用されます。</div>
+      <div class="toggle-row" style="margin-top:6px;">
+        <label>逆噴射なし</label>
+        <label class="switch">
+          <input type="checkbox" id="fNoReverse" ${part.props.noReverse ? 'checked' : ''}>
+          <span class="slider-toggle"></span>
+        </label>
+      </div>
+      <div class="hint">着陸滑走で推力を後ろ向きに使えるかどうか。ジェットは排気を前へ振り向け、可変ピッチのターボプロップは羽根を裏返して逆推力を出せますが、固定ピッチのプロペラ機（レシプロ機など）はできません。オンにすると、この機体は着陸で逆噴射を使わずブレーキとスポイラーだけで止まります。上向き（Y軸）のリフトエンジンは、そもそも逆噴射しません。</div>
+      <div class="divider"></div>
+      ${part.props.spinAxis === 'y' ? `
+      <div class="subgroup-title">エンジングループ</div>
+      <div class="hint">上向き（Y軸）のリフトエンジンはグループに入りません。浮くための力なので、飛行中に数字キーで止められないようにしてあります。</div>
+      ` : `
+      <div class="subgroup-title">エンジングループ</div>
+      <div class="field">
+        <label>グループ</label>
+        <select id="fEngineGroup">
+          ${[1, 2, 3, 4].map((n) => `<option value="${n}" ${(part.props.engineGroup || 1) === n ? 'selected' : ''}>${n}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label>このグループの最高速度</label>
+        <div style="display:flex;gap:6px;">
+          <input type="text" inputmode="decimal" id="fGroupVmax" value="${part.props.groupMaxSpeedValue || 0}" style="flex:1;">
+          <select id="fGroupVmaxUnit" style="flex:0 0 80px;">
+            <option value="mach" ${(part.props.groupMaxSpeedUnit || 'mach') === 'mach' ? 'selected' : ''}>マッハ</option>
+            <option value="kt" ${part.props.groupMaxSpeedUnit === 'kt' ? 'selected' : ''}>kt</option>
+          </select>
+        </div>
+      </div>
+      <div class="hint">飛行中、数字キー<b>1〜4</b>でグループごとに止められます。最高速度は「そのグループのエンジンが推力を出せる上限の速度」で、0なら機体全体の最高速度をそのまま使います。たとえばロケットのグループだけマッハ21、ほかをマッハ5にしておくと、ロケットを止めているあいだはマッハ5で頭打ちになります。同じグループのエンジンに違う値を入れたときは、いちばん大きい値を使います。機体設定パネルの「エンジン出力」から、グループごとにその速度ぶんの推力を入れられます。</div>
+      `}
       <div class="divider"></div>
       <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
+      ${part.props.spinAxis === 'y' ? vtolBalancePanelHtml() : ''}
     `;
     document.getElementById('fThrust').addEventListener('change', (e) => {
       part.props.thrustKgf = parseFloat(e.target.value) || 0;
+      // 直径が「自動」なら推力から決まるので、形も作り直す
+      if (!(part.props.plumeWidth > 0)) updateEngineGizmoShape(part);
+      renderInspector();
+      renderModelSettingsPanel();
     });
     document.getElementById('fSpinAxis').addEventListener('change', (e) => {
       part.props.spinAxis = e.target.value;
+      // 筒の向き（＝噴射の向き）を合わせ直す
+      updateEngineGizmoShape(part);
+      // 回転軸を変えると、出す欄が変わる（リフトエンジンにはグループの欄が無く、
+      // 代わりに前後バランスの欄が出る）。選び直さないと切り替わらなかった。
+      renderInspector();
+      renderModelSettingsPanel();
+    });
+    document.getElementById('fNoReverse').addEventListener('change', (e) => {
+      part.props.noReverse = e.target.checked;
+    });
+    document.getElementById('fEngineKind').addEventListener('change', (e) => {
+      part.props.engineKind = e.target.value;
+      // ヘリのローターは上向きの回転軸でしか意味がない
+      if (e.target.value === 'rotor' && part.props.spinAxis !== 'y') {
+        part.props.spinAxis = 'y';
+        updateEngineGizmoShape(part);
+      }
+      // プロペラには炎の欄が要らない（出ないので）。出し入れのために描き直す。
+      renderInspector();
+    });
+    const elRd = document.getElementById('fRotorDiameter');
+    if (elRd) elRd.addEventListener('change', (e) => {
+      part.props.rotorDiameter = Math.max(parseFloat(e.target.value) || 0, 0);
+    });
+    const elPw = document.getElementById('fPlumeWidth');
+    if (elPw) elPw.addEventListener('change', (e) => {
+      part.props.plumeWidth = Math.max(parseFloat(e.target.value) || 0, 0);
+      updateEngineGizmoShape(part);
+      renderInspector();
+    });
+    const elPl = document.getElementById('fPlumeLength');
+    if (elPl) elPl.addEventListener('change', (e) => {
+      part.props.plumeLength = Math.max(parseFloat(e.target.value) || 0, 0);
+    });
+    // グループの欄はリフトエンジン（回転軸Y）では出さないので、無いことがある
+    const elGroup = document.getElementById('fEngineGroup');
+    if (elGroup) elGroup.addEventListener('change', (e) => {
+      part.props.engineGroup = parseInt(e.target.value, 10) || 1;
+    });
+    const elVmax = document.getElementById('fGroupVmax');
+    if (elVmax) elVmax.addEventListener('change', (e) => {
+      part.props.groupMaxSpeedValue = Math.max(parseFloat(e.target.value) || 0, 0);
+    });
+    const elVmaxUnit = document.getElementById('fGroupVmaxUnit');
+    if (elVmaxUnit) elVmaxUnit.addEventListener('change', (e) => {
+      part.props.groupMaxSpeedUnit = e.target.value;
     });
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
+    const vtolBtn = document.getElementById('btnVtolBalance');
+    if (vtolBtn) vtolBtn.addEventListener('click', () => balanceVtolThrust());
 
   } else if (part.type === 'wing') {
-    const center = wingCornersCenter(part.props.corners);
+    const center = wingLiftCenter(part.props.corners);
     container.innerHTML = `
       <div class="subgroup-title">主翼／尾翼の設定</div>
       <div class="field">
@@ -417,22 +609,22 @@ function renderTypeSpecificFields(part) {
       <div class="hint">可動翼面（エルロン等）を追加するときの「所属する主翼」として選択できます。垂直尾翼は通常1つで中央配置のため左右位置は表示されません。</div>
 
       <div class="divider"></div>
-      <div class="subgroup-title">4頂点でモデルの羽根形状に合わせる</div>
-      <div class="hint" style="margin-bottom:10px;">ビューポート上の黄色い点をドラッグするか、下のボタンで頂点を選んで数値入力できます。4頂点の中心（赤い点）が自動計算され、${part.props.role === 'main' ? '揚力の発生する中心位置' : '基準位置'}として扱われます。</div>
+      <div class="subgroup-title">頂点でモデルの羽根形状に合わせる</div>
+      <div class="hint" style="margin-bottom:10px;">ビューポート上の黄色い点をドラッグするか、下のボタンで頂点を選んで数値入力できます。赤い点は揚力のかかる点（平均空力翼弦の前縁から1/4）で、4頂点から自動計算されます。後退角や先細りのある翼では、翼幅の真ん中より付け根寄り・前寄りに来ます。</div>
       <div id="cornerButtonsRow" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;"></div>
       <div id="cornerFieldsArea"></div>
 
       <div class="field" style="margin-top:4px;">
-        <label>${part.props.role === 'main' ? '揚力中心（自動計算・参考値）' : '4頂点の中心（自動計算・参考値）'}</label>
+        <label>揚力のかかる点（平均空力翼弦の前縁から1/4・自動計算）</label>
         <div class="hint" style="font-family:var(--mono);margin-top:0;">X ${center.x.toFixed(3)}　Y ${center.y.toFixed(3)}　Z ${center.z.toFixed(3)}</div>
       </div>
 
       <div class="divider"></div>
       <div class="subgroup-title">可動翼面</div>
       <button class="btn-danger-outline" id="btnAddControlSurfaceToWing" style="color:var(--accent);border-color:var(--accent-dim);">
-        ＋ この翼に可動翼面を追加（後縁1/4に自動配置）
+        ＋ この翼に可動翼面を追加（後ろ側を切り取る）
       </button>
-      <div class="hint">${part.props.role === 'vtail' ? 'ラダー' : part.props.role === 'htail' ? 'エレベーター' : 'エルロン'}として追加され、この翼の後縁側1/4の位置に自動配置されます。種類・位置は追加後に右パネルで変更できます。</div>
+      <div class="hint">${part.props.role === 'vtail' ? 'ラダー' : part.props.role === 'htail' ? 'エレベーター' : 'エルロン'}として追加され、この翼の後ろ側を切り取った板になります。種類・大きさ（翼幅の範囲と翼弦の割合）は追加後に右パネルで変更できます。</div>
 
       ${canMirrorPart(part) ? `
         <div class="divider"></div>
@@ -463,7 +655,7 @@ function renderTypeSpecificFields(part) {
       if (cs) {
         renderInspector(); // kind/position等をaddPart後に書き換えているため、画面に反映するため再描画
         renderPartList();  // 名前もaddPart後に書き換えているため、左パネルの一覧も更新する
-        showToast(`「${cs.name}」を「${part.name}」の後縁1/4に追加しました`);
+        showToast(`「${cs.name}」を「${part.name}」に追加しました`);
       }
     });
 
@@ -472,20 +664,15 @@ function renderTypeSpecificFields(part) {
 
   } else if (part.type === 'control_surface') {
     const wingOptions = State.parts.filter(p => p.type === 'wing');
+    const attachedWing = controlSurfaceParentWing(part);
+    const pct = (v) => Math.round(v * 100);
+    const shape = attachedWing ? csResolveShape(part.props, attachedWing.props.corners) : null;
     container.innerHTML = `
       <div class="subgroup-title">可動翼面の設定</div>
       <div class="field">
         <label>種類</label>
         <select id="fKind">
           ${CONTROL_SURFACE_KINDS.map(k => `<option value="${k.value}" ${part.props.kind === k.value ? 'selected' : ''}>${k.label}</option>`).join('')}
-        </select>
-      </div>
-      <div class="field">
-        <label>可動軸（ローカル座標）</label>
-        <select id="fHingeAxis">
-          <option value="x" ${part.props.hingeAxis === 'x' ? 'selected' : ''}>X軸</option>
-          <option value="y" ${part.props.hingeAxis === 'y' ? 'selected' : ''}>Y軸</option>
-          <option value="z" ${part.props.hingeAxis === 'z' ? 'selected' : ''}>Z軸</option>
         </select>
       </div>
       <div class="row3" style="grid-template-columns:1fr 1fr;">
@@ -499,66 +686,114 @@ function renderTypeSpecificFields(part) {
         </div>
       </div>
       <div class="field" style="margin-top:12px;">
-        <label>所属する主翼／尾翼（任意）</label>
+        <label>所属する主翼／尾翼</label>
         <select id="fParentWing">
           <option value="">未設定</option>
           ${wingOptions.map(w => `<option value="${w.id}" ${part.props.parentWingId === w.id ? 'selected' : ''}>${escapeHtml(w.name)}（${WING_ROLES.find(r => r.value === w.props.role)?.label || '主翼'}）</option>`).join('')}
         </select>
       </div>
-      <div class="hint">可動軸はこのパーツのローカル座標系での回転軸です。ギズモを「回転」モードにして向きを確認できます。</div>
-
+      ${attachedWing ? `
       <div class="divider"></div>
-      <div class="subgroup-title">翼から自動配置</div>
+      <div class="subgroup-title">大きさ（翼から切り取る）</div>
       <div class="field">
-        <label>翼幅方向の位置（0=付け根 〜 1=翼端）</label>
+        <label>翼幅方向の範囲（0=付け根 〜 1=翼端）</label>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="fSpanS" min="0" max="1" step="0.01" value="${part.props.spanS}" style="flex:1;">
-          <span class="hint" id="spanSReadout" style="margin:0;min-width:38px;text-align:right;">${Math.round(part.props.spanS * 100)}%</span>
+          <span class="hint" style="margin:0;min-width:36px;">始まり</span>
+          <input type="range" id="fSpanFrom" min="0" max="1" step="0.01" value="${shape.spanFrom}" style="flex:1;">
+          <span class="hint" id="spanFromReadout" style="margin:0;min-width:38px;text-align:right;">${pct(shape.spanFrom)}%</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="hint" style="margin:0;min-width:36px;">終わり</span>
+          <input type="range" id="fSpanTo" min="0" max="1" step="0.01" value="${shape.spanTo}" style="flex:1;">
+          <span class="hint" id="spanToReadout" style="margin:0;min-width:38px;text-align:right;">${pct(shape.spanTo)}%</span>
         </div>
       </div>
-      <button class="btn-danger-outline" id="btnPlaceAtTrailingQuarter" style="color:var(--accent);border-color:var(--accent-dim);" ${!part.props.parentWingId ? 'disabled' : ''}>
-        後縁1/4の位置に自動配置
-      </button>
-      <div class="hint">${part.props.parentWingId ? '選んだ主翼／尾翼の、前縁から75%（後縁側1/4）の位置・上のスライダーで指定した翼幅位置に配置します。' : '先に「所属する主翼／尾翼」を選んでください。'}</div>
+      <div class="field">
+        <label>翼弦の割合（後縁から）</label>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="fChordFrac" min="${CS_CHORD_MIN}" max="${CS_CHORD_MAX}" step="0.01" value="${shape.chordFrac}" style="flex:1;">
+          <span class="hint" id="chordFracReadout" style="margin:0;min-width:38px;text-align:right;">${pct(shape.chordFrac)}%</span>
+        </div>
+      </div>
+      <div class="hint" id="csAreaReadout"></div>
+      <button class="btn-danger-outline" id="btnCsKindShape" style="color:var(--accent);border-color:var(--accent-dim);">この種類の標準の大きさにする</button>
+      <div class="hint">舵面は「${escapeHtml(attachedWing.name)}」の後ろ側を切り取った板で、<b>前の辺が蝶番（回転軸）</b>です。位置と向きは翼から決まり、翼の頂点や翼を動かすとついてきます。舵の効きは切り取った大きさ（覆う範囲と翼弦の割合）で決まります。翼の面積は舵面を含めた全体で、舵を切ったときに揚力が変わるのは舵面が覆う範囲だけです。</div>
+      ` : `
+      <div class="field">
+        <label>可動軸（ローカル座標）</label>
+        <select id="fHingeAxis">
+          <option value="x" ${part.props.hingeAxis === 'x' ? 'selected' : ''}>X軸</option>
+          <option value="y" ${part.props.hingeAxis === 'y' ? 'selected' : ''}>Y軸</option>
+          <option value="z" ${part.props.hingeAxis === 'z' ? 'selected' : ''}>Z軸</option>
+        </select>
+      </div>
+      <div class="hint">「所属する主翼／尾翼」を選ぶと、その翼の後ろ側を切り取った板になり、大きさ（翼幅の範囲と翼弦の割合）を決められます。未設定のままだと、いちばん近い翼に付いたものとして扱い、効きは種類ごとの標準の大きさになります。</div>
+      `}
 
       <div class="divider"></div>
       <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
     `;
+    const refreshAreaReadout = () => {
+      const el = document.getElementById('csAreaReadout');
+      const a = controlSurfaceAreas(part);
+      if (!el || !a) return;
+      el.innerHTML = `舵面 <b>${a.panelM2.toFixed(1)} m²</b> ／ 翼 ${a.wingM2.toFixed(1)} m²（固定部 ${(a.wingM2 - a.panelM2).toFixed(1)} m²）`
+        + `・覆う範囲 ${Math.round(a.stripFrac * 100)}%・効き τ=${a.tau.toFixed(2)}`
+        + `（舵を1°切ると、覆う範囲の翼が${a.tau.toFixed(2)}°迎角を増したのと同じ）`;
+    };
+    refreshAreaReadout();
+    const isKindDefault = (kind) => {
+      const d = CS_KIND_SHAPE[kind];
+      return d && Math.abs(part.props.spanFrom - d.spanFrom) < 0.005 && Math.abs(part.props.spanTo - d.spanTo) < 0.005
+        && Math.abs(part.props.chordFrac - d.chordFrac) < 0.005;
+    };
+    const applyKindShape = (kind) => {
+      const d = CS_KIND_SHAPE[kind] || CS_KIND_SHAPE.aileron;
+      part.props.spanFrom = d.spanFrom; part.props.spanTo = d.spanTo; part.props.chordFrac = d.chordFrac;
+    };
     document.getElementById('fKind').addEventListener('change', (e) => {
-      const oldKindDef = CONTROL_SURFACE_KINDS.find(k => k.value === part.props.kind);
-      const wasAtSuggested = oldKindDef && Math.abs(part.props.spanS - oldKindDef.suggestedSpanS) < 0.001;
+      // 大きさがまだ「前の種類の標準」のままなら、新しい種類の標準に合わせる（調整済みの大きさは尊重する）
+      const wasDefault = isKindDefault(part.props.kind);
       part.props.kind = e.target.value;
-      // 位置がまだ「前の種類の推奨値」のままなら、新しい種類の推奨値に合わせておく（ユーザーが既に調整済みの位置は尊重し変更しない）
-      if (wasAtSuggested) {
-        const newKindDef = CONTROL_SURFACE_KINDS.find(k => k.value === part.props.kind);
-        if (newKindDef) part.props.spanS = newKindDef.suggestedSpanS;
-      }
+      if (wasDefault) applyKindShape(part.props.kind);
+      syncControlSurfaceToWing(part);
       renderInspector();
     });
-    document.getElementById('fHingeAxis').addEventListener('change', (e) => { part.props.hingeAxis = e.target.value; });
+    const hingeSel = document.getElementById('fHingeAxis');
+    if (hingeSel) hingeSel.addEventListener('change', (e) => { part.props.hingeAxis = e.target.value; });
     document.getElementById('fMinDeg').addEventListener('change', (e) => { part.props.minDeg = parseFloat(e.target.value) || 0; });
     document.getElementById('fMaxDeg').addEventListener('change', (e) => { part.props.maxDeg = parseFloat(e.target.value) || 0; });
     document.getElementById('fParentWing').addEventListener('change', (e) => {
       part.props.parentWingId = e.target.value || null;
-      renderInspector(); // ボタンの有効/無効状態を更新するため再描画
+      if (part.props.parentWingId && !Number.isFinite(part.props.spanFrom)) applyKindShape(part.props.kind);
+      syncControlSurfaceToWing(part);
+      renderInspector();
     });
-    document.getElementById('fSpanS').addEventListener('input', (e) => {
-      part.props.spanS = parseFloat(e.target.value);
-      document.getElementById('spanSReadout').textContent = Math.round(part.props.spanS * 100) + '%';
-    });
-    const btnPlace = document.getElementById('btnPlaceAtTrailingQuarter');
-    if (btnPlace) {
-      btnPlace.addEventListener('click', () => {
-        const wingPart = State.parts.find(p => p.id === part.props.parentWingId);
-        if (!wingPart) {
-          showToast('所属する主翼／尾翼を選んでください', true);
-          return;
-        }
-        placeControlSurfaceAtTrailingQuarter(part, wingPart, part.props.spanS);
-        renderInspector();
-        showToast(`「${wingPart.name}」の後縁1/4の位置に配置しました`);
+    const bindShapeSlider = (id, readoutId, key) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('input', (e) => {
+        let v = parseFloat(e.target.value);
+        // 範囲は少なくとも2%の幅を残す（幅0の舵面は効かないうえ、形が作れない）
+        if (key === 'spanFrom') v = Math.min(v, part.props.spanTo - 0.02);
+        if (key === 'spanTo') v = Math.max(v, part.props.spanFrom + 0.02);
+        v = Math.min(Math.max(v, key === 'chordFrac' ? CS_CHORD_MIN : 0), key === 'chordFrac' ? CS_CHORD_MAX : 1);
+        part.props[key] = v;
+        e.target.value = v;
+        document.getElementById(readoutId).textContent = Math.round(v * 100) + '%';
+        syncControlSurfaceToWing(part);
+        refreshAreaReadout();
       });
-    }
+    };
+    bindShapeSlider('fSpanFrom', 'spanFromReadout', 'spanFrom');
+    bindShapeSlider('fSpanTo', 'spanToReadout', 'spanTo');
+    bindShapeSlider('fChordFrac', 'chordFracReadout', 'chordFrac');
+    const btnKindShape = document.getElementById('btnCsKindShape');
+    if (btnKindShape) btnKindShape.addEventListener('click', () => {
+      applyKindShape(part.props.kind);
+      syncControlSurfaceToWing(part);
+      renderInspector();
+    });
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
 
   } else if (part.type === 'light') {
@@ -579,6 +814,25 @@ function renderTypeSpecificFields(part) {
         </select>
       </div>
       <div class="hint">種類を選ぶと色と点灯パターンの初期値が自動設定されます（後から個別に変更可）。</div>
+      ${part.props.kind === 'landing' ? `
+      <div class="divider"></div>
+      <div class="subgroup-title">照らす向きと広がり</div>
+      <div class="field">
+        <label>伏せ角（°）</label>
+        <input type="number" id="fBeamDown" step="1" value="${lightBeamDownDeg(part.props)}">
+      </div>
+      <div class="field">
+        <label>広がり・半角（°）</label>
+        <input type="number" id="fBeamSpread" step="1" min="1" max="60" value="${lightBeamSpreadDeg(part.props)}">
+      </div>
+      <div class="field">
+        <label>届く距離（m）</label>
+        <input type="number" id="fBeamRange" step="50" min="20" value="${lightBeamRangeM(part.props)}">
+      </div>
+      <div class="hint">まっすぐ前から何度下を向くかが「伏せ角」です。
+        <b>パーツの回転（Eキー）はこれに上乗せされます</b>——左右へ振りたいときは
+        ギズモでY軸に回してください。円錐のギズモが、実際に照らす向きと広がりを表します。</div>
+      ` : ''}
       <div class="divider"></div>
       <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
     `;
@@ -588,13 +842,42 @@ function renderTypeSpecificFields(part) {
       part.props.color = kindDef.color;
       part.props.blink = kindDef.blink;
       updatePartGizmoColor(part);
+      updateLightGizmoShape(part);   // 着陸灯は円錐、それ以外は玉
       renderInspector();
     });
     document.getElementById('fBlink').addEventListener('change', (e) => { part.props.blink = e.target.value; });
+    if (part.props.kind === 'landing') {
+      const beam = (id, key, min, max) => {
+        document.getElementById(id).addEventListener('change', (e) => {
+          const v = parseFloat(e.target.value);
+          if (!isFinite(v)) { e.target.value = part.props[key]; return; }
+          part.props[key] = Math.min(Math.max(v, min), max);
+          e.target.value = part.props[key];
+          updateLightGizmoShape(part);
+        });
+      };
+      beam('fBeamDown', 'beamDownDeg', -80, 80);
+      beam('fBeamSpread', 'beamSpreadDeg', 1, 60);
+      beam('fBeamRange', 'beamRangeM', 20, 20000);
+    }
     document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
 
   } else if (part.type === 'landing_gear') {
     renderLandingGearFields(container, part);
+
+  } else if (part.type === 'viewpoint') {
+    container.innerHTML = `
+      <div class="subgroup-title">コックピット視点</div>
+      <div class="hint">飛行画面の「コックピット」視点で、ここが目の位置になります。
+        上の「位置」をギズモか数値で動かして、操縦席に合わせてください。
+        「回転」は視線の向きです（0なら真っ直ぐ前。X を下げると見下ろし、
+        Y を回すと横向きの席になります）。</div>
+      <div class="hint">置いていない機体は、これまでどおり機体の大きさから
+        見積もった位置（重心の少し前・少し上）を使います。1機に1つで足ります。</div>
+      <div class="divider"></div>
+      <button class="btn-danger-outline" id="btnMirrorPart" style="color:var(--accent);border-color:var(--accent-dim);">左右対称に複製（ミラー）</button>
+    `;
+    document.getElementById('btnMirrorPart').addEventListener('click', () => mirrorPart(part.id));
   }
 }
 
@@ -792,20 +1075,29 @@ function renderWingCornerButtons(part) {
   const fieldsArea = document.getElementById('cornerFieldsArea');
   if (!buttonsRow || !fieldsArea) return;
 
-  buttonsRow.innerHTML = WING_CORNER_KEYS.map(key => {
+  const hasKink = csWingHasKink(part.props.corners);
+  buttonsRow.innerHTML = csWingCornerKeys(part.props.corners).map(key => {
     const isSelected = State.selectedCornerKey === key;
     return `<button class="btn-danger-outline" data-corner="${key}" style="
       color:${isSelected ? '#04121e' : 'var(--accent)'};
       background:${isSelected ? 'var(--accent)' : 'transparent'};
       border-color:var(--accent-dim);font-size:11.5px;padding:7px 6px;
     ">${wingCornerLabel(part.props.role, key)}</button>`;
-  }).join('');
+  }).join('') + `<button class="btn-danger-outline" id="btnWingKink" style="grid-column:1 / -1;color:var(--accent);border-color:var(--accent-dim);font-size:11.5px;padding:7px 6px;">
+      ${hasKink ? '折れ目を消す（4頂点に戻す）' : '後縁（前縁）の折れ目を足す'}</button>
+    <div class="hint" style="grid-column:1 / -1;margin:0;">${hasKink
+      ? '折れ目の2点で、付け根→折れ目・折れ目→翼端の2枚をつないだ形になります。面積・揚力のかかる点・舵面の切り取りもこの形で測ります。'
+      : 'Boeing 747 のように後縁が途中で折れる翼は、折れ目を足してから「折れ目・後縁」の点を動かします（足した直後は形は変わりません）。'}</div>`;
 
-  buttonsRow.querySelectorAll('button').forEach(btn => {
+  buttonsRow.querySelectorAll('button[data-corner]').forEach(btn => {
     btn.addEventListener('click', () => {
       selectWingCorner(part, btn.dataset.corner);
       renderInspector();
     });
+  });
+  document.getElementById('btnWingKink').addEventListener('click', () => {
+    if (hasKink) removeWingKink(part); else addWingKink(part);
+    renderInspector();
   });
 
   if (State.selectedCornerKey && part.props.corners[State.selectedCornerKey]) {

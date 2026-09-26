@@ -1,0 +1,146 @@
+// 04-clouds.js — 雲（ビルボードスプライトの塊を敷き詰め、風で流す）
+
+// 600km四方のマップでは、原点まわりの数kmだけに雲を置くと空に浮いた板に見えてしまう。
+// 雲原は「カメラを中心とした一定範囲」として扱い、外に出たクラスタは反対側から出てくる。
+const CLOUD_MAX_CLUSTERS_BASE = 90;
+const CLOUD_MAX_CLUSTERS_MIN = 12;
+function cloudMaxClusters() {
+  const scale = typeof envQualityPreset === 'function' ? envQualityPreset().distance : 1;
+  return Math.max(Math.round(CLOUD_MAX_CLUSTERS_BASE * scale), CLOUD_MAX_CLUSTERS_MIN);
+}
+const CLOUD_FIELD_HALF_SIZE = 30000; // カメラを中心とした60km四方
+
+let _cloudSpriteTexture = null;
+
+// 外部画像を使わず、キャンバスで柔らかい円形のグラデーションテクスチャを生成する
+function buildCloudSpriteTexture() {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  gradient.addColorStop(0, 'rgba(255,255,255,1)');
+  gradient.addColorStop(0.4, 'rgba(255,255,255,0.85)');
+  gradient.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.encoding = THREE.sRGBEncoding;
+  return tex;
+}
+
+// 複数のスプライトをランダムに寄せ集めて、もこもこした積雲1つ分の塊を作る
+function buildCloudCluster() {
+  const group = new THREE.Group();
+  const puffCount = 5 + Math.floor(Math.random() * 5);
+  // 数十km先からでも雲として見える大きさ（積雲1つで1〜2km規模）
+  const scaleBase = 700 + Math.random() * 1100;
+  for (let i = 0; i < puffCount; i++) {
+    const mat = new THREE.SpriteMaterial({ map: _cloudSpriteTexture, transparent: true, depthWrite: false });
+    const sprite = new THREE.Sprite(mat);
+    const s = scaleBase * (0.55 + Math.random() * 0.6);
+    sprite.scale.set(s * 1.6, s, 1);
+    sprite.position.set(
+      (Math.random() - 0.5) * scaleBase * 1.8,
+      (Math.random() - 0.5) * scaleBase * 0.35,
+      (Math.random() - 0.5) * scaleBase * 1.8
+    );
+    group.add(sprite);
+  }
+  return group;
+}
+
+function initClouds() {
+  // テクスチャは画質によらず同じものを使い回す（rebuildCloudsで何度も作り直さないため）
+  if (!_cloudSpriteTexture) _cloudSpriteTexture = buildCloudSpriteTexture();
+  EnvState.cloudGroup = new THREE.Group();
+  EnvState.scene.add(EnvState.cloudGroup);
+  EnvState.cloudClusters = [];
+
+  const maxClusters = cloudMaxClusters();
+  for (let i = 0; i < maxClusters; i++) {
+    const cluster = buildCloudCluster();
+    const baseX = (Math.random() * 2 - 1) * CLOUD_FIELD_HALF_SIZE;
+    const baseZ = (Math.random() * 2 - 1) * CLOUD_FIELD_HALF_SIZE;
+    const altitude = EnvState.cloudAltitude + (Math.random() - 0.5) * 900;
+    cluster.position.set(baseX, altitude, baseZ);
+    EnvState.cloudGroup.add(cluster);
+    EnvState.cloudClusters.push({ group: cluster, baseX, baseZ, driftX: 0, driftZ: 0 });
+  }
+  applyCloudCoverage();
+}
+
+// 画質プリセットでクラスタの最大数（CLOUD_MAX_CLUSTERS_BASE）が変わったときに呼ぶ。
+// クラスタはスプライトの塊（ジオメトリ・マテリアル持ち）なので、増減には作り直しが要る
+// （雲量の増減だけなら applyCloudCoverage で足りる。作り直しはそれより重いので、
+// 画質を変えたときだけ呼ぶ）。
+function rebuildClouds() {
+  if (!EnvState.cloudGroup) return;
+  EnvState.cloudGroup.traverse((o) => {
+    if (o.material) o.material.dispose();
+  });
+  EnvState.scene.remove(EnvState.cloudGroup);
+  initClouds();
+}
+
+// 雲量（0〜1）に応じて、あらかじめ用意したクラスタのうち何個を表示するか切り替える
+// （雲量を変えるたびにジオメトリを作り直さずに済む）
+function applyCloudCoverage() {
+  const coverage = THREE.MathUtils.clamp(EnvState.env.cloudCoverage, 0, 1);
+  const visibleCount = Math.round(EnvState.cloudClusters.length * coverage);
+  EnvState.cloudClusters.forEach((c, i) => {
+    c.group.visible = i < visibleCount;
+  });
+}
+
+function updateClouds(dt) {
+  if (!EnvState.cloudClusters.length) return;
+  const windRad = THREE.MathUtils.degToRad(EnvState.env.windDirectionDeg);
+  const speedMps = (EnvState.env.windSpeedKmh * 1000) / 3600;
+  const vx = Math.cos(windRad) * speedMps;
+  const vz = Math.sin(windRad) * speedMps;
+  const box = CLOUD_FIELD_HALF_SIZE * 2;
+
+  // カメラを中心にラップさせるので、どこまで飛んでも雲が周囲に居続ける
+  const cx = EnvState.camera.position.x, cz = EnvState.camera.position.z;
+  const wrapRel = (v) => (((v + CLOUD_FIELD_HALF_SIZE) % box + box) % box) - CLOUD_FIELD_HALF_SIZE;
+
+  // 雲底（曇り空の天井）より向こう側にある雲は、雲底より先に描いて雲底をかぶせる。
+  // こちら側に少しでもかかる雲は雲底より後に描く（べったり曇っているときは雲底が深度を
+  // 書いているので、雲底より向こうへはみ出した部分はそこで切れる）。ENV_ORDER を参照。
+  const deck = EnvState.cloudDeck;
+  const deckOn = !!(deck && deck.visible);
+  const deckY = EnvState.cloudAltitude;
+  const camBelow = EnvState.camera.position.y < deckY;
+
+  EnvState.cloudClusters.forEach((c) => {
+    c.driftX += vx * dt;
+    c.driftZ += vz * dt;
+    c.group.position.x = cx + wrapRel(c.baseX + c.driftX - cx);
+    c.group.position.z = cz + wrapRel(c.baseZ + c.driftZ - cz);
+    if (!c.group.visible) return;
+    for (const sprite of c.group.children) {
+      let order = ENV_ORDER.clouds;
+      if (deckOn) {
+        const y = c.group.position.y + sprite.position.y;
+        const half = sprite.scale.y * 0.5;
+        const near = camBelow ? (y - half < deckY) : (y + half > deckY);
+        if (!near) order = ENV_ORDER.cloudsFar;
+      }
+      sprite.renderOrder = order;
+    }
+  });
+}
+
+// 昼夜の光に合わせて雲の色味を変える（03-sky.jsのupdateSkyForSunDirectionから呼ばれる）
+function tintClouds(dayFactor, warmth) {
+  if (!EnvState.cloudClusters.length) return;
+  const base = new THREE.Color(0x101828).lerp(new THREE.Color(0xffffff), dayFactor);
+  base.lerp(new THREE.Color(0xffb37a), warmth * 0.4 * dayFactor);
+  // ACESトーンマッピング（露出0.6）を通すと白でも灰色に沈むので、1.0を超える明るさを渡す
+  base.multiplyScalar(1 + dayFactor * 0.45);
+  EnvState.cloudClusters.forEach((c) => {
+    c.group.children.forEach((sprite) => sprite.material.color.copy(base));
+  });
+}

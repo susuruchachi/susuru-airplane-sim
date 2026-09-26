@@ -20,6 +20,7 @@ function clearCurrentModel() {
   State.model.maxSpeedValue = 250;
   State.model.maxSpeedUnit = 'kt';
   State.model.meshOffset = { x: 0, y: 0, z: 0 };
+  State.model.boneAxisOverrides = {};
   State.cg.position = { x: 0, y: 0, z: 0 };
   if (State.cg.gizmo) hideCgGizmo();
 }

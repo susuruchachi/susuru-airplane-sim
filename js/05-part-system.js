@@ -6,6 +6,21 @@ function defaultPropsForType(type) {
       return {
         thrustKgf: 2000,       // 最大推力（kgf、参考値・後の飛行モデルで使用）
         spinAxis: 'z',         // プロペラ/ファンの回転軸
+        // 着陸滑走で推力を後ろ向きに使えないエンジン（固定ピッチのプロペラ機）
+        noReverse: false,
+        // エンジンの種別。推力の出かた（速度・空気の薄さへの強さ）と、
+        // 排気や炎の見た目が変わる。既定はプロペラ——これまでの機体は
+        // すべてプロペラの式で飛んでいたので、既定を変えると全機の性能が動く。
+        engineKind: 'prop',    // prop | jet | jet_ab | rocket
+        // エンジンのグループ（1〜4）。飛行中にグループ単位で止められる。
+        engineGroup: 1,
+        // このグループで出せる最高速度。0なら機体の最高速度をそのまま使う。
+        // 例：ロケットのグループだけマッハ21、ほかのエンジンはマッハ5。
+        groupMaxSpeedValue: 0,
+        groupMaxSpeedUnit: 'mach',
+        // 排気や炎の見た目。0なら推力から自動で決める（09b-aircraft-visual.js）。
+        plumeWidth: 0,        // ノズルの直径(m)
+        plumeLength: 1,       // 長さの倍率
       };
     case 'wing':
       return {
@@ -23,13 +38,25 @@ function defaultPropsForType(type) {
         minDeg: -20,
         maxDeg: 20,
         parentWingId: null,    // どの主翼に属するか（任意）
-        spanS: 0.78,           // 翼幅方向の位置（0=付け根 〜 1=翼端）。「後縁1/4に自動配置」で使う
+        spanS: 0.78,           // 翼幅方向の位置（0=付け根 〜 1=翼端）。範囲の中央（旧データ互換）
+        // 大きさ（親の翼から切り取る。js/env/09e-part-proxy.js の csPanel）
+        spanFrom: CS_KIND_SHAPE.aileron.spanFrom,   // 翼幅方向の範囲（0=付け根 〜 1=翼端）
+        spanTo: CS_KIND_SHAPE.aileron.spanTo,
+        chordFrac: CS_KIND_SHAPE.aileron.chordFrac, // 後縁から測った翼弦の割合。前の辺が蝶番
       };
+    case 'viewpoint':
+      // コックピットの目の位置。パーツの回転がそのまま視線の向きになる
+      // （機首が-Z・上が+Y の機体座標で、回転0なら真っ直ぐ前を見る）。
+      return {};
     case 'light':
       return {
         kind: 'nav_red',
         color: LIGHT_KINDS[0].color,
         blink: LIGHT_KINDS[0].blink,
+        // 着陸灯のときだけ意味を持つ（LANDING_BEAM_DEFAULT の説明を参照）
+        beamDownDeg: LANDING_BEAM_DEFAULT.downDeg,
+        beamSpreadDeg: LANDING_BEAM_DEFAULT.spreadDeg,
+        beamRangeM: LANDING_BEAM_DEFAULT.rangeM,
       };
     case 'landing_gear':
       return {
@@ -45,32 +72,113 @@ function defaultPropsForType(type) {
   }
 }
 
-function createPartGizmoMesh(type, role, corners) {
+function createPartGizmoMesh(type, role, corners, props) {
   const color = new THREE.Color(PART_TYPE_COLORS[type]);
-  const geo = (type === 'wing' && corners) ? buildWingGeometryFromCorners(corners, role) : geometryForPart(type, role);
+  const geo = (type === 'wing' && corners) ? buildWingGeometryFromCorners(corners, role) : geometryForPart(type, role, props);
   const mat = new THREE.MeshStandardMaterial({
     color, emissive: color, emissiveIntensity: type === 'light' ? 0.9 : 0.25,
     roughness: 0.4, metalness: 0.2, transparent: true, opacity: 0.92,
-    side: type === 'wing' ? THREE.DoubleSide : THREE.FrontSide,
+    // 着陸灯の円錐は側面だけの筒（openEnded）なので、裏からも見えないと
+    // 「照らす向き」が分からない角度ができる。翼と同じく両面で描く。
+    side: (type === 'wing' || type === 'light') ? THREE.DoubleSide : THREE.FrontSide,
   });
   const mesh = new THREE.Mesh(geo, mat);
-  if (type === 'engine') mesh.rotation.z = Math.PI / 2;
   mesh.userData.isPartGizmo = true;
   return mesh;
 }
 
-function geometryForPart(type, role) {
+// 機体モデルにかけている拡縮。パーツの座標もギズモの形も**この倍率がかかった状態で**
+// 画面に出る。ノズルの直径のように「実寸(m)で言いたい」ものは、ここで割ってから
+// ジオメトリを作らないと、拡縮した機体では見た目と実寸が食い違う。
+function modelRootScale() {
+  const r = State.model && State.model.root;
+  if (!r) return 1;
+  const s = (Math.abs(r.scale.x) + Math.abs(r.scale.y) + Math.abs(r.scale.z)) / 3;
+  return s > 1e-6 ? s : 1;
+}
+
+// エンジンのノズル（排気口）の直径(m)。
+// Builderで入れていればその値、0なら推力から決める。
+//
+// 合わせるのは「ファンの直径」ではなく**排気ノズルの直径**。実機の排気ノズルは
+// 推力の平方根におよそ比例する（d ≒ 0.0016·√(推力N)。実機7種で比の幾何平均0.98。
+// 09b-aircraft-visual.js の PLUME_NOZZLE_K の説明に内訳）。
+// 飛行側の既定（enginePlumeRadius）と同じ式で、
+// **ここで見ている太さの筒が、そのまま炎・排気の太さになる**。
+// 推力が桁外れな架空の機体（推力40万kNのロケットなど）では、この式のままだと
+// 直径30mを超えて機体が見えなくなる。機体の大きさに対して極端にならないよう、
+// いちばん長い辺の0.4〜2.4%に収める（飛行側も同じように抑えている）。
+// 返すのは**実寸(m)**。境界箱も world 空間なので、そのまま比べられる。
+function engineNozzleDiameter(props) {
+  const w = props && props.plumeWidth;
+  if (w > 0) return w;
+  const kgf = Math.max((props && props.thrustKgf) || 0, 0);
+  let d = Math.max(0.0016 * Math.sqrt(kgf * 9.80665), 0.06);
+  const box = typeof computeModelMeshBoundingBox === 'function' ? computeModelMeshBoundingBox() : null;
+  if (box) {
+    const size = box.getSize(new THREE.Vector3());
+    const unit = Math.max(size.x, size.y, size.z);
+    if (unit > 0.2) d = Math.min(Math.max(d, unit * 0.004), unit * 0.024);
+  }
+  return d;
+}
+
+// エンジンのギズモを噴射の向きに合わせる回転（js/env/09e-part-proxy.js の partShapeOrientEngine。
+// 飛行画面の仮モデルと同じ形にするため、形の作り方はそちらに1か所だけ置く）
+function orientEngineGeometry(geo, spinAxis) { return partShapeOrientEngine(geo, spinAxis); }
+
+// 回転軸・推力・ノズル直径を変えたとき、ギズモの形と向きを作り直す
+function updateEngineGizmoShape(part) {
+  if (part.type !== 'engine' || !part.gizmo) return;
+  part.gizmo.geometry.dispose();
+  part.gizmo.geometry = geometryForPart('engine', null, part.props);
+}
+
+// 種類・伏せ角・広がりを変えたとき、ギズモの形を作り直す
+// （着陸灯は円錐、それ以外は玉。エンジンの updateEngineGizmoShape と同じ形）
+function updateLightGizmoShape(part) {
+  if (part.type !== 'light' || !part.gizmo) return;
+  part.gizmo.geometry.dispose();
+  part.gizmo.geometry = geometryForPart('light', null, part.props);
+}
+
+function geometryForPart(type, role, props) {
   switch (type) {
-    case 'engine':
-      return new THREE.CylinderGeometry(0.18, 0.22, 0.4, 16);
+    case 'engine': {
+      // ノズル（大きいほうの円）が -Y 側。吸い込み側は少し細くして、
+      // どちらが噴射口か見ただけで分かるようにする。
+      // 直径は実寸(m)なので、機体の拡縮ぶんで割ってからジオメトリにする
+      // （そうしないと、拡縮した機体では画面の太さと飛行中の炎の太さが食い違う）。
+      return partShapeEngineGeometry(engineNozzleDiameter(props) / modelRootScale(), props && props.spinAxis);
+    }
     case 'wing':
       // 垂直尾翼は縦に立てた薄板、それ以外（主翼・水平尾翼）は横に広い薄板
       if (role === 'vtail') return new THREE.BoxGeometry(0.35, 0.9, 0.3);
       return new THREE.BoxGeometry(1.2, 0.06, 0.35);
     case 'control_surface':
       return new THREE.BoxGeometry(0.4, 0.04, 0.18);
-    case 'light':
-      return new THREE.SphereGeometry(0.07, 12, 12);
+    case 'light': {
+      // 着陸灯だけは**どちらを照らすか**が要るので、向きの見える円錐にする。
+      // 頂点が灯りの位置、底面が照らす先。太さは「広がり」そのままなので、
+      // 広げれば円錐も太くなる。伏せ角ぶん下へ傾けて描くから、ギズモを
+      // 回していなくても実際に照らす向きが分かる（回転はこれに上乗せされる）。
+      if (!props || props.kind !== 'landing') return new THREE.SphereGeometry(0.07, 12, 12);
+      const len = 0.6;
+      const r = Math.max(len * Math.tan(THREE.MathUtils.degToRad(lightBeamSpreadDeg(props))), 0.05);
+      const geo = new THREE.ConeGeometry(r, len, 16, 1, true);
+      geo.rotateX(Math.PI / 2);        // +Y → +Z（頂点が後ろ・底面が前）
+      geo.translate(0, 0, -len / 2);   // 頂点を原点（灯りの位置）へ
+      geo.rotateX(-THREE.MathUtils.degToRad(lightBeamDownDeg(props)));  // 伏せ角ぶん下へ
+      return geo;
+    }
+    case 'viewpoint': {
+      // 視線の向きが見えるよう、前（-Z）へ尖った円錐にする。
+      // エンジンと同じ理由で、メッシュの rotation ではなくジオメトリを回す
+      // （パーツの回転で上書きされてしまうため）。
+      const cone = new THREE.ConeGeometry(0.12, 0.34, 12);
+      cone.rotateX(-Math.PI / 2);
+      return cone;
+    }
     default:
       return new THREE.SphereGeometry(0.1, 8, 8);
   }
@@ -98,7 +206,13 @@ function defaultWingCorners(role) {
   };
 }
 
-// 4頂点の中心（重心）を計算する。主翼ではこれを揚力中心として扱う
+// 揚力のかかる点（平均空力翼弦の前縁から1/4。js/env/09e-part-proxy.js の csWingMacInfo）。
+// 頂点の編集で出る赤い印はこの点。飛行の側も同じ点に揚力をかける。
+function wingLiftCenter(corners) {
+  return csWingMacInfo(corners).ac;
+}
+
+// 4頂点の中心（形の真ん中）
 function wingCornersCenter(corners) {
   const keys = WING_CORNER_KEYS;
   const sum = { x: 0, y: 0, z: 0 };
@@ -108,44 +222,8 @@ function wingCornersCenter(corners) {
   return { x: sum.x / keys.length, y: sum.y / keys.length, z: sum.z / keys.length };
 }
 
-// 翼の4頂点（rootLeading, rootTrailing, tipLeading, tipTrailing）から、厚みを持つ板状のジオメトリを生成する。
-// モデルの実際の羽根形状に頂点を合わせたとき、翼のプレースホルダー自体の見た目もそれに追従させるためのもの。
-// 水平翼(main/htail)は厚みをY方向に、垂直尾翼(vtail)は厚みをX方向に加える（板が広がる平面が違うため）
-function buildWingGeometryFromCorners(corners, role) {
-  const rl = corners.rootLeading, rt = corners.rootTrailing, tl = corners.tipLeading, tt = corners.tipTrailing;
-  const thickness = 0.025; // 板の厚み（半分ずつオフセット）
-  const half = thickness / 2;
-  const thicknessAxis = role === 'vtail' ? 'x' : 'y';
-
-  const positions = [];
-  const addTri = (a, b, c) => { positions.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z); };
-  const offset = (p, sign) => ({
-    x: p.x + (thicknessAxis === 'x' ? sign * half : 0),
-    y: p.y + (thicknessAxis === 'y' ? sign * half : 0),
-    z: p.z,
-  });
-
-  const rlU = offset(rl, 1), rtU = offset(rt, 1), tlU = offset(tl, 1), ttU = offset(tt, 1);
-  const rlD = offset(rl, -1), rtD = offset(rt, -1), tlD = offset(tl, -1), ttD = offset(tt, -1);
-
-  // 表面（+方向側。rootLeading, tipLeading, tipTrailing, rootTrailingの順で四角形を三角形2枚に分割）
-  addTri(rlU, tlU, ttU); addTri(rlU, ttU, rtU);
-  // 裏面（-方向側。法線が逆になるよう頂点順を反転）
-  addTri(rlD, ttD, tlD); addTri(rlD, rtD, ttD);
-  // 前縁の側面（rootLeading-tipLeadingの帯）
-  addTri(rlU, rlD, tlD); addTri(rlU, tlD, tlU);
-  // 後縁の側面（rootTrailing-tipTrailingの帯）
-  addTri(rtU, ttD, rtD); addTri(rtU, ttU, ttD);
-  // 翼端の側面（tipLeading-tipTrailingの帯）
-  addTri(tlU, ttD, tlD); addTri(tlU, ttU, ttD);
-  // 付け根の側面（rootLeading-rootTrailingの帯）
-  addTri(rlU, rtD, rlD); addTri(rlU, rtU, rtD);
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geo.computeVertexNormals();
-  return geo;
-}
+// 翼の4頂点から厚みを持つ板を作る（形の作り方は js/env/09e-part-proxy.js の partShapeWingGeometry）
+function buildWingGeometryFromCorners(corners, role) { return partShapeWingGeometry(corners, role); }
 
 // 翼の役割（主翼/水平尾翼/垂直尾翼）が変わったとき、ギズモの形状だけ差し替える
 function updateWingGizmoShape(part) {
@@ -155,12 +233,8 @@ function updateWingGizmoShape(part) {
 }
 
 // ---- 着陸脚（landing_gear）専用のギズモ構築 ----
-// 構造：基点(Group) → [関節(Group,回転) → 伸縮節(Group,軸方向移動) → 関節 → ...] → 先端の車輪的マーカー
-// joints/strutsの配列順が、そのまま基点から先端に向かうチェーンの順序になる
-// 見た目は「軸を示す記号」ではなく、脚そのものを表す銀色の円柱にする（実機の脚を模した仮モデル）
-const GEAR_METAL_COLOR = 0xc8ccd2;   // 銀色（脚の支柱本体）
-const GEAR_ACCENT_COLOR = 0x8a8f99;  // 関節部分のアクセント（やや暗い銀）
-const GEAR_TIRE_COLOR = 0x1a1a1a;    // タイヤ（先端マーカー）
+// 形（銀色の支柱・関節・タイヤ）の作り方は js/env/09e-part-proxy.js にまとめてある
+// （飛行画面の仮モデルも同じ形を使う）。ここは Builder 側の出し入れだけ。
 
 function disposeObject3D(obj) {
   if (!obj) return;
@@ -180,111 +254,7 @@ function isDescendantOf(obj, ancestor) {
   return false;
 }
 
-function gearMetalMaterial(color, opts) {
-  return new THREE.MeshStandardMaterial({
-    color, roughness: 0.28, metalness: 0.75,
-    emissive: color, emissiveIntensity: 0.06,
-    ...opts,
-  });
-}
-
-function createJointVisual() {
-  // 関節部分：脚の支柱と同じ太さの短い円柱（回転軸そのものが脚の一部に見えるようにする）
-  const group = new THREE.Group();
-  const axisMesh = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.045, 0.045, 0.16, 14),
-    gearMetalMaterial(GEAR_ACCENT_COLOR)
-  );
-  group.add(axisMesh);
-  // 関節の可動を示す薄いリング（円柱よりわずかに太い径で、繋ぎ目の存在がわかるように）
-  const ring = new THREE.Mesh(
-    new THREE.TorusGeometry(0.052, 0.008, 8, 24),
-    gearMetalMaterial(0xdddddd, { metalness: 0.9, roughness: 0.15 })
-  );
-  ring.rotation.x = Math.PI / 2;
-  group.add(ring);
-  return group;
-}
-
-function createStrutVisual(length) {
-  // テレスコピック（入れ子シリンダー）の脚支柱。銀色の太い円柱（外筒）＋少し細い円柱（内筒）
-  // 着陸脚は機体の下（-Y方向）へ伸びて地面に届く想定なので、-Y方向に伸ばす
-  const group = new THREE.Group();
-  const outer = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.06, 0.05, length, 14),
-    gearMetalMaterial(GEAR_METAL_COLOR)
-  );
-  outer.position.y = -length / 2; // 基点(付け根)から-Y方向（下方向）に伸びる形にする
-  group.add(outer);
-  const inner = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.032, 0.032, length * 0.55, 14),
-    gearMetalMaterial(0xe8eaed, { metalness: 0.85, roughness: 0.2 })
-  );
-  inner.position.y = -length * 0.78;
-  group.add(inner);
-  group.userData.isStrutVisual = true;
-  group.userData.baseLength = length;
-
-  // 次のセグメント（関節や先端）をぶら下げるためのアンカー。伸縮節の先端位置（-Y方向）に置く。
-  // 長さが変わるたびに applyDeployStateToGear 側でこのアンカーのposition.yも更新すること。
-  const endAnchor = new THREE.Group();
-  endAnchor.position.y = -length;
-  endAnchor.userData.isStrutEndAnchor = true;
-  group.add(endAnchor);
-
-  return group;
-}
-
-// jointsとstrutsの定義から、実際の3D階層（基点→関節→伸縮節→関節→...→先端）を組み立てる
-// 戻り値のrootに対し、part.gizmo = root とする。各関節/伸縮節のGroupはuserDataにidと種別を持つので、
-// 展開状態プレビュー（applyDeployStateToGear）でid照合して角度・長さを反映できる
-function buildLandingGearHierarchy(props) {
-  const root = new THREE.Group();
-  root.userData.isPartGizmo = true;
-  root.userData.isLandingGearRoot = true;
-
-  // 基点マーカー（付け根の位置を示す小さな球、脚の取付部分）
-  const baseMarker = new THREE.Mesh(
-    new THREE.SphereGeometry(0.07, 12, 12),
-    gearMetalMaterial(GEAR_ACCENT_COLOR)
-  );
-  root.add(baseMarker);
-
-  let current = root; // チェーンの末端（次のセグメントをここにぶら下げる）
-
-  // joints[i] と struts[i] を交互に、定義順（関節→伸縮節→関節→伸縮節...）でチェーンする。
-  // 数が揃っていなくても対応できるよう、長い方の配列に合わせてループする
-  const n = Math.max(props.joints.length, props.struts.length);
-  for (let i = 0; i < n; i++) {
-    const jointDef = props.joints[i];
-    if (jointDef) {
-      const jointVisual = createJointVisual();
-      jointVisual.userData.isJointVisual = true;
-      jointVisual.userData.jointId = jointDef.id;
-      current.add(jointVisual);
-      current = jointVisual;
-    }
-    const strutDef = props.struts[i];
-    if (strutDef) {
-      const len = strutDef.minLength;
-      const strutVisual = createStrutVisual(Math.max(len, 0.05));
-      strutVisual.userData.strutId = strutDef.id;
-      current.add(strutVisual);
-      // 次のセグメントは伸縮節の「先端アンカー」にぶら下げる（伸縮節自体ではなく、その子）
-      current = strutVisual.children.find(c => c.userData.isStrutEndAnchor);
-    }
-  }
-
-  // 先端マーカー（車輪＝タイヤ相当。黒めのトーラスでそれらしく）
-  const tip = new THREE.Mesh(
-    new THREE.TorusGeometry(0.09, 0.045, 10, 20),
-    new THREE.MeshStandardMaterial({ color: GEAR_TIRE_COLOR, roughness: 0.8, metalness: 0.1 })
-  );
-  tip.userData.isGearTip = true;
-  current.add(tip);
-
-  return root;
-}
+function buildLandingGearHierarchy(props) { return partShapeGearHierarchy(props); }
 
 // 関節/伸縮節の追加・削除・軸変更のたびに呼び、gizmo階層を作り直す
 // （既存のgizmoは破棄して新規に作り直す。シーンへの追加・位置/回転/スケールの再適用は呼び出し側で行う）
@@ -314,42 +284,7 @@ function rebuildLandingGearGizmo(part) {
 // deployState(0〜1)に応じて、各関節の角度・各伸縮節の長さを線形補間してプレビューに反映する
 function applyDeployStateToGear(part) {
   if (part.type !== 'landing_gear' || !part.gizmo) return;
-  const t = part.props.retractedAtZero ? part.props.deployState : (1 - part.props.deployState);
-
-  part.gizmo.traverse(obj => {
-    if (obj.userData.isJointVisual) {
-      const jointDef = part.props.joints.find(j => j.id === obj.userData.jointId);
-      if (!jointDef) return;
-      const deg = THREE.MathUtils.lerp(jointDef.minDeg, jointDef.maxDeg, t);
-      const rad = THREE.MathUtils.degToRad(deg);
-      obj.rotation.set(0, 0, 0);
-      if (jointDef.axis === 'x') obj.rotation.x = rad;
-      else if (jointDef.axis === 'y') obj.rotation.y = rad;
-      else obj.rotation.z = rad;
-    }
-    if (obj.userData.isStrutVisual && obj.userData.strutId) {
-      const strutDef = part.props.struts.find(s => s.id === obj.userData.strutId);
-      if (!strutDef) return;
-      const len = Math.max(THREE.MathUtils.lerp(strutDef.minLength, strutDef.maxLength, t), 0.05);
-      // outer/inner の2子メッシュを長さに応じて再配置（createStrutVisualと同じ径・比率で再生成する）。
-      // endAnchor（次のセグメントの接続点）もこの長さぶん先端（-Y方向）へ押し出す＝これが無いと伸縮しても
-      // 先のパーツ（関節や車輪）の見た目の位置が動かない
-      const outer = obj.children[0], inner = obj.children[1], endAnchor = obj.children[2];
-      if (outer) {
-        outer.geometry.dispose();
-        outer.geometry = new THREE.CylinderGeometry(0.06, 0.05, len, 14);
-        outer.position.y = -len / 2;
-      }
-      if (inner) {
-        inner.geometry.dispose();
-        inner.geometry = new THREE.CylinderGeometry(0.032, 0.032, len * 0.55, 14);
-        inner.position.y = -len * 0.78;
-      }
-      if (endAnchor && endAnchor.userData.isStrutEndAnchor) {
-        endAnchor.position.y = -len;
-      }
-    }
-  });
+  partShapeApplyGearDeploy(part.gizmo, part.props, part.props.deployState);
 }
 
 // 全展開(deployState=1)時に、脚の先端（タイヤ）が地面(Y=0)にちょうど届くよう、
@@ -450,7 +385,7 @@ function addPart(type, position) {
 
   const gizmoMesh = type === 'landing_gear'
     ? buildLandingGearHierarchy(props)
-    : createPartGizmoMesh(type, props.role, props.corners);
+    : createPartGizmoMesh(type, props.role, props.corners, props);
   const pos = position || defaultSpawnPosition();
   gizmoMesh.position.copy(pos);
   // モデルのローカル座標系の子として追加する：モデル本体の回転/拡縮に自動追従させるため
@@ -547,6 +482,11 @@ function selectPart(id) {
 // gizmoが動かされた後、part.position/rotation/scaleへ反映
 function syncPartFromGizmo(part) {
   if (!part || !part.gizmo) return;
+  // 翼に付いている舵面は、ギズモで動かしても翼の上に戻す（形は範囲と翼弦比で決める）
+  if (part.type === 'control_surface' && controlSurfaceParentWing(part)) {
+    syncControlSurfaceToWing(part);
+    return;
+  }
   part.position.x = part.gizmo.position.x;
   part.position.y = part.gizmo.position.y;
   part.position.z = part.gizmo.position.z;
@@ -556,6 +496,7 @@ function syncPartFromGizmo(part) {
   part.scale.x = part.gizmo.scale.x;
   part.scale.y = part.gizmo.scale.y;
   part.scale.z = part.gizmo.scale.z;
+  if (part.type === 'wing') syncControlSurfacesOfWing(part);
 }
 
 function applyPartToGizmo(part) {
@@ -567,6 +508,8 @@ function applyPartToGizmo(part) {
     THREE.MathUtils.degToRad(part.rotation.z)
   );
   part.gizmo.scale.set(part.scale.x, part.scale.y, part.scale.z);
+  // 翼を動かしたら、付いている舵面もついてくる（舵面の位置は翼から決まる）
+  if (part.type === 'wing') syncControlSurfacesOfWing(part);
 }
 
 // パーツをX軸反転（機体中心線=X0を挟んで鏡像）した複製を作る
@@ -601,7 +544,7 @@ function mirrorPart(id) {
 
   // 翼の4頂点もX座標を反転する（パーツ全体のミラーと整合させ、左右対称の形にするため）
   if (src.type === 'wing' && mirroredProps.corners) {
-    for (const key of WING_CORNER_KEYS) {
+    for (const key of csWingCornerKeys(mirroredProps.corners)) {
       mirroredProps.corners[key].x = -mirroredProps.corners[key].x;
     }
   }
@@ -611,7 +554,7 @@ function mirrorPart(id) {
 
   const gizmoMesh = src.type === 'landing_gear'
     ? buildLandingGearHierarchy(mirroredProps)
-    : createPartGizmoMesh(src.type, mirroredProps.role, mirroredProps.corners);
+    : createPartGizmoMesh(src.type, mirroredProps.role, mirroredProps.corners, mirroredProps);
   gizmoMesh.position.set(-src.position.x, src.position.y, src.position.z);
   // 鏡像変換：X軸まわりの回転はそのまま、Y・Z軸まわりの回転は符号反転
   gizmoMesh.rotation.set(
@@ -632,6 +575,20 @@ function mirrorPart(id) {
   };
   State.parts.push(part);
   gizmoMesh.userData.partId = newId;
+  // 舵面は、親の翼の鏡像の翼（同じ役割で左右反対にあるもの）へ付け替えてから形を合わせる
+  if (src.type === 'control_surface') {
+    const srcWing = controlSurfaceParentWing(src);
+    if (srcWing) {
+      const tol = Math.max(0.05, Math.abs(srcWing.position.x) * 0.05);
+      const twin = State.parts.find(w => w.type === 'wing' && w.id !== srcWing.id
+        && w.props.role === srcWing.props.role
+        && Math.abs(w.position.x + srcWing.position.x) <= tol
+        && Math.abs(w.position.y - srcWing.position.y) <= tol + Math.abs(srcWing.position.y) * 0.05
+        && Math.abs(w.position.z - srcWing.position.z) <= tol + Math.abs(srcWing.position.z) * 0.05);
+      if (twin) mirroredProps.parentWingId = twin.id;
+    }
+    syncControlSurfaceToWing(part);
+  }
 
   selectPart(newId);
   renderPartList();
@@ -664,7 +621,7 @@ function rebuildPartsFromSaved(savedParts) {
 
     const gizmoMesh = sp.type === 'landing_gear'
       ? buildLandingGearHierarchy(props)
-      : createPartGizmoMesh(sp.type, props.role, props.corners);
+      : createPartGizmoMesh(sp.type, props.role, props.corners, props);
     gizmoMesh.position.set(sp.position.x, sp.position.y, sp.position.z);
     gizmoMesh.rotation.set(
       THREE.MathUtils.degToRad(sp.rotation.x),
@@ -700,5 +657,21 @@ function rebuildPartsFromSaved(savedParts) {
   State.partIdCounter = maxIdNum + 1;
   State.jointIdCounter = maxJointNum + 1;
   State.strutIdCounter = maxStrutNum + 1;
+  // 舵面を親の翼から切り取った形にする（翼が後から読まれることもあるので、全部読んでから）。
+  // 大きさを持っていない旧データは、これまでと同じ効きの大きさに読み替わる。
+  // 親の翼の指定が、この機体に無い翼を指しているとき（部品を消した・別の機体から写した）は、
+  // 飛行の側と同じく、いちばん近い翼を親にする。
+  for (const p of State.parts) {
+    if (p.type !== 'control_surface' || !p.props.parentWingId || controlSurfaceParentWing(p)) continue;
+    let best = null, bestD = Infinity;
+    for (const w of State.parts) {
+      if (w.type !== 'wing' || !w.props.corners) continue;
+      const c = csWingToParent(w, wingCornersCenter(w.props.corners));
+      const d = (c.x - p.position.x) ** 2 + (c.y - p.position.y) ** 2 + (c.z - p.position.z) ** 2;
+      if (d < bestD) { bestD = d; best = w; }
+    }
+    if (best) p.props.parentWingId = best.id;
+  }
+  for (const p of State.parts) if (p.type === 'control_surface') syncControlSurfaceToWing(p);
   renderPartList();
 }
