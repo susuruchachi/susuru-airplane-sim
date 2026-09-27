@@ -15,7 +15,7 @@ function attachWingCornerHandles(part) {
   group.userData.isWingCornerHandleGroup = true;
 
   const handleMeshes = {};
-  for (const key of WING_CORNER_KEYS) {
+  for (const key of csWingCornerKeys(part.props.corners)) {   // 折れ目のある翼は6頂点
     const mesh = new THREE.Mesh(
       new THREE.SphereGeometry(0.045, 12, 12),
       new THREE.MeshStandardMaterial({
@@ -32,8 +32,8 @@ function attachWingCornerHandles(part) {
     handleMeshes[key] = mesh;
   }
 
-  // 輪郭線（rootLeading→tipLeading→tipTrailing→rootTrailing→rootLeadingの順で閉じる）
-  const lineOrder = ['rootLeading', 'tipLeading', 'tipTrailing', 'rootTrailing', 'rootLeading'];
+  // 輪郭線（付け根前縁→（折れ目前縁）→翼端前縁→翼端後縁→（折れ目後縁）→付け根後縁→付け根前縁の順で閉じる）
+  const lineOrder = wingOutlineOrder(part.props.corners);
   const linePositions = lineOrder.flatMap(key => {
     const c = part.props.corners[key];
     return [c.x, c.y, c.z];
@@ -45,7 +45,7 @@ function attachWingCornerHandles(part) {
   group.add(line);
 
   // 中心マーカー（揚力中心）
-  const center = wingCornersCenter(part.props.corners);
+  const center = wingLiftCenter(part.props.corners);
   const centerMesh = new THREE.Mesh(
     new THREE.SphereGeometry(0.035, 10, 10),
     new THREE.MeshBasicMaterial({ color: WING_CENTER_MARKER_COLOR })
@@ -69,6 +69,33 @@ function attachWingCornerHandles(part) {
   part.cornerHandleMeshes = handleMeshes;
 }
 
+// 輪郭線を引く頂点の順（折れ目があれば前縁・後縁の途中に入る）
+function wingOutlineOrder(corners) {
+  return csWingHasKink(corners)
+    ? ['rootLeading', 'kinkLeading', 'tipLeading', 'tipTrailing', 'kinkTrailing', 'rootTrailing', 'rootLeading']
+    : ['rootLeading', 'tipLeading', 'tipTrailing', 'rootTrailing', 'rootLeading'];
+}
+
+// 翼に折れ目（前縁・後縁の途中の2点）を足す。足した直後は形を変えない（前縁・後縁の直線上、翼幅の40%）ので、
+// そこから後縁の点をドラッグして折る（Boeing 747 の後縁のように）。
+const WING_KINK_DEFAULT_S = 0.4;
+function addWingKink(part) {
+  if (!part || part.type !== 'wing' || csWingHasKink(part.props.corners)) return;
+  const c = part.props.corners;
+  c.kinkLeading = csWingPoint(c, WING_KINK_DEFAULT_S, 0);
+  c.kinkTrailing = csWingPoint(c, WING_KINK_DEFAULT_S, 1);
+  attachWingCornerHandles(part);
+  onWingCornerChanged(part);
+}
+function removeWingKink(part) {
+  if (!part || part.type !== 'wing' || !csWingHasKink(part.props.corners)) return;
+  delete part.props.corners.kinkLeading;
+  delete part.props.corners.kinkTrailing;
+  if (State.selectedCornerKey && State.selectedCornerKey.startsWith('kink')) deselectWingCorner();
+  attachWingCornerHandles(part);
+  onWingCornerChanged(part);
+}
+
 function detachWingCornerHandles(part) {
   if (!part || !part.cornerHandleGroup) return;
   if (part.cornerHandleGroup.parent) part.cornerHandleGroup.parent.remove(part.cornerHandleGroup);
@@ -81,7 +108,10 @@ function detachWingCornerHandles(part) {
 // （数値入力での変更、ミラー、役割変更などcorners自体が書き換わった後に呼ぶ）
 function refreshWingCornerHandles(part) {
   if (!part || !part.cornerHandleGroup) return;
-  for (const key of WING_CORNER_KEYS) {
+  // 折れ目を足した・消したときは、ハンドルの数が変わるので作り直す
+  const keys = csWingCornerKeys(part.props.corners);
+  if (keys.length !== Object.keys(part.cornerHandleMeshes || {}).length) { attachWingCornerHandles(part); return; }
+  for (const key of keys) {
     const c = part.props.corners[key];
     const mesh = part.cornerHandleMeshes[key];
     if (mesh) mesh.position.set(c.x, c.y, c.z);
@@ -89,7 +119,7 @@ function refreshWingCornerHandles(part) {
   const group = part.cornerHandleGroup;
   const line = group.children.find(c => c.userData.isWingCornerOutline);
   if (line) {
-    const lineOrder = ['rootLeading', 'tipLeading', 'tipTrailing', 'rootTrailing', 'rootLeading'];
+    const lineOrder = wingOutlineOrder(part.props.corners);
     const linePositions = lineOrder.flatMap(key => {
       const c = part.props.corners[key];
       return [c.x, c.y, c.z];
@@ -97,7 +127,7 @@ function refreshWingCornerHandles(part) {
     line.geometry.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
     line.geometry.attributes.position.needsUpdate = true;
   }
-  const center = wingCornersCenter(part.props.corners);
+  const center = wingLiftCenter(part.props.corners);
   const centerMesh = group.children.find(c => c.userData.isWingCenterMarker);
   if (centerMesh) centerMesh.position.set(center.x, center.y, center.z);
   const cross = group.children.find(c => c.userData.isWingCenterCross);
@@ -115,6 +145,72 @@ function refreshWingCornerHandles(part) {
 function onWingCornerChanged(part) {
   updateWingGizmoShape(part);
   refreshWingCornerHandles(part);
+  syncControlSurfacesOfWing(part);
+}
+
+// ---- 舵面を親の翼から切り取る（形の計算は js/env/09e-part-proxy.js の csPanel） ----
+//
+// 舵面は親の翼の後ろ側を切り取った板。翼幅方向の範囲（spanFrom〜spanTo）と、後縁から測った
+// 翼弦の割合（chordFrac）で形が決まり、前の辺が蝶番（回転軸）になる。位置・向き・大きさは
+// **親の翼から決まる**ので、翼の頂点を動かしたり翼そのものを動かしたりすると舵面もついてくる。
+
+function controlSurfaceParentWing(csPart) {
+  const id = csPart && csPart.props && csPart.props.parentWingId;
+  const w = id ? State.parts.find(p => p.id === id) : null;
+  return (w && w.type === 'wing' && w.props && w.props.corners) ? w : null;
+}
+
+// 舵面の形・位置・向きを親の翼に合わせる。親の翼が無ければ何もしない（false）。
+function syncControlSurfaceToWing(csPart) {
+  if (!csPart || csPart.type !== 'control_surface') return false;
+  const wing = controlSurfaceParentWing(csPart);
+  if (!wing) return false;
+  const shape = csResolveShape(csPart.props, wing.props.corners);
+  // 大きさを持っていなかった旧データは、これまでと同じ効きの大きさに読み替えて書き戻す
+  csPart.props.spanFrom = shape.spanFrom;
+  csPart.props.spanTo = shape.spanTo;
+  csPart.props.chordFrac = shape.chordFrac;
+  csPart.props.spanS = (shape.spanFrom + shape.spanTo) / 2;
+  const panel = csPanel(wing.props.corners, shape);
+  // 部品の原点は蝶番の中点。向きと拡縮は翼と同じにする（板の形は翼のローカル座標で作るので）
+  const hm = csWingToParent(wing, panel.hingeMid);
+  csPart.position.x = hm.x; csPart.position.y = hm.y; csPart.position.z = hm.z;
+  csPart.rotation.x = wing.rotation.x; csPart.rotation.y = wing.rotation.y; csPart.rotation.z = wing.rotation.z;
+  csPart.scale.x = wing.scale.x; csPart.scale.y = wing.scale.y; csPart.scale.z = wing.scale.z;
+  // 蝶番の向き（この部品のローカル座標）。飛行画面の仮モデルはこの軸で回す
+  const hx = panel.hingeTip.x - panel.hingeRoot.x, hy = panel.hingeTip.y - panel.hingeRoot.y;
+  const hz = panel.hingeTip.z - panel.hingeRoot.z, hl = Math.hypot(hx, hy, hz);
+  if (hl > 1e-9) csPart.props.hingeVec = { x: hx / hl, y: hy / hl, z: hz / hl };
+  if (csPart.gizmo && csPart.gizmo.geometry) {
+    csPart.gizmo.geometry.dispose();
+    csPart.gizmo.geometry = partShapeControlSurfaceGeometry(panel, wing.props.role);
+    if (csPart.gizmo.material) { csPart.gizmo.material.side = THREE.DoubleSide; csPart.gizmo.material.needsUpdate = true; }
+  }
+  applyPartToGizmo(csPart);
+  return true;
+}
+
+// 翼に付いている舵面をまとめて合わせ直す（翼の頂点・位置・向き・大きさが変わったとき）
+function syncControlSurfacesOfWing(wingPart) {
+  if (!wingPart || wingPart.type !== 'wing') return;
+  for (const p of State.parts) {
+    if (p.type === 'control_surface' && p.props.parentWingId === wingPart.id) syncControlSurfaceToWing(p);
+  }
+}
+
+// 舵面の面積（m²）と親の翼の面積。表示用。機体まるごとの拡縮と翼の拡縮を掛けた実寸
+function controlSurfaceAreas(csPart) {
+  const wing = controlSurfaceParentWing(csPart);
+  if (!wing) return null;
+  const shape = csResolveShape(csPart.props, wing.props.corners);
+  const panel = csPanel(wing.props.corners, shape);
+  const sc = wing.scale || { x: 1, y: 1, z: 1 };
+  const ws = (Math.abs(sc.x) + Math.abs(sc.y) + Math.abs(sc.z)) / 3 || 1;
+  const k = Math.pow(ws * modelRootScale(), 2);
+  return {
+    panelM2: panel.panelArea * k, wingM2: panel.wingArea * k, stripFrac: panel.stripFrac,
+    tau: csFlapTau(shape.chordFrac), shape,
+  };
 }
 
 // ---- 頂点ハンドルの選択・ドラッグ ----
@@ -153,38 +249,7 @@ function syncWingCornerFromGizmo(part) {
 // 翼の4頂点から、任意の内部位置をバイリニア補間で求める。
 // spanS: 0=付け根(root) 〜 1=翼端(tip)、chordT: 0=前縁(leading) 〜 1=後縁(trailing)
 function wingPointAt(corners, spanS, chordT) {
-  const lerp3 = (a, b, t) => ({
-    x: a.x + (b.x - a.x) * t,
-    y: a.y + (b.y - a.y) * t,
-    z: a.z + (b.z - a.z) * t,
-  });
-  // まず付け根側・翼端側それぞれで前縁→後縁を補間し、その2点を span方向にさらに補間する
-  const rootPoint = lerp3(corners.rootLeading, corners.rootTrailing, chordT);
-  const tipPoint = lerp3(corners.tipLeading, corners.tipTrailing, chordT);
-  return lerp3(rootPoint, tipPoint, spanS);
-}
-
-// 可動翼面を「翼の後縁側1/4」の位置に自動配置する。
-// chordT=0.875（前縁から87.5%＝後縁から1/4の中心線）、spanSは指定位置（デフォルトは翼幅の中央）。
-// 新規パーツを作らず、既存のcontrol_surfaceパーツを対象翼に合わせて配置し直す用途にも使えるよう、
-// 対象パーツ(csPart)と対象翼(wingPart)、span方向の位置(spanS, 0〜1)を引数に取る
-function placeControlSurfaceAtTrailingQuarter(csPart, wingPart, spanS) {
-  if (!csPart || !wingPart || wingPart.type !== 'wing') return;
-  const chordT = 0.875; // 前縁から87.5% = 後縁から1/4の帯の中心線
-  const posOnWing = wingPointAt(wingPart.props.corners, spanS, chordT);
-
-  // wingPart側のローカル座標(位置pos基準)を、csPart側のローカル座標に変換する。
-  // 両パーツは同じ親(機体モデルroot)を共有しているため、
-  // 「wingPart.position + posOnWing(翼のローカル頂点オフセット)」が機体基準の位置になり、
-  // そこからcsPart.positionを引けば良い……のだが、可動翼面はwingPartの子ではなく兄弟なので、
-  // 単純に「機体基準の絶対位置」をそのままcsPart.positionとして設定すれば良い
-  // （wingPart.positionは翼パーツの基準点であり、corners自体がその基準点からのオフセットのため）
-  csPart.position.x = wingPart.position.x + posOnWing.x;
-  csPart.position.y = wingPart.position.y + posOnWing.y;
-  csPart.position.z = wingPart.position.z + posOnWing.z;
-  applyPartToGizmo(csPart);
-
-  csPart.props.parentWingId = wingPart.id;
+  return csWingPoint(corners, spanS, chordT);   // 折れ目のある翼にも対応（js/env/09e-part-proxy.js）
 }
 
 // 翼の役割(role)・左右位置(side)から、可動翼面の種類の初期値をそれらしく推測する
@@ -195,7 +260,7 @@ function suggestControlSurfaceKindForWing(wingPart) {
 }
 
 // 「この翼に可動翼面を追加」ボタンから呼ばれる一気通貫の処理：
-// 可動翼面パーツを新規作成し、種類を翼の役割から推測し、後縁1/4の位置に自動配置し、所属も設定する
+// 可動翼面パーツを新規作成し、種類を翼の役割から推測し、翼の後ろ側を切り取った形で置き、所属も設定する
 function addControlSurfaceToWing(wingPart) {
   if (!wingPart || wingPart.type !== 'wing') return null;
 
@@ -203,13 +268,18 @@ function addControlSurfaceToWing(wingPart) {
   const kindDef = CONTROL_SURFACE_KINDS.find(k => k.value === kind);
   const spanS = kindDef ? kindDef.suggestedSpanS : 0.78;
 
-  // 位置はいったんデフォルトのスポーン位置で作成し、直後に後縁1/4へ配置し直す
+  // 位置はいったんデフォルトのスポーン位置で作成し、直後に翼から切り取った位置へ置き直す
   const csPart = addPart('control_surface');
   if (!csPart) return null; // モデル未読込などでaddPartがnullを返した場合
 
   csPart.props.kind = kind;
+  const shape = CS_KIND_SHAPE[kind] || CS_KIND_SHAPE.aileron;
+  csPart.props.spanFrom = shape.spanFrom;
+  csPart.props.spanTo = shape.spanTo;
+  csPart.props.chordFrac = shape.chordFrac;
   csPart.props.spanS = spanS;
-  placeControlSurfaceAtTrailingQuarter(csPart, wingPart, spanS);
+  csPart.props.parentWingId = wingPart.id;
+  syncControlSurfaceToWing(csPart);
 
   const kindLabel = kindDef ? kindDef.label : kind;
   csPart.name = `${kindLabel} 1`;

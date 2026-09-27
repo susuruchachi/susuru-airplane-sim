@@ -20,6 +20,9 @@ function clearCurrentModel() {
   State.model.maxSpeedValue = 250;
   State.model.maxSpeedUnit = 'kt';
   State.model.meshOffset = { x: 0, y: 0, z: 0 };
+  State.model.boneAxisOverrides = {};
+  State.model.gearBones = {};
+  State.model.gearRig = null;
   State.cg.position = { x: 0, y: 0, z: 0 };
   if (State.cg.gizmo) hideCgGizmo();
 }
@@ -35,6 +38,10 @@ function loadModelFromArrayBuffer(arrayBuffer, fileName, fileType) {
           obj.castShadow = true;
           obj.receiveShadow = true;
         }
+        // スキン（ボーン付き）のメッシュは、画面外かどうかの判定に使う境界球が
+        // アーマチュアの変換を無視した位置にあり、実際には見えているのに消えてしまう
+        // （Boeing 747 のノーズギアがBuilderで見えなかった）。数は知れているので判定しない
+        if (obj.isSkinnedMesh) obj.frustumCulled = false;
       });
       // モデル本体のメッシュ群と、後から追加されるパーツ/重心ギズモを区別するための印。
       // 「原点を左右中心に揃える」機能で、モデル本体だけを動かすために使う
