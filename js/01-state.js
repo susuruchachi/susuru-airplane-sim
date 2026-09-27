@@ -27,6 +27,9 @@ const State = {
     // GLBのボーンで動く舵面の回転軸の手動指定。キー＝ボーン名、値＝'x'|'y'|'z'。
     // 無ければ自動判定（09c-aircraft-bones.jsが試し回転で決める）に任せる
     boneAxisOverrides: {},
+    // GLBの脚のボーンを格納するときの向き { ボーン名: { axis: 'x'|'y'|'z'|'off', deg } }。無ければ自動判定
+    gearBones: {},
+    gearRig: null,       // Builderの画面のモデルに作った脚の格納の仕掛け（保存しない）
   },
 
   // パーツ定義一覧

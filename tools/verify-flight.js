@@ -4776,5 +4776,62 @@ function autopilotFlight(opts) {
   }
 }
 
+// ---- GLBの脚のボーン・シェイプキーで脚を格納する（09c-aircraft-bones.js）----------
+// 箱の胴体（幅4m・高さ4m・長さ40m、機首が-Z）と、機首寄りに吊るした脚（長さ3.8m、
+// 付け根に「ノーズギア」の骨）を組んで、自動判定が「X軸まわりに+90°＝前へ畳む」を
+// 選ぶかを見る。横（Z軸）へ振ると胴体の幅から飛び出し、Y軸では回っても脚が下に残る。
+// 胴体は大きな三角形12枚だけ——頂点では胴体の厚みの地図が埋まらない形で試す。
+{
+  console.log('\n■ GLBの脚のボーン・シェイプキーで格納');
+  const gctx = vm.createContext({ THREE, console, Math, Number, Array, Object, JSON, Set, Map });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'js', 'env', '09c-aircraft-bones.js'), 'utf8'), gctx, { filename: '09c-aircraft-bones.js' });
+  const model = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 40), new THREE.MeshBasicMaterial());
+  body.position.set(0, 4, 0);
+  model.add(body);
+  // 脚：支柱と車輪（どちらも箱）。付け根 (0, 2.8, -14) から下へ3.8m
+  const strut = new THREE.BoxGeometry(0.3, 3.3, 0.3); strut.translate(0, 2.8 - 1.65, -14);
+  const wheel = new THREE.BoxGeometry(0.5, 1.0, 1.0); wheel.translate(0, -0.5, -14);
+  const pos = [...strut.attributes.position.array, ...wheel.attributes.position.array];
+  const idx = [...strut.index.array, ...wheel.index.array.map((i) => i + strut.attributes.position.count)];
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  const n = pos.length / 3;
+  geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(new Array(n * 4).fill(0), 4));
+  geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(Array.from({ length: n * 4 }, (_, i) => (i % 4 === 0 ? 1 : 0)), 4));
+  // シェイプキー「ギア格納」：車輪の頂点を1m持ち上げる（支柱を縮める）
+  const lift = new Float32Array(n * 3);
+  for (let i = strut.attributes.position.count; i < n; i++) lift[i * 3 + 1] = 1;
+  geo.morphAttributes.position = [new THREE.Float32BufferAttribute(lift, 3)];
+  geo.morphTargetsRelative = true;
+  const bone = new THREE.Bone(); bone.name = 'ノーズギア'; bone.position.set(0, 2.8, -14);
+  const armature = new THREE.Group(); armature.add(bone);
+  const gear = new THREE.SkinnedMesh(geo, new THREE.MeshBasicMaterial());
+  gear.morphTargetDictionary = { 'ギア格納': 0 }; gear.morphTargetInfluences = [0];
+  armature.add(gear); model.add(armature);
+  model.updateMatrixWorld(true);
+  gear.bind(new THREE.Skeleton([bone]));
+  const rig = gctx.buildAircraftGearRig([model], {}, new THREE.Vector3(0, 0, -1));
+  const g = rig && rig.gears[0];
+  note('脚の格納の自動判定', g ? `${g.axisName}軸 ${g.deg}° ／ ±90°の試し: ${g.tries.map((t) => `${t.axis}${t.deg > 0 ? '+' : ''}${t.deg}=${(t.hidden * 100).toFixed(0)}%`).join(' ')}` : 'なし');
+  check(g && g.axisName === 'x' && g.deg === 90, '脚の骨を前へ畳む向き（X軸 +90°）を選ぶ', g ? `${g.axisName} ${g.deg}` : 'なし');
+  check(g && g.tries.find((t) => t.axis === 'x' && t.deg === -90).hidden >= 0.99,
+    '後ろへ畳んでも隠れる（前へ畳むほうを選んだのは同点の決め方による）');
+  check(g && g.tries.find((t) => t.axis === 'z').hidden < 0.7, '横へ振ると胴体の外へ飛び出す（隠れない）');
+  check(rig && rig.morphs.length === 1 && rig.morphs[0].name === 'ギア格納' && !rig.morphs[0].extend, '「ギア格納」のシェイプキーを拾う');
+  check(gctx.isGearSkinnedMesh(gear), '脚の骨で動くメッシュは脚のメッシュ（その骨を舵にしない）');
+  // 上げ下げ：4秒で格納しきり、脚を下ろすと元に戻る
+  const ac = { gearRig: rig };
+  gctx.updateAircraftGearRig(ac, { gearDown: false }, 1 / 60);   // 最初は今の状態へ一気に合わせる
+  const snapUp = rig.t === 0 && gear.morphTargetInfluences[0] === 1;
+  gctx.updateAircraftGearRig(ac, { gearDown: true }, 2);
+  const half = rig.t;
+  gctx.updateAircraftGearRig(ac, { gearDown: true }, 3);
+  const q = bone.quaternion;
+  check(snapUp && Math.abs(half - 0.5) < 1e-9 && rig.t === 1 && gear.morphTargetInfluences[0] === 0 && Math.abs(q.w - 1) < 1e-9,
+    '脚の上げ下げに合わせて4秒で出し入れし、出すと骨とシェイプキーが元に戻る', `途中 t=${half}`);
+}
+
 console.log(`\n${failures === 0 ? '✅ すべて通過' : `❌ ${failures} 件の失敗`}`);
 process.exit(failures === 0 ? 0 : 1);

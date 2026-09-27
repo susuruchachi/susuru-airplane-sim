@@ -66,10 +66,11 @@ const BONE_SMOOTH_S = 0.08;      // 舵が動く速さ（実機の舵も一瞬�
 const BONE_DEADBAND_RAD = THREE.MathUtils.degToRad(0.12);
 // 名前で分かるのは「操縦桿で動かす舵ではないもの」だけ。フラップとスポイラーは
 // 別のレバーだし、脚と可変翼は舵ではない。それ以外は形と動きから決める。
+const GEAR_WORDS = ['着陸脚', '脚', 'gear', 'landing', 'ギア'];
 const BONE_WORDS = {
   flap: ['フラップ', 'flap'],
   spoiler: ['スポイラー', 'エアブレーキ', 'spoiler', 'airbrake', 'speedbrake'],
-  skip: ['着陸脚', '脚', 'gear', 'landing', '可変翼', 'sweep', 'swing', 'ギア'],
+  skip: [...GEAR_WORDS, '可変翼', 'sweep', 'swing'],
 };
 
 const _boneV = new THREE.Vector3();
@@ -134,6 +135,8 @@ function collectBoneClouds(root) {
     const pos = geo.attributes.position;
     const si = geo.attributes.skinIndex, sw = geo.attributes.skinWeight;
     if (!pos || !si || !sw || !mesh.skeleton) continue;
+    // 脚のメッシュの骨は舵ではない（isGearSkinnedMesh の説明を参照）
+    if (isGearSkinnedMesh(mesh)) continue;
     const step = Math.max(1, Math.floor(pos.count / 2000));
     for (let i = 0; i < pos.count; i += step) {
       for (let k = 0; k < 4; k++) {
@@ -455,4 +458,359 @@ function updateAircraftBones(ac, controls, dt) {
       b.bone.updateMatrixWorld(true);
     }
   }
+}
+
+// ---- 脚のボーンとシェイプキーで脚を出し入れする ------------------------------
+//
+// 脚をしまう動きをモデルに仕込んでおくと、脚の上げ下げ（G）に合わせて実際に格納する。
+// 仕込み方は「脚の付け根に**名前に脚／ギア／gear が入ったボーン**を置き、それを回すと
+// 脚が胴体へ畳まれる」＋（あれば）「脚を縮める**シェイプキー**」。ボーンの子（車輪や
+// 支柱の骨）はそのまま付いてくる。見た目だけで、飛び方（脚の抗力・接地）は
+// これまでどおりBuilderで置いた脚のパーツが決める。
+//
+// **どの軸へ何度回すとしまえるのかは、形から測って決める。** ボーンのローカル軸は
+// モデルの作り方次第で、同じノーズギアでも前へ畳むならZ軸、横へならX軸……と決まらない。
+// そこで ±90° を X/Y/Z の6通り試し、しまった脚の頂点のうち**胴体の下面より上
+// （かつ上面より下）に隠れる割合**がいちばん多い向きを選ぶ（角度もそのあと詰める。
+// scoreGearRetraction）。横へ振ると胴体の外へ
+// 飛び出し、下へ振ると下面から突き出すので、この割合がはっきり下がる。
+// 前へ畳んでも後ろへ畳んでも同じだけ隠れる（実測で Boeing 747 のノーズギアは
+// Z軸 ±90° の両方が100%）ので、そのときは**前へ畳むほう**を選ぶ。実機の旅客機の
+// ノーズギアは前へ畳む（油圧が抜けても風と重さで出てくるように）。
+// Builderの設定画面で軸と角度を手で決めることもできる（modelGearBones）。
+const GEAR_MORPH_RETRACT = ['格納', '収納', 'retract'];
+const GEAR_MORPH_EXTEND = ['展開', 'extend', 'deploy'];
+// 頂点のこの割合以上が脚の骨（とその子）で動くメッシュは「脚のメッシュ」。
+// そのメッシュに入っている骨（扉など、脚の骨の子でないものも含む）は舵として扱わない。
+// 実際、Boeing 747 のモデルではノーズギアのメッシュにある「ボーン001」「ボーン002」が
+// 形だけ見ると板なので、舵として拾われてピッチ操作で脚の一部が振れていた。
+// 割合で見るのは、機体まるごと1つのアーマチュアで作ったモデル（全メッシュの骨一覧に
+// 脚の骨が入る）で、胴体や翼まで脚扱いしないため。
+const GEAR_MESH_SHARE = 0.25;
+const GEAR_RIG_S = 4;              // 出し切る／しまい切るまでの秒数（＝ PART_PROXY_GEAR_S）
+const GEAR_DEFAULT_DEG = 90;       // 自動判定で試す角度
+const GEAR_SAMPLE = 600;           // 1本の脚で見る頂点の数
+const GEAR_AXIS_NAMES = ['x', 'y', 'z'];
+
+function nameHasAnyWord(name, words) {
+  const s = String(name || '').toLowerCase();
+  for (const w of words) if (s.indexOf(w.toLowerCase()) >= 0) return true;
+  return false;
+}
+function isGearBoneName(name) { return nameHasAnyWord(name, GEAR_WORDS); }
+
+// 骨そのもの、または親をたどって脚の骨があれば、脚の一部
+function boneInGearTree(bone) {
+  for (let b = bone; b && b.isBone; b = b.parent) if (isGearBoneName(b.name)) return true;
+  return false;
+}
+
+// その頂点をいちばん強く握っている骨（の番号）
+function dominantSkinIndex(si, sw, i) {
+  let best = si.getX(i), bw = sw.getX(i);
+  if (sw.getY(i) > bw) { bw = sw.getY(i); best = si.getY(i); }
+  if (sw.getZ(i) > bw) { bw = sw.getZ(i); best = si.getZ(i); }
+  if (sw.getW(i) > bw) { bw = sw.getW(i); best = si.getW(i); }
+  return best;
+}
+
+function isGearSkinnedMesh(mesh) {
+  if (mesh.userData.gearMeshShare === undefined) {
+    let share = 0;
+    const geo = mesh.geometry;
+    const si = geo && geo.attributes.skinIndex, sw = geo && geo.attributes.skinWeight;
+    const bones = mesh.skeleton && mesh.skeleton.bones;
+    if (si && sw && bones && bones.some(boneInGearTree)) {
+      const inTree = bones.map(boneInGearTree);
+      const step = Math.max(1, Math.floor(si.count / 4000));
+      let n = 0, hit = 0;
+      for (let i = 0; i < si.count; i += step) {
+        n++;
+        if (inTree[dominantSkinIndex(si, sw, i)]) hit++;
+      }
+      share = n ? hit / n : 0;
+    }
+    mesh.userData.gearMeshShare = share;
+  }
+  return mesh.userData.gearMeshShare >= GEAR_MESH_SHARE;
+}
+
+// シェイプキーを反映した、スキニング後のワールド位置。three.js の boneTransform は
+// シェイプキーを見ないので自前で計算する（中身は boneTransform と同じ）。
+// morphs は [{ index, w }]（そのメッシュのシェイプキーの番号と強さ）
+const _gsBase = new THREE.Vector3();
+const _gsTmp = new THREE.Vector3();
+const _gsM = new THREE.Matrix4();
+function gearSkinnedPoint(mesh, i, morphs, target) {
+  const geo = mesh.geometry;
+  const pos = geo.attributes.position;
+  _gsBase.fromBufferAttribute(pos, i);
+  const mp = geo.morphAttributes && geo.morphAttributes.position;
+  if (mp && morphs) {
+    for (const m of morphs) {
+      if (!m.w || !mp[m.index]) continue;
+      _gsTmp.fromBufferAttribute(mp[m.index], i);
+      if (!geo.morphTargetsRelative) _gsTmp.x -= pos.getX(i), _gsTmp.y -= pos.getY(i), _gsTmp.z -= pos.getZ(i);
+      _gsBase.addScaledVector(_gsTmp, m.w);
+    }
+  }
+  if (!mesh.isSkinnedMesh) return target.copy(_gsBase).applyMatrix4(mesh.matrixWorld);
+  const si = geo.attributes.skinIndex, sw = geo.attributes.skinWeight;
+  const bones = mesh.skeleton.bones, inv = mesh.skeleton.boneInverses;
+  _gsBase.applyMatrix4(mesh.bindMatrix);
+  target.set(0, 0, 0);
+  for (let k = 0; k < 4; k++) {
+    const w = k === 0 ? sw.getX(i) : k === 1 ? sw.getY(i) : k === 2 ? sw.getZ(i) : sw.getW(i);
+    if (!w) continue;
+    const bi = k === 0 ? si.getX(i) : k === 1 ? si.getY(i) : k === 2 ? si.getZ(i) : si.getW(i);
+    _gsM.multiplyMatrices(bones[bi].matrixWorld, inv[bi]);
+    target.addScaledVector(_gsTmp.copy(_gsBase).applyMatrix4(_gsM), w);
+  }
+  return target.applyMatrix4(mesh.bindMatrixInverse).applyMatrix4(mesh.matrixWorld);
+}
+
+// 脚の周りの「胴体の厚み」の地図。上から見た升目ごとに、脚以外のメッシュの
+// いちばん低い面（下面）と高い面（上面）の高さを覚える。上は+Y（Builderも飛行側も同じ）。
+// **頂点ではなく三角形で塗る。** 胴体は大きな三角形でできていて、升目の中に頂点が
+// 1つも無いことがふつうにある（Boeing 747 の胴体下面で、0.1m角の升目のほとんどが空だった）。
+// 頂点だけで作ると、その升目では脚が「どこにも隠れていない」ことになる
+function gearHullMap(meshes, bounds, cell) {
+  const nx = Math.max(1, Math.ceil((bounds.maxX - bounds.minX) / cell));
+  const nz = Math.max(1, Math.ceil((bounds.maxZ - bounds.minZ) / cell));
+  const lo = new Float32Array(nx * nz).fill(Infinity);
+  const hi = new Float32Array(nx * nz).fill(-Infinity);
+  const p = new THREE.Vector3();
+  for (const mesh of meshes) {
+    const pos = mesh.geometry.attributes.position;
+    const idx = mesh.geometry.index;
+    // いまの姿勢でのワールド位置（スキンは骨を通す）
+    const w = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+      if (mesh.isSkinnedMesh) { mesh.boneTransform(i, p); p.applyMatrix4(mesh.matrixWorld); }
+      else p.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+      w[i * 3] = p.x; w[i * 3 + 1] = p.y; w[i * 3 + 2] = p.z;
+    }
+    const triCount = idx ? idx.count / 3 : pos.count / 3;
+    for (let t = 0; t < triCount; t++) {
+      const a = idx ? idx.getX(t * 3) : t * 3, b = idx ? idx.getX(t * 3 + 1) : t * 3 + 1, c = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+      const ax = w[a * 3], ay = w[a * 3 + 1], az = w[a * 3 + 2];
+      const bx = w[b * 3], by = w[b * 3 + 1], bz = w[b * 3 + 2];
+      const cx = w[c * 3], cy = w[c * 3 + 1], cz = w[c * 3 + 2];
+      const x0 = Math.floor((Math.min(ax, bx, cx) - bounds.minX) / cell), x1 = Math.floor((Math.max(ax, bx, cx) - bounds.minX) / cell);
+      const z0 = Math.floor((Math.min(az, bz, cz) - bounds.minZ) / cell), z1 = Math.floor((Math.max(az, bz, cz) - bounds.minZ) / cell);
+      if (x1 < 0 || z1 < 0 || x0 >= nx || z0 >= nz) continue;
+      const det = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+      const mark = (k, y) => { if (y < lo[k]) lo[k] = y; if (y > hi[k]) hi[k] = y; };
+      if (Math.abs(det) < 1e-12) {
+        // 真上から見て線になる（垂直な）三角形は、頂点の高さだけ入れる
+        for (const [x, y, z] of [[ax, ay, az], [bx, by, bz], [cx, cy, cz]]) {
+          const ix = Math.floor((x - bounds.minX) / cell), iz = Math.floor((z - bounds.minZ) / cell);
+          if (ix >= 0 && iz >= 0 && ix < nx && iz < nz) mark(iz * nx + ix, y);
+        }
+        continue;
+      }
+      for (let iz = Math.max(z0, 0); iz <= Math.min(z1, nz - 1); iz++) {
+        const pz = bounds.minZ + (iz + 0.5) * cell;
+        for (let ix = Math.max(x0, 0); ix <= Math.min(x1, nx - 1); ix++) {
+          const px = bounds.minX + (ix + 0.5) * cell;
+          const l1 = ((bz - cz) * (px - cx) + (cx - bx) * (pz - cz)) / det;
+          const l2 = ((cz - az) * (px - cx) + (ax - cx) * (pz - cz)) / det;
+          const l3 = 1 - l1 - l2;
+          if (l1 < 0 || l2 < 0 || l3 < 0) continue;
+          mark(iz * nx + ix, l1 * ay + l2 * by + l3 * cy);
+        }
+      }
+    }
+  }
+  return {
+    // その点が胴体（翼）の厚みの中に隠れているか
+    hidden(q, tol) {
+      const ix = Math.floor((q.x - bounds.minX) / cell), iz = Math.floor((q.z - bounds.minZ) / cell);
+      if (ix < 0 || iz < 0 || ix >= nx || iz >= nz) return false;
+      const k = iz * nx + ix;
+      return q.y >= lo[k] - tol && q.y <= hi[k] + tol;
+    },
+    // 下面からどれだけ下に突き出しているか（隠れていれば0、升目に何も無ければ null）
+    below(q) {
+      const ix = Math.floor((q.x - bounds.minX) / cell), iz = Math.floor((q.z - bounds.minZ) / cell);
+      if (ix < 0 || iz < 0 || ix >= nx || iz >= nz) return null;
+      const k = iz * nx + ix;
+      return lo[k] === Infinity ? null : Math.max(lo[k] - q.y, 0);
+    },
+  };
+}
+
+// 脚の骨を回して、いちばんよく隠れる向きと角度を選ぶ。
+//   1) ±90° を X/Y/Z の6通り試して、軸と回す向きを決める
+//   2) その軸・向きのまま角度を GEAR_SCAN_DEG の範囲で刻んで、いちばん隠れる角度にする
+//      （同じだけ隠れるなら90°にいちばん近いもの）
+// 2) が要るのは、ちょうど90°で収まるとは限らないから。実測で Boeing 747 の
+// ノーズギアは、90°では車輪の下が胴体から0.21m はみ出し（脚の頂点の0.5%）、
+// 95°で全部隠れた。
+const GEAR_SCAN_DEG = [45, 150, 5];   // 角度を刻む範囲（下限・上限・刻み）
+function scoreGearRetraction(gear, hullMeshes, noseDir) {
+  const { bone, items, morphsByMesh } = gear;
+  // 「展開」のシェイプキーは出した姿勢で1、「格納」は しまった姿勢で1
+  const morphsAt = (mesh, r) => (morphsByMesh.get(mesh) || []).map((m) => ({ index: m.index, w: m.extend ? 1 - r : r }));
+  const down = items.map((it) => gearSkinnedPoint(it.mesh, it.idx, morphsAt(it.mesh, 0), new THREE.Vector3()));
+  const box = new THREE.Box3().setFromPoints(down);
+  const size = box.getSize(new THREE.Vector3());
+  const L = Math.max(size.x, size.y, size.z, 1e-3);
+  const bounds = { minX: box.min.x - 1.5 * L, maxX: box.max.x + 1.5 * L, minZ: box.min.z - 1.5 * L, maxZ: box.max.z + 1.5 * L };
+  const map = gearHullMap(hullMeshes, bounds, L / 20);
+  const tol = L * 0.01;
+  const rest = bone.quaternion.clone();
+  const q = new THREE.Vector3();
+  const measure = (ai, deg) => {
+    bone.quaternion.copy(rest).multiply(_boneQ.setFromAxisAngle(BONE_TEST_AXES[ai], THREE.MathUtils.degToRad(deg)));
+    bone.updateMatrixWorld(true);
+    let hid = 0, minY = Infinity, fwd = 0;
+    for (let k = 0; k < items.length; k++) {
+      gearSkinnedPoint(items[k].mesh, items[k].idx, morphsAt(items[k].mesh, 1), q);
+      if (map.hidden(q, tol)) hid++;
+      if (q.y < minY) minY = q.y;
+      if (noseDir) fwd += _boneV.copy(q).sub(down[k]).dot(noseDir);
+    }
+    return {
+      axis: GEAR_AXIS_NAMES[ai], deg, hidden: hid / items.length,
+      rise: (minY - box.min.y) / L,             // いちばん下の点が上がった量（脚の長さ比）
+      forward: fwd / items.length / L,          // 前へ動いた量（脚の長さ比）
+    };
+  };
+  const tries = [];
+  for (let ai = 0; ai < 3; ai++) for (const sgn of [1, -1]) tries.push(measure(ai, sgn * GEAR_DEFAULT_DEG));
+  // 隠れる割合がいちばん多い向き。同じくらい（2%以内）なら前へ畳むほう、
+  // 機首の向きを渡されていなければ下の点がより上がるほう
+  const top = Math.max(...tries.map((t) => t.hidden));
+  const tie = (t) => t.hidden >= top - 0.02;
+  tries.sort((a, b) => {
+    if (tie(a) !== tie(b)) return tie(a) ? -1 : 1;
+    if (!tie(a)) return b.hidden - a.hidden;
+    return noseDir ? b.forward - a.forward : b.rise - a.rise;
+  });
+  // 角度を詰める
+  const first = tries[0];
+  const ai = GEAR_AXIS_NAMES.indexOf(first.axis), sgn = Math.sign(first.deg);
+  const scan = [];
+  for (let d = GEAR_SCAN_DEG[0]; d <= GEAR_SCAN_DEG[1]; d += GEAR_SCAN_DEG[2]) scan.push(measure(ai, sgn * d));
+  const scanTop = Math.max(...scan.map((t) => t.hidden));
+  let best = null;
+  for (const t of scan) {
+    // 1点でもはみ出す角度は採らない（はみ出すのはたいてい車輪の下の縁で、
+    // 見る頂点600のうち1〜2点でも、実際に0.2mほど胴体の外に見える）
+    if (t.hidden < scanTop) continue;
+    if (!best || Math.abs(Math.abs(t.deg) - GEAR_DEFAULT_DEG) < Math.abs(Math.abs(best.deg) - GEAR_DEFAULT_DEG)) best = t;
+  }
+  bone.quaternion.copy(rest);
+  bone.updateMatrixWorld(true);
+  return { tries, scan, best: best || first };
+}
+
+// 脚の骨とシェイプキーを拾って、出し入れの仕掛けを作る。
+// meshRoots … モデルのメッシュが入っている入れ物の一覧（Builderのギズモや飛行側の灯りを
+//             胴体の厚みの地図に混ぜないため、モデルそのものだけを渡す）
+// settings  … Builderで手で決めた向き { ボーン名: { axis: 'x'|'y'|'z'|'off', deg } }
+// noseDir   … 機首の向き（ワールド）。分からなければ null
+// 行列はこの時点のワールドで測る（上が+Yであればよい）
+function buildAircraftGearRig(meshRoots, settings, noseDir) {
+  if (typeof THREE === 'undefined' || !meshRoots) return null;
+  const meshes = [];
+  for (const r of meshRoots) if (r) r.traverse((o) => { if (o.isMesh && o.geometry && o.geometry.attributes.position) meshes.push(o); });
+  for (const r of meshRoots) if (r) r.updateMatrixWorld(true);
+
+  // 脚の骨：名前に脚の言葉が入っていて、親に脚の骨が無いもの（子の骨は付いてくるだけ）
+  const gearBones = [];
+  for (const m of meshes) {
+    if (!m.isSkinnedMesh || !m.skeleton) continue;
+    for (const b of m.skeleton.bones) {
+      if (!isGearBoneName(b.name) || gearBones.indexOf(b) >= 0) continue;
+      let p = b.parent, nested = false;
+      for (; p && p.isBone; p = p.parent) if (isGearBoneName(p.name)) nested = true;
+      if (!nested) gearBones.push(b);
+    }
+  }
+
+  // 脚のシェイプキー：名前に脚の言葉か「格納／展開」が入ったもの
+  const morphs = [];
+  const morphsByMesh = new Map();
+  for (const m of meshes) {
+    const dict = m.morphTargetDictionary;
+    if (!dict || !m.morphTargetInfluences) continue;
+    for (const name of Object.keys(dict)) {
+      const extend = nameHasAnyWord(name, GEAR_MORPH_EXTEND);
+      if (!extend && !nameHasAnyWord(name, GEAR_WORDS) && !nameHasAnyWord(name, GEAR_MORPH_RETRACT)) continue;
+      const e = { mesh: m, index: dict[name], name, extend };
+      morphs.push(e);
+      if (!morphsByMesh.has(m)) morphsByMesh.set(m, []);
+      morphsByMesh.get(m).push(e);
+    }
+  }
+  if (!gearBones.length && !morphs.length) return null;
+
+  const hullMeshes = meshes.filter((m) => !(m.isSkinnedMesh && isGearSkinnedMesh(m)));
+  const gears = [];
+  for (const bone of gearBones) {
+    // その脚の骨（と子）が主に動かす頂点
+    const tree = new Set();
+    bone.traverse((o) => { if (o.isBone) tree.add(o); });
+    const items = [];
+    for (const m of meshes) {
+      if (!m.isSkinnedMesh || !m.skeleton) continue;
+      const si = m.geometry.attributes.skinIndex, sw = m.geometry.attributes.skinWeight;
+      if (!si || !sw) continue;
+      const inTree = m.skeleton.bones.map((b) => tree.has(b));
+      if (!inTree.some(Boolean)) continue;
+      for (let i = 0; i < si.count; i++) if (inTree[dominantSkinIndex(si, sw, i)]) items.push({ mesh: m, idx: i });
+    }
+    if (!items.length) continue;
+    const step = items.length / GEAR_SAMPLE;
+    const sample = step > 1 ? Array.from({ length: GEAR_SAMPLE }, (_, k) => items[Math.floor(k * step)]) : items;
+    const gear = { bone, name: bone.name, rest: bone.quaternion.clone(), items: sample, morphsByMesh };
+    const scored = scoreGearRetraction(gear, hullMeshes, noseDir || null);
+    gear.tries = scored.tries;
+    gear.scan = scored.scan;
+    gear.auto = scored.best;
+    const s = settings && settings[bone.name];
+    const manual = s && (s.axis === 'off' || GEAR_AXIS_NAMES.indexOf(s.axis) >= 0);
+    const axisName = manual ? s.axis : gear.auto.axis;
+    const deg = manual && Number.isFinite(Number(s.deg)) ? Number(s.deg) : gear.auto.deg;
+    gear.axisName = axisName;
+    gear.deg = axisName === 'off' ? 0 : deg;
+    gear.axis = axisName === 'off' ? BONE_TEST_AXES[0].clone() : BONE_TEST_AXES[GEAR_AXIS_NAMES.indexOf(axisName)].clone();
+    gear.rad = THREE.MathUtils.degToRad(gear.deg);
+    delete gear.items;   // 測り終わったら要らない
+    delete gear.morphsByMesh;
+    gears.push(gear);
+  }
+  return { gears, morphs, t: null, appliedR: null };
+}
+
+// 格納の進み具合 r（0＝出ている／1＝しまった）の姿勢にする。
+// 先に脚を縮め（シェイプキー）、縮みきる前から回し始める
+function applyGearRigPose(rig, r) {
+  if (!rig) return;
+  const morphW = THREE.MathUtils.smoothstep(r, 0, 0.4);
+  const rotW = THREE.MathUtils.smoothstep(r, 0.15, 1);
+  for (const g of rig.gears) {
+    g.bone.quaternion.copy(g.rest).multiply(_boneQ.setFromAxisAngle(g.axis, g.rad * rotW));
+    // 飛行側では骨がシーンの外（localizeSkeletons の入れ物）にいるので自分で作り直す
+    g.bone.updateMatrixWorld(true);
+  }
+  for (const m of rig.morphs) m.mesh.morphTargetInfluences[m.index] = m.extend ? 1 - morphW : morphW;
+  rig.appliedR = r;
+}
+
+// 毎フレーム。脚の上げ下げに合わせて GEAR_RIG_S 秒かけて出し入れする。
+// 最初の1回は今の状態へ一気に合わせる（空中から始めたとき脚をしまうところから見せない）
+function updateAircraftGearRig(ac, controls, dt) {
+  const rig = ac && ac.gearRig;
+  if (!rig) return;
+  const want = controls.gearDown ? 1 : 0;
+  if (rig.t === null) rig.t = want;
+  else {
+    const step = dt / GEAR_RIG_S;
+    rig.t += THREE.MathUtils.clamp(want - rig.t, -step, step);
+  }
+  const r = 1 - rig.t;
+  if (r !== rig.appliedR) applyGearRigPose(rig, r);
 }

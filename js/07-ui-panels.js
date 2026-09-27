@@ -19,6 +19,7 @@ function renderModelSettingsPanel() {
   };
   const scl = root.scale;
   const boneCandidates = typeof listBoneAxisCandidates === 'function' ? listBoneAxisCandidates(root) : [];
+  refreshBuilderGearRig();
 
   container.innerHTML = `
     <div class="subgroup-title">原点の調整</div>
@@ -72,6 +73,7 @@ function renderModelSettingsPanel() {
     <div class="hint" id="maxSpeedConverted"></div>
 
     ${boneAxisSectionHtml(boneCandidates)}
+    ${gearRigSectionHtml(State.model.gearRig)}
 
     ${typeof engineFleetPanelHtml === 'function' ? engineFleetPanelHtml() : ''}
   `;
@@ -95,6 +97,8 @@ function renderModelSettingsPanel() {
       else delete State.model.boneAxisOverrides[name];
     });
   });
+
+  bindGearRigSection(container);
 
   document.getElementById('btnCenterModelOnAxis').addEventListener('click', () => {
     // パーツは動かさないため、既に配置済みの場合は相対位置がずれる旨を確認する
@@ -191,6 +195,100 @@ function boneAxisSectionHtml(candidates) {
     <div class="hint" style="margin-bottom:8px;">GLBに仕込まれたボーンで動く舵面の一覧です。ふだんは板の形と試し動作から回転軸を自動で決めますが、輪郭が歪む・変な向きに振れるなど自動判定が合わないときは、ここでボーンのローカルX/Y/Z軸を指定して固定できます。</div>
     ${rows}
   `;
+}
+
+// GLBの脚のボーン・シェイプキー（09c-aircraft-bones.js）。格納する向きを測り直して、
+// Builderの画面のモデルに仕掛けを作る。格納のプレビュー中なら、出した姿勢に戻してから測る
+// （しまった姿勢のまま測ると、そこからさらに90°回す向きを探してしまう）
+function refreshBuilderGearRig() {
+  const root = State.model.root;
+  if (State.model.gearRig) applyGearRigPose(State.model.gearRig, 0);
+  State.model.gearRig = null;
+  if (!root || typeof buildAircraftGearRig !== 'function') return null;
+  root.updateMatrixWorld(true);
+  const roots = root.children.filter((c) => c.userData.isModelMeshRoot);
+  // 機首の向きは主翼から読む（飛行側の qFix と同じ）。主翼がまだ無ければ、飛行側と
+  // 同じく -Z を前とみなす——こうしておけば、Builderに出る判定と飛んだときの向きが食い違わない
+  const nose = (typeof pbNoseDirection === 'function' && pbNoseDirection(true)) || new THREE.Vector3(0, 0, -1);
+  State.model.gearRig = buildAircraftGearRig(roots, State.model.gearBones, nose);
+  return State.model.gearRig;
+}
+
+const GEAR_AXIS_LABELS = { x: 'X軸', y: 'Y軸', z: 'Z軸' };
+function gearDegLabel(deg) { return `${deg > 0 ? '+' : ''}${Math.round(deg)}°`; }
+function gearRigSectionHtml(rig) {
+  if (!rig || (!rig.gears.length && !rig.morphs.length)) return '';
+  const rows = rig.gears.map((g) => `
+    <div class="field">
+      <label>${escapeHtml(g.name)}</label>
+      <div style="display:flex;gap:6px;">
+        <select class="fGearAxis" data-bone="${escapeHtml(g.name)}" style="flex:1;">
+          <option value="">自動判定（いまは${GEAR_AXIS_LABELS[g.auto.axis]} ${gearDegLabel(g.auto.deg)}）</option>
+          <option value="x">X軸で回す</option>
+          <option value="y">Y軸で回す</option>
+          <option value="z">Z軸で回す</option>
+          <option value="off">回さない</option>
+        </select>
+        <input type="text" inputmode="decimal" class="fGearDeg" data-bone="${escapeHtml(g.name)}" value="${Math.round(g.deg)}" style="flex:0 0 auto;width:64px;" title="格納するときに回す角度（度）">
+      </div>
+    </div>
+  `).join('');
+  const morphNames = [...new Set(rig.morphs.map((m) => `${m.name}（${m.extend ? '出すと1' : 'しまうと1'}）`))];
+  return `
+    <div class="subgroup-title">脚のボーン（格納）</div>
+    <div class="hint" style="margin-bottom:8px;">名前に「脚」「ギア」「gear」が入ったボーンを回して、脚の上げ下げ（G）で脚を胴体へしまいます。回す軸と向きは、しまった脚が胴体の中にいちばんよく隠れるものを自動で選びます。合わないときは軸と角度（度・右の欄）を指定してください。</div>
+    ${rows}
+    ${morphNames.length ? `<div class="hint" style="margin:-2px 0 8px;">一緒に動かすシェイプキー：${morphNames.map(escapeHtml).join('、')}</div>` : ''}
+    <div class="field">
+      <label>格納のプレビュー <span id="gearPreviewReadout" style="color:var(--text-dim);">出ている</span></label>
+      <input type="range" id="fGearPreview" min="0" max="1" step="0.01" value="0">
+    </div>
+  `;
+}
+
+function bindGearRigSection(container) {
+  const preview = document.getElementById('fGearPreview');
+  if (!preview) return;
+  const readout = document.getElementById('gearPreviewReadout');
+  const showPreview = () => {
+    const r = parseFloat(preview.value) || 0;
+    applyGearRigPose(State.model.gearRig, r);
+    readout.textContent = r <= 0 ? '出ている' : r >= 1 ? 'しまった' : `${Math.round(r * 100)}%`;
+  };
+  // 設定を変えたら測り直して、プレビューの姿勢をかけ直す
+  const rebuild = () => {
+    refreshBuilderGearRig();
+    showPreview();
+  };
+  preview.addEventListener('input', showPreview);
+  const gearOf = (name) => State.model.gearRig && State.model.gearRig.gears.find((g) => g.name === name);
+  container.querySelectorAll('.fGearAxis').forEach((sel) => {
+    const name = sel.dataset.bone;
+    const s = State.model.gearBones[name];
+    sel.value = s && s.axis ? s.axis : '';
+    sel.addEventListener('change', () => {
+      const degInput = container.querySelector(`.fGearDeg[data-bone="${CSS.escape(name)}"]`);
+      if (!sel.value) delete State.model.gearBones[name];
+      else State.model.gearBones[name] = { axis: sel.value, deg: parseFloat(degInput.value) || 90 };
+      rebuild();
+      const g = gearOf(name);
+      if (g && !sel.value) degInput.value = Math.round(g.deg);
+    });
+  });
+  container.querySelectorAll('.fGearDeg').forEach((input) => {
+    const name = input.dataset.bone;
+    input.addEventListener('change', () => {
+      const v = parseFloat(input.value);
+      const g = gearOf(name);
+      if (!Number.isFinite(v) || !g) { input.value = g ? Math.round(g.deg) : 90; return; }
+      // 自動判定のまま角度だけ変えたら、そのとき選ばれていた軸で固定する
+      const sel = container.querySelector(`.fGearAxis[data-bone="${CSS.escape(name)}"]`);
+      const axis = sel.value || g.auto.axis;
+      State.model.gearBones[name] = { axis, deg: v };
+      sel.value = axis;
+      rebuild();
+    });
+  });
 }
 
 // 入力された最高速度を、もう片方の単位に目安換算して表示する（音速は高度により変わるため海面高度の目安値を使用）

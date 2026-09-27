@@ -321,6 +321,11 @@ async function createAircraft(config, cgOverride) {
   // 灯りの向きを決める。入れ物の向きを読むので、行列を作ってから。
   group.updateMatrixWorld(true);
 
+  // GLBに脚のボーン・シェイプキーが入っていれば、脚の上げ下げで格納する（09c-aircraft-bones.js）。
+  // 舵のボーン（下）より先に作る——舵のほうは骨をシーンの外へ移す（localizeSkeletons）ので、
+  // その前の、機体座標（上が+Y・機首が-Z）で測れるうちに向きを決める。
+  const gearRig = source === 'builder' && typeof buildAircraftGearRig === 'function'
+    ? buildAircraftGearRig([visual], config.modelGearBones, new THREE.Vector3(0, 0, -1)) : null;
   // GLBに舵のボーンが入っていれば拾う。**ここで行列が機体座標**（重心が原点・
   // 機首が-Z）になっているので、この姿勢のまま測ればモーメントの向きがそのまま出る。
   const bones = typeof buildAircraftBones === 'function' ? buildAircraftBones(group, visual, config.modelBoneAxisOverrides) : [];
@@ -357,7 +362,7 @@ async function createAircraft(config, cgOverride) {
 
   return {
     model, group, orient, modelRoot, modelXform, visual, lights, landingPool,
-    plumes, boom, contrail, smoke, tyreSmoke, fx: contrail.group, bones, hull, proxies,
+    plumes, boom, contrail, smoke, tyreSmoke, fx: contrail.group, bones, gearRig, hull, proxies,
     source,
     name: config.name || (source === 'builder' ? '機体' : '内蔵の練習機'),
     mainRotor: visual.userData ? visual.userData.mainRotor : null,
@@ -2300,6 +2305,8 @@ function updateAircraftVisual(ac, controls, state, dt, elapsed) {
 
   // GLBに舵のボーンがあれば、操縦に合わせて振る（09c-aircraft-bones.js）
   if (typeof updateAircraftBones === 'function') updateAircraftBones(ac, controls, dt);
+  // GLBの脚のボーン・シェイプキーで脚を出し入れする（同上）
+  if (typeof updateAircraftGearRig === 'function') updateAircraftGearRig(ac, controls, dt);
   // 仮モデルの脚の上げ下げと舵面（09e-part-proxy.js）
   if (typeof updatePartProxies === 'function') updatePartProxies(ac, controls, dt);
 

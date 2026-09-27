@@ -105,6 +105,7 @@ function buildCurrentRecord(configName) {
     modelMaxSpeedUnit: State.model.maxSpeedUnit,
     modelMeshOffset: { ...State.model.meshOffset },
     modelBoneAxisOverrides: { ...State.model.boneAxisOverrides },
+    modelGearBones: JSON.parse(JSON.stringify(State.model.gearBones || {})),
   };
 }
 
